@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": ["**/dist/**", "**/node_modules/**"],
+  "semi": true,
+  "singleQuote": true,
+  "proseWrap": "always",
+  "overrides": [
+    {
+      "files": ["**/*.md"],
+      "options": {
+        "printWidth": 80
+      }
+    }
+  ]
+}

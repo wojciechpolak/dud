@@ -1,0 +1,22 @@
+{
+  "name": "dud",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discreet upload / download with a Cloudflare Worker and a Dockerized curl client.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "docker:build": "./scripts/docker-build.sh",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint .",
+    "check": "npm run format:check && npm run lint && npm test",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.45.0",
+    "oxlint": "^1.60.0",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.60.0"
+  }
+}
