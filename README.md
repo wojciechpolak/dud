@@ -162,7 +162,7 @@ Response:
 
 ```json
 {
-  "id": "opaque-random-id",
+  "id": "3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe",
   "expiresAt": "2026-04-19T12:00:00.000Z",
   "deleteAfterRead": false
 }
@@ -171,6 +171,9 @@ Response:
 ### `GET /v1/files/:id`
 
 Streams ciphertext back when the file is still available.
+
+The download endpoint accepts the file ID either as dashed groups of four
+characters or as the original raw 32-character lowercase hex string.
 
 - `404`: unknown ID
 - `410`: expired or already consumed
@@ -313,7 +316,7 @@ The upload response will look like this:
 
 ```json
 {
-  "id": "3df75d5c0c3b4f53ac1b8eeb23704fbe",
+  "id": "3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe",
   "expiresAt": "2026-04-20T12:00:00.000Z",
   "deleteAfterRead": false
 }
@@ -334,12 +337,13 @@ docker run --rm -it \
   -e DUD_BASE_URL=https://dud.example.com \
   -v "$PWD:/work" \
   ghcr.io/wojciechpolak/dud/dud-client:latest download \
-  --id 3df75d5c0c3b4f53ac1b8eeb23704fbe \
+  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
   --out /work/received-secret.pdf
 ```
 
 The client downloads ciphertext from the Worker, prompts for the passphrase, and
-writes the decrypted file to `/work/received-secret.pdf`.
+writes the decrypted file to `/work/received-secret.pdf`. It accepts the file ID
+with or without dashes.
 
 You do not run `age` separately on the host after download. The Docker client
 container performs `age --decrypt` internally and writes the plaintext output to

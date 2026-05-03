@@ -9,3 +9,24 @@ export function generateOpaqueId(): string {
     '',
   );
 }
+
+export function normalizeOpaqueId(id: string): string {
+  return id.replaceAll('-', '');
+}
+
+export function isOpaqueId(id: string): boolean {
+  return /^[0-9a-f]{32}$/.test(id);
+}
+
+export function parseOpaqueId(id: string): string | null {
+  const normalized = normalizeOpaqueId(id);
+  return isOpaqueId(normalized) ? normalized : null;
+}
+
+export function formatOpaqueId(id: string): string {
+  if (!isOpaqueId(id)) {
+    return id;
+  }
+
+  return id.match(/.{1,4}/g)?.join('-') ?? id;
+}
