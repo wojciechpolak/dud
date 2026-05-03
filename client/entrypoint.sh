@@ -10,6 +10,7 @@ DUD_ECH_MODE="${DUD_ECH_MODE:-hard}"
 DUD_SECRET_TOKEN="${DUD_SECRET_TOKEN:-}"
 DUD_CURL_BIN="${DUD_CURL_BIN:-curl}"
 DUD_AGE_BIN="${DUD_AGE_BIN:-age}"
+DUD_QRENCODE_BIN="${DUD_QRENCODE_BIN:-qrencode}"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -47,6 +48,10 @@ run_secure_curl() {
     "$@"
 }
 
+UPLOAD_ID=""
+UPLOAD_EXPIRES_AT=""
+UPLOAD_DELETE_AFTER_READ_LABEL=""
+
 upload_json_string_field() {
   field="$1"
   response_file="$2"
@@ -65,7 +70,7 @@ upload_json_boolean_field() {
     | head -n 1
 }
 
-print_upload_response() {
+load_upload_response() {
   response_file="$1"
 
   id="$(upload_json_string_field id "$response_file")"
@@ -87,10 +92,21 @@ print_upload_response() {
       ;;
   esac
 
+  UPLOAD_ID="$id"
+  UPLOAD_EXPIRES_AT="$expires_at"
+  UPLOAD_DELETE_AFTER_READ_LABEL="$delete_after_read_label"
+}
+
+print_upload_response() {
   printf 'Upload complete\n'
-  printf 'ID: %s\n' "$id"
-  printf 'Expires: %s\n' "$expires_at"
-  printf 'Delete after read: %s\n' "$delete_after_read_label"
+  printf 'ID: %s\n' "$UPLOAD_ID"
+  printf 'Expires: %s\n' "$UPLOAD_EXPIRES_AT"
+  printf 'Delete after read: %s\n' "$UPLOAD_DELETE_AFTER_READ_LABEL"
+}
+
+print_upload_qr() {
+  printf '\nQR Code:\n'
+  "$DUD_QRENCODE_BIN" -t ansiutf8 "$UPLOAD_ID"
 }
 
 print_test_details() {
@@ -185,6 +201,7 @@ cmd_upload() {
   delete_after_read="false"
   base_url="$DUD_BASE_URL"
   output_json="false"
+  output_qr="true"
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -204,6 +221,10 @@ cmd_upload() {
         ;;
       --json)
         output_json="true"
+        shift 1
+        ;;
+      --no-qr)
+        output_qr="false"
         shift 1
         ;;
       --url)
@@ -248,7 +269,11 @@ cmd_upload() {
     return
   fi
 
-  print_upload_response "$response_file"
+  load_upload_response "$response_file"
+  print_upload_response
+  if [ "$output_qr" = "true" ]; then
+    print_upload_qr
+  fi
 }
 
 cmd_download() {
@@ -331,7 +356,7 @@ usage() {
   cat <<'EOF'
 Usage:
   dud test [--url URL] [--doh-url URL]
-  dud upload --file PATH [--ttl 24h] [--delete-after-read] [--json] [--url URL] [--doh-url URL]
+  dud upload --file PATH [--ttl 24h] [--delete-after-read] [--json] [--no-qr] [--url URL] [--doh-url URL]
   dud download --id ID --out PATH [--url URL] [--doh-url URL]
   dud flush [--url URL] [--doh-url URL]
   dud install        Print a host wrapper script to stdout

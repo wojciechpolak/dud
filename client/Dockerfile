@@ -80,6 +80,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     age \
     ca-certificates \
+    qrencode \
     tini \
   && rm -rf /var/lib/apt/lists/*
 

@@ -241,12 +241,19 @@ docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -v "$PWD:/work" ghcr
 docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN ghcr.io/wojciechpolak/dud/dud-client:latest flush
 ```
 
-`upload` prints a human-friendly summary by default. For scripts or other
+`upload` prints a human-friendly summary and a terminal QR code for the returned
+ID by default. Add `--no-qr` to suppress the QR block. For scripts or other
 machine-readable use cases, add `--json` to print the raw upload response.
+
+When you run `dud` with no command in an interactive terminal, it opens a small
+menu for `test`, `upload`, `download`, and `flush`. If stdin is not a TTY, it
+prints usage information and exits instead.
 
 > **Security note**: `--tmpfs /tmp` keeps sensitive intermediate files
 > (encrypted payloads, TLS traces) in memory only — they never reach the
 > container's overlay filesystem and are gone when the container exits.
+
+### Shell alias
 
 To avoid repeating the full `docker run` flags, install a thin host wrapper:
 
@@ -277,11 +284,7 @@ Set `DUD_IMAGE` to override the image name embedded in the output.
 Run this before trusting the endpoint:
 
 ```sh
-docker run --rm -it \
-  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
-  -e DUD_BASE_URL=https://dud.example.com \
-  -v "$PWD:/work" \
-  ghcr.io/wojciechpolak/dud/dud-client:latest test
+dud test
 ```
 
 This command succeeds only if curl can reach the service with DoH, TLS 1.3, and
@@ -304,12 +307,13 @@ Suppose the sender wants to share `secret.pdf` and keep it available for 48
 hours:
 
 ```sh
-docker run --rm -it \
-  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
-  -e DUD_BASE_URL=https://dud.example.com \
-  -e DUD_SECRET_TOKEN=YOUR_SECRET_TOKEN \
-  -v "$PWD:/work" \
-  ghcr.io/wojciechpolak/dud/dud-client:latest upload --file /work/secret.pdf --ttl 48h
+dud upload --file /work/secret.pdf --ttl 48h
+```
+
+To suppress the terminal QR code and print only the text summary, add `--no-qr`:
+
+```sh
+dud upload --file /work/secret.pdf --ttl 48h --no-qr
 ```
 
 The client will prompt for the passphrase through `age`. Pick a passphrase and
@@ -336,11 +340,7 @@ Only two things need to be shared with the recipient:
 On another machine, the recipient can fetch and decrypt it like this:
 
 ```sh
-docker run --rm -it \
-  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
-  -e DUD_BASE_URL=https://dud.example.com \
-  -v "$PWD:/work" \
-  ghcr.io/wojciechpolak/dud/dud-client:latest download \
+dud download \
   --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
   --out /work/received-secret.pdf
 ```
@@ -359,11 +359,7 @@ If the sender wants the file to disappear after the first successful download,
 add `--delete-after-read` during upload:
 
 ```sh
-docker run --rm -it \
-  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
-  -e DUD_BASE_URL=https://dud.example.com \
-  -v "$PWD:/work" \
-  ghcr.io/wojciechpolak/dud/dud-client:latest upload \
+dud upload \
   --file /work/secret.pdf \
   --ttl 24h \
   --delete-after-read
@@ -377,11 +373,7 @@ If you configured the Worker `DUD_SECRET_TOKEN` secret, you can force a cleanup
 pass whenever you want:
 
 ```sh
-docker run --rm -it \
-  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
-  -e DUD_BASE_URL=https://dud.example.com \
-  -e DUD_SECRET_TOKEN=YOUR_SECRET_TOKEN \
-  ghcr.io/wojciechpolak/dud/dud-client:latest flush
+dud flush
 ```
 
 This deletes expired and already-consumed objects from R2 immediately and
