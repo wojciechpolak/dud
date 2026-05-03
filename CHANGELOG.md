@@ -6,7 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for public releases.
 
-## [Unreleased]
+## [1.1.0] - 2026-05-03
+
+### Added
+
+- Dashed file IDs in upload responses for better readability, while keeping
+  downloads compatible with either dashed IDs or the original raw 32-character
+  lowercase hex form.
+- Human-friendly upload success output in the client, with `--json` available
+  for raw machine-readable responses.
+- Terminal QR code output for uploaded file IDs in the Docker client.
+
+### Changed
+
+- The Docker client image now includes `qrencode` to render upload IDs as
+  terminal QR codes.
 
 ## [1.0.0] - 2026-04-19
 

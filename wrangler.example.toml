@@ -4,7 +4,7 @@ compatibility_date = "2026-04-19"
 workers_dev = false
 
 [vars]
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 [[routes]]
 pattern = "dud.example.com"
