@@ -13,6 +13,7 @@ const ID_ONCE = 'c'.repeat(32);
 const ID_CANCEL = 'd'.repeat(32);
 const ID_FAIL = 'e'.repeat(32);
 const ID_NEW = 'f'.repeat(32);
+const PRETTY_ID_UPLOAD = 'aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa';
 
 function textStream(text) {
   const bytes = new TextEncoder().encode(text);
@@ -173,7 +174,7 @@ test('upload then download returns the encrypted payload', async () => {
 
   assert.equal(uploadResponse.status, 201);
   assert.deepEqual(await uploadResponse.json(), {
-    id: ID_UPLOAD,
+    id: PRETTY_ID_UPLOAD,
     expiresAt: '2023-11-15T22:13:20.000Z',
     deleteAfterRead: false,
   });
@@ -186,6 +187,29 @@ test('upload then download returns the encrypted payload', async () => {
   assert.equal(downloadResponse.status, 200);
   assert.equal(await downloadResponse.text(), 'ciphertext');
   assert.equal(blobStore.objects.has(`files/${ID_UPLOAD}.age`), true);
+});
+
+test('download accepts dashed IDs and reads the raw stored object', async () => {
+  const blobStore = new MemoryBlobStore();
+  await blobStore.put(`files/${ID_UPLOAD}.age`, textStream('ciphertext'), {
+    contentType: 'application/octet-stream',
+    customMetadata: {
+      dudId: ID_UPLOAD,
+      createdAt: '1',
+      expiresAt: String(Date.now() + 60_000),
+      deleteAfterRead: 'false',
+    },
+  });
+
+  const service = createDudService({ blobStore, now: () => 1_700_000_000_000 });
+
+  const response = await service.fetch(
+    new Request(`https://dud.example.com/v1/files/${PRETTY_ID_UPLOAD}`),
+    makeContext(),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'ciphertext');
 });
 
 test('upload schedules opportunistic cleanup of expired blobs', async () => {
@@ -550,15 +574,17 @@ test('upload rejects a missing token header', async () => {
   assert.equal(response.status, 403);
 });
 
-test('download rejects IDs that are not 32 lowercase hex characters', async () => {
+test('download rejects IDs that are not raw hex after dash removal', async () => {
   const service = createDudService({ blobStore: new MemoryBlobStore() });
 
   const cases = [
     'short',
     'ABCDEF1234567890ABCDEF1234567890', // uppercase
+    'ABCD-EF12-3456-7890-ABCD-EF12-3456-7890', // uppercase with dashes
     'zz' + 'a'.repeat(30), // non-hex chars
     'a'.repeat(33), // 33 chars (too long)
     'a'.repeat(31), // 31 chars (too short)
+    'a'.repeat(16) + '-' + 'a'.repeat(17), // 33 chars after dash removal
   ];
 
   for (const badId of cases) {

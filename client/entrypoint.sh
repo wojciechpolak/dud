@@ -10,6 +10,7 @@ DUD_ECH_MODE="${DUD_ECH_MODE:-hard}"
 DUD_SECRET_TOKEN="${DUD_SECRET_TOKEN:-}"
 DUD_CURL_BIN="${DUD_CURL_BIN:-curl}"
 DUD_AGE_BIN="${DUD_AGE_BIN:-age}"
+DUD_QRENCODE_BIN="${DUD_QRENCODE_BIN:-qrencode}"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -45,6 +46,67 @@ run_secure_curl() {
     --ech "$DUD_ECH_MODE" \
     --doh-url "$DUD_DOH_URL" \
     "$@"
+}
+
+UPLOAD_ID=""
+UPLOAD_EXPIRES_AT=""
+UPLOAD_DELETE_AFTER_READ_LABEL=""
+
+upload_json_string_field() {
+  field="$1"
+  response_file="$2"
+
+  tr -d '\n' <"$response_file" \
+    | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" \
+    | head -n 1
+}
+
+upload_json_boolean_field() {
+  field="$1"
+  response_file="$2"
+
+  tr -d '\n' <"$response_file" \
+    | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\\([a-z][a-z]*\\).*/\\1/p" \
+    | head -n 1
+}
+
+load_upload_response() {
+  response_file="$1"
+
+  id="$(upload_json_string_field id "$response_file")"
+  expires_at="$(upload_json_string_field expiresAt "$response_file")"
+  delete_after_read="$(upload_json_boolean_field deleteAfterRead "$response_file")"
+
+  [ -n "$id" ] || die "Upload succeeded but returned an unexpected JSON response."
+  [ -n "$expires_at" ] || die "Upload succeeded but returned an unexpected JSON response."
+
+  case "$delete_after_read" in
+    true)
+      delete_after_read_label="yes"
+      ;;
+    false)
+      delete_after_read_label="no"
+      ;;
+    *)
+      die "Upload succeeded but returned an unexpected JSON response."
+      ;;
+  esac
+
+  UPLOAD_ID="$id"
+  UPLOAD_EXPIRES_AT="$expires_at"
+  UPLOAD_DELETE_AFTER_READ_LABEL="$delete_after_read_label"
+}
+
+print_upload_response() {
+  printf 'Upload complete\n'
+  printf 'ID: %s\n' "$UPLOAD_ID"
+  printf 'Expires: %s\n' "$UPLOAD_EXPIRES_AT"
+  printf 'Delete after read: %s\n' "$UPLOAD_DELETE_AFTER_READ_LABEL"
+}
+
+print_upload_qr() {
+  printf '\nQR Code:\n'
+  "$DUD_QRENCODE_BIN" -t ansiutf8 "$UPLOAD_ID"
 }
 
 print_test_details() {
@@ -138,6 +200,8 @@ cmd_upload() {
   ttl="24h"
   delete_after_read="false"
   base_url="$DUD_BASE_URL"
+  output_json="false"
+  output_qr="true"
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -153,6 +217,14 @@ cmd_upload() {
         ;;
       --delete-after-read)
         delete_after_read="true"
+        shift 1
+        ;;
+      --json)
+        output_json="true"
+        shift 1
+        ;;
+      --no-qr)
+        output_qr="false"
         shift 1
         ;;
       --url)
@@ -176,7 +248,8 @@ cmd_upload() {
   [ -n "$DUD_SECRET_TOKEN" ] || die "upload requires DUD_SECRET_TOKEN"
 
   encrypted_file="$(mktemp /tmp/dud-upload-XXXXXX.age)"
-  trap 'rm -f "$encrypted_file"' EXIT HUP INT TERM
+  response_file="$(mktemp /tmp/dud-upload-response-XXXXXX.json)"
+  trap 'rm -f "$encrypted_file" "$response_file"' EXIT HUP INT TERM
 
   "$DUD_AGE_BIN" --encrypt --passphrase -o "$encrypted_file" "$file"
 
@@ -187,9 +260,20 @@ cmd_upload() {
     -H "x-dud-delete-after-read: $delete_after_read" \
     -H "x-dud-secret-token: $DUD_SECRET_TOKEN" \
     --data-binary "@$encrypted_file" \
+    --output "$response_file" \
     "$base_url/v1/files"
 
-  printf '\n'
+  if [ "$output_json" = "true" ]; then
+    cat "$response_file"
+    printf '\n'
+    return
+  fi
+
+  load_upload_response "$response_file"
+  print_upload_response
+  if [ "$output_qr" = "true" ]; then
+    print_upload_qr
+  fi
 }
 
 cmd_download() {
@@ -272,7 +356,7 @@ usage() {
   cat <<'EOF'
 Usage:
   dud test [--url URL] [--doh-url URL]
-  dud upload --file PATH [--ttl 24h] [--delete-after-read] [--url URL] [--doh-url URL]
+  dud upload --file PATH [--ttl 24h] [--delete-after-read] [--json] [--no-qr] [--url URL] [--doh-url URL]
   dud download --id ID --out PATH [--url URL] [--doh-url URL]
   dud flush [--url URL] [--doh-url URL]
   dud install        Print a host wrapper script to stdout

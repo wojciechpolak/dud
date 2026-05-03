@@ -171,8 +171,10 @@ test('upload command encrypts locally and posts the encrypted file', async () =>
   const ageLog = path.join(tmpDir, 'age.log');
   const curlLog = path.join(tmpDir, 'curl.log');
   const curlPayload = path.join(tmpDir, 'payload.bin');
+  const qrLog = path.join(tmpDir, 'qr.log');
   const ageMock = path.join(tmpDir, 'age-mock.sh');
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const qrMock = path.join(tmpDir, 'qr-mock.sh');
 
   await writeFile(filePath, 'plaintext', 'utf8');
 
@@ -203,10 +205,23 @@ while [ "$#" -gt 0 ]; do
     shift 2
     continue
   fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
   shift
 done
 cp "\${payload#@}" "${curlPayload}"
-printf '{"id":"abc123"}\n'
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":true}' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    qrMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${qrLog}"
+printf '[qr]\\n'
 `,
   );
 
@@ -224,32 +239,175 @@ printf '{"id":"abc123"}\n'
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
+      DUD_QRENCODE_BIN: qrMock,
       DUD_SECRET_TOKEN: 'top-secret',
     },
   );
 
   assert.equal(result.code, 0);
-  assert.match(result.stdout, /abc123/);
+  assert.match(result.stdout, /^Upload complete$/m);
+  assert.match(result.stdout, /^ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe$/m);
+  assert.match(result.stdout, /^Expires: 2026-04-20T12:00:00.000Z$/m);
+  assert.match(result.stdout, /^Delete after read: yes$/m);
+  assert.match(result.stdout, /\nQR Code:\n\[qr\]\n?$/);
   assert.match(await readFile(ageLog, 'utf8'), /--passphrase/);
   const curlArgs = await readFile(curlLog, 'utf8');
   assert.match(curlArgs, /x-dud-ttl: 48h/);
   assert.match(curlArgs, /x-dud-delete-after-read: true/);
   assert.match(curlArgs, /x-dud-secret-token: top-secret/);
   assert.equal(await readFile(curlPayload, 'utf8'), 'plaintext');
+  assert.match(
+    await readFile(qrLog, 'utf8'),
+    /-t\nansiutf8\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe/,
+  );
 });
 
-test('download command fetches ciphertext then decrypts to the output path', async () => {
+test('upload command can print raw JSON with --json', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-json-'),
+  );
+  const filePath = path.join(tmpDir, 'plain.bin');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await writeFile(filePath, 'plaintext', 'utf8');
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'upload', '--file', filePath, '--json'],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(
+    result.stdout,
+    '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}\n',
+  );
+});
+
+test('upload command can suppress QR output with --no-qr', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-no-qr-'),
+  );
+  const filePath = path.join(tmpDir, 'plain.bin');
+  const qrLog = path.join(tmpDir, 'qr.log');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const qrMock = path.join(tmpDir, 'qr-mock.sh');
+
+  await writeFile(filePath, 'plaintext', 'utf8');
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--data-binary" ]; then
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    qrMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${qrLog}"
+printf '[qr]\\n'
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'upload', '--file', filePath, '--no-qr'],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_QRENCODE_BIN: qrMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /^Upload complete$/m);
+  assert.match(result.stdout, /^ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe$/m);
+  assert.match(result.stdout, /^Delete after read: no$/m);
+  assert.doesNotMatch(result.stdout, /QR Code:/);
+  await assert.rejects(readFile(qrLog, 'utf8'));
+});
+
+test('download command passes dashed IDs through to the API', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-download-'));
   const outDir = path.join(tmpDir, 'work');
   const outputPath = path.join(outDir, 'output.bin');
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
   const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlLog = path.join(tmpDir, 'curl.log');
 
   await mkdir(outDir);
 
   await makeExecutable(
     curlMock,
     `#!/bin/sh
+printf '%s\n' "$@" > "${curlLog}"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
     output="$2"
@@ -280,7 +438,14 @@ cp "$input" "$output"
 
   const result = await runCommand(
     'sh',
-    [CLIENT_SCRIPT, 'download', '--id', 'abc123', '--out', outputPath],
+    [
+      CLIENT_SCRIPT,
+      'download',
+      '--id',
+      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
+      '--out',
+      outputPath,
+    ],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -289,6 +454,71 @@ cp "$input" "$output"
 
   assert.equal(result.code, 0);
   assert.equal(await readFile(outputPath, 'utf8'), 'ciphertext');
+  const curlArgs = await readFile(curlLog, 'utf8');
+  assert.match(
+    curlArgs,
+    /\/v1\/files\/3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe/,
+  );
+});
+
+test('download command still accepts raw IDs unchanged', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-download-raw-'),
+  );
+  const outDir = path.join(tmpDir, 'work');
+  const outputPath = path.join(outDir, 'output.bin');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlLog = path.join(tmpDir, 'curl.log');
+
+  await mkdir(outDir);
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${curlLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf 'ciphertext' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  const rawId = '3df75d5c0c3b4f53ac1b8eeb23704fbe';
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'download', '--id', rawId, '--out', outputPath],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(await readFile(outputPath, 'utf8'), 'ciphertext');
+  const curlArgs = await readFile(curlLog, 'utf8');
+  assert.match(curlArgs, new RegExp(`/v1/files/${rawId}`));
 });
 
 test('flush command posts the secret token header', async () => {

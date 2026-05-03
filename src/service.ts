@@ -3,7 +3,7 @@
 
 import { DEFAULT_CONFIG } from './config.js';
 import { errorResponse, jsonResponse } from './http.js';
-import { generateOpaqueId } from './ids.js';
+import { formatOpaqueId, generateOpaqueId, parseOpaqueId } from './ids.js';
 import { parseTtl } from './ttl.js';
 import type { BlobStore, DudConfig, ExecutionContextLike } from './types.js';
 
@@ -105,7 +105,7 @@ function parseTombstoneMetadata(
 function uploadResponseBody(metadata: StoredFileMetadata): Response {
   return jsonResponse(
     {
-      id: metadata.id,
+      id: formatOpaqueId(metadata.id),
       expiresAt: new Date(metadata.expiresAt).toISOString(),
       deleteAfterRead: metadata.deleteAfterRead,
     },
@@ -499,11 +499,12 @@ export function createDudService(dependencies: DudDependencies) {
     }
 
     if (request.method === 'GET' && path.startsWith('/v1/files/')) {
-      const id = path.slice('/v1/files/'.length).trim();
-      if (!id) {
+      const requestedId = path.slice('/v1/files/'.length).trim();
+      if (!requestedId) {
         return errorResponse(400, 'File ID is required.');
       }
-      if (!/^[0-9a-f]{32}$/.test(id)) {
+      const id = parseOpaqueId(requestedId);
+      if (!id) {
         return errorResponse(400, 'Invalid file ID.');
       }
       return handleDownload(id, ctx);
