@@ -203,10 +203,15 @@ while [ "$#" -gt 0 ]; do
     shift 2
     continue
   fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
   shift
 done
 cp "\${payload#@}" "${curlPayload}"
-printf '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe"}\n'
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":true}' > "$output"
 `,
   );
 
@@ -229,13 +234,74 @@ printf '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe"}\n'
   );
 
   assert.equal(result.code, 0);
-  assert.match(result.stdout, /3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe/);
+  assert.match(result.stdout, /^Upload complete$/m);
+  assert.match(result.stdout, /^ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe$/m);
+  assert.match(result.stdout, /^Expires: 2026-04-20T12:00:00.000Z$/m);
+  assert.match(result.stdout, /^Delete after read: yes$/m);
   assert.match(await readFile(ageLog, 'utf8'), /--passphrase/);
   const curlArgs = await readFile(curlLog, 'utf8');
   assert.match(curlArgs, /x-dud-ttl: 48h/);
   assert.match(curlArgs, /x-dud-delete-after-read: true/);
   assert.match(curlArgs, /x-dud-secret-token: top-secret/);
   assert.equal(await readFile(curlPayload, 'utf8'), 'plaintext');
+});
+
+test('upload command can print raw JSON with --json', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-json-'),
+  );
+  const filePath = path.join(tmpDir, 'plain.bin');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await writeFile(filePath, 'plaintext', 'utf8');
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'upload', '--file', filePath, '--json'],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(
+    result.stdout,
+    '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}\n',
+  );
 });
 
 test('download command passes dashed IDs through to the API', async () => {

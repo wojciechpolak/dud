@@ -241,6 +241,9 @@ docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -v "$PWD:/work" ghcr
 docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN ghcr.io/wojciechpolak/dud/dud-client:latest flush
 ```
 
+`upload` prints a human-friendly summary by default. For scripts or other
+machine-readable use cases, add `--json` to print the raw upload response.
+
 > **Security note**: `--tmpfs /tmp` keeps sensitive intermediate files
 > (encrypted payloads, TLS traces) in memory only — they never reach the
 > container's overlay filesystem and are gone when the container exits.
@@ -314,13 +317,14 @@ share it with the recipient out of band.
 
 The upload response will look like this:
 
-```json
-{
-  "id": "3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe",
-  "expiresAt": "2026-04-20T12:00:00.000Z",
-  "deleteAfterRead": false
-}
+```text
+Upload complete
+ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe
+Expires: 2026-04-20T12:00:00.000Z
+Delete after read: no
 ```
+
+If you need the raw JSON instead, run the same command with `--json`.
 
 Only two things need to be shared with the recipient:
 

@@ -47,6 +47,52 @@ run_secure_curl() {
     "$@"
 }
 
+upload_json_string_field() {
+  field="$1"
+  response_file="$2"
+
+  tr -d '\n' <"$response_file" \
+    | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" \
+    | head -n 1
+}
+
+upload_json_boolean_field() {
+  field="$1"
+  response_file="$2"
+
+  tr -d '\n' <"$response_file" \
+    | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\\([a-z][a-z]*\\).*/\\1/p" \
+    | head -n 1
+}
+
+print_upload_response() {
+  response_file="$1"
+
+  id="$(upload_json_string_field id "$response_file")"
+  expires_at="$(upload_json_string_field expiresAt "$response_file")"
+  delete_after_read="$(upload_json_boolean_field deleteAfterRead "$response_file")"
+
+  [ -n "$id" ] || die "Upload succeeded but returned an unexpected JSON response."
+  [ -n "$expires_at" ] || die "Upload succeeded but returned an unexpected JSON response."
+
+  case "$delete_after_read" in
+    true)
+      delete_after_read_label="yes"
+      ;;
+    false)
+      delete_after_read_label="no"
+      ;;
+    *)
+      die "Upload succeeded but returned an unexpected JSON response."
+      ;;
+  esac
+
+  printf 'Upload complete\n'
+  printf 'ID: %s\n' "$id"
+  printf 'Expires: %s\n' "$expires_at"
+  printf 'Delete after read: %s\n' "$delete_after_read_label"
+}
+
 print_test_details() {
   trace_file="$1"
   tls_summary="$(sed -n 's/^\* SSL connection using //p' "$trace_file" | head -n 1)"
@@ -138,6 +184,7 @@ cmd_upload() {
   ttl="24h"
   delete_after_read="false"
   base_url="$DUD_BASE_URL"
+  output_json="false"
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -153,6 +200,10 @@ cmd_upload() {
         ;;
       --delete-after-read)
         delete_after_read="true"
+        shift 1
+        ;;
+      --json)
+        output_json="true"
         shift 1
         ;;
       --url)
@@ -176,7 +227,8 @@ cmd_upload() {
   [ -n "$DUD_SECRET_TOKEN" ] || die "upload requires DUD_SECRET_TOKEN"
 
   encrypted_file="$(mktemp /tmp/dud-upload-XXXXXX.age)"
-  trap 'rm -f "$encrypted_file"' EXIT HUP INT TERM
+  response_file="$(mktemp /tmp/dud-upload-response-XXXXXX.json)"
+  trap 'rm -f "$encrypted_file" "$response_file"' EXIT HUP INT TERM
 
   "$DUD_AGE_BIN" --encrypt --passphrase -o "$encrypted_file" "$file"
 
@@ -187,9 +239,16 @@ cmd_upload() {
     -H "x-dud-delete-after-read: $delete_after_read" \
     -H "x-dud-secret-token: $DUD_SECRET_TOKEN" \
     --data-binary "@$encrypted_file" \
+    --output "$response_file" \
     "$base_url/v1/files"
 
-  printf '\n'
+  if [ "$output_json" = "true" ]; then
+    cat "$response_file"
+    printf '\n'
+    return
+  fi
+
+  print_upload_response "$response_file"
 }
 
 cmd_download() {
@@ -272,7 +331,7 @@ usage() {
   cat <<'EOF'
 Usage:
   dud test [--url URL] [--doh-url URL]
-  dud upload --file PATH [--ttl 24h] [--delete-after-read] [--url URL] [--doh-url URL]
+  dud upload --file PATH [--ttl 24h] [--delete-after-read] [--json] [--url URL] [--doh-url URL]
   dud download --id ID --out PATH [--url URL] [--doh-url URL]
   dud flush [--url URL] [--doh-url URL]
   dud install        Print a host wrapper script to stdout
