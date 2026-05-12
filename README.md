@@ -238,22 +238,28 @@ followed by the Worker's `/v1/test` JSON response.
 ```sh
 docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN -v "$PWD:/work" ghcr.io/wojciechpolak/dud/dud-client:latest upload --file /work/input.bin --ttl 24h
 docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -v "$PWD:/work" ghcr.io/wojciechpolak/dud/dud-client:latest download --id YOUR_ID --out /work/output.bin
+printf '%s' 'secret message' | docker run --rm -i --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN ghcr.io/wojciechpolak/dud/dud-client:latest upload --json
+docker run --rm -i --tmpfs /tmp:rw,noexec,nosuid,size=128m ghcr.io/wojciechpolak/dud/dud-client:latest download --id YOUR_ID --stdout > output.bin
 docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN ghcr.io/wojciechpolak/dud/dud-client:latest flush
 ```
 
 `upload` prints a human-friendly summary and a terminal QR code for the returned
 ID by default. Add `--no-qr` to suppress the QR block. For scripts or other
 machine-readable use cases, add `--json` to print the raw upload response.
+Without `--file` or `-m`, `upload` reads plaintext from stdin. `download` writes
+to a file with `--out` or to stdout with `--stdout`.
 
 When you run `dud` with no command in an interactive terminal, it opens a small
-menu for `test`, `upload`, `download`, and `flush`. If stdin is not a TTY, it
+menu for `test`, `upload`, `download`, and `flush`. Interactive upload can use a
+file path, a one-line message, or typed/pasted text that finishes on Ctrl-D.
+Interactive download can write to a file or stdout. If stdin is not a TTY, it
 prints usage information and exits instead.
 
 > **Security note**: `--tmpfs /tmp` keeps sensitive intermediate files
 > (encrypted payloads, TLS traces) in memory only — they never reach the
 > container's overlay filesystem and are gone when the container exits.
 
-### Shell alias
+### Shell wrapper
 
 To avoid repeating the full `docker run` flags, install a thin host wrapper:
 
@@ -265,17 +271,38 @@ docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest install \
 
 Then: dud test, dud upload ..., etc.
 
-Or as a shell alias (add to ~/.bashrc or ~/.zshrc)
+Or print a shell function (add it to `~/.bashrc`, `~/.zshrc`, or `~/.profile`):
 
 ```shell
 # 1. Review what will be added
-docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-alias
+docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-init
 
 # 2. Append to your shell rc
-docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-alias >> ~/.profile
+docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-init >> ~/.profile
 ```
 
-Set `DUD_IMAGE` to override the image name embedded in the output.
+Or load it only for the current shell session:
+
+```sh
+eval "$(docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-init)"
+```
+
+Both generated wrappers will automatically add `--env-file .env` when `./.env`
+exists, and they also forward exported `DUD_BASE_URL`, `DUD_DOH_URL`,
+`DUD_ECH_MODE`, and `DUD_SECRET_TOKEN` into the container. Exported shell
+variables override values from `.env`.
+
+Example `.env`:
+
+```dotenv
+DUD_SECRET_TOKEN=replace-me
+# Optional overrides:
+# DUD_BASE_URL=https://dud.example.com
+# DUD_DOH_URL=https://cloudflare-dns.com/dns-query
+# DUD_ECH_MODE=hard
+```
+
+Set `DUD_IMAGE` to override the image name embedded in the generated output.
 
 ## Example usage
 
@@ -301,7 +328,7 @@ docker run --rm -it \
   ghcr.io/wojciechpolak/dud/dud-client:latest test
 ```
 
-### 2. Upload a file as the sender
+### 2. Upload a file or message as the sender
 
 Suppose the sender wants to share `secret.pdf` and keep it available for 48
 hours:
@@ -330,6 +357,22 @@ Delete after read: no
 
 If you need the raw JSON instead, run the same command with `--json`.
 
+You can also upload a one-line message directly:
+
+```sh
+dud upload -m "meet at the usual place" --ttl 24h --no-qr
+```
+
+Or stream plaintext from stdin:
+
+```sh
+printf '%s' 'streamed secret' | dud upload --json
+```
+
+If stdin is a TTY and you run `dud upload` without `--file` or `-m`, the client
+accepts typed or pasted input until you press Ctrl-D, then prompts for the `age`
+passphrase and uploads the encrypted payload.
+
 Only two things need to be shared with the recipient:
 
 - the `id`
@@ -352,6 +395,15 @@ with or without dashes.
 You do not run `age` separately on the host after download. The Docker client
 container performs `age --decrypt` internally and writes the plaintext output to
 the path given with `--out`.
+
+To stream the decrypted plaintext to stdout instead, use `--stdout` and redirect
+or pipe it as needed:
+
+```sh
+dud download \
+  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
+  --stdout > /work/received-secret.pdf
+```
 
 ### 4. Optional one-time retrieval
 
