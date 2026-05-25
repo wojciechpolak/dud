@@ -358,8 +358,10 @@ Default environment:
 
 `DUD_ECH_MODE` accepts:
 
-- `hard`: fail if ECH cannot be used
-- `grease`: send ECH GREASE while allowing fallback behavior
+- `hard`: require real ECH and fail the request if the connection cannot use it
+- `grease`: send a synthetic ECH-looking ClientHello extension to keep the
+  network path exercised and avoid ossifying around "ECH is never present", but
+  do not require the server to actually negotiate ECH
 
 The Dockerfile builds `curl` from source with ECH enabled using curl's
 experimental ECH build path instead of relying on a distro package.
@@ -524,6 +526,21 @@ dud test
 
 This command succeeds only if curl can reach the service with DoH, TLS 1.3, and
 `--ech "$DUD_ECH_MODE"` using `hard` by default.
+
+`hard` is the strict privacy setting: the TLS handshake must actually use ECH,
+or the command fails.
+
+`grease` is mainly for compatibility testing. In TLS, GREASE means sending a
+deliberately unrecognized value so middleboxes and servers do not ossify around
+one exact handshake shape. For ECH, GREASE makes the ClientHello look like a
+client that might use ECH, even when no usable ECH configuration is available.
+That helps exercise the path, but it is not a privacy guarantee: the connection
+may still fall back to a normal non-ECH handshake.
+
+Use `grease` when you want to confirm that the network path tolerates ECH-shaped
+traffic or when you are testing an environment that does not yet have working
+ECH end to end. Use `hard` when you want DUD's intended transport security
+properties.
 
 If you want to try GREASE mode instead:
 
