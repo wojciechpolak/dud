@@ -1351,6 +1351,7 @@ test('interactive upload can use a recipient file with a file source', async () 
   const ageLog = path.join(tmpDir, 'age.log');
   const ageMock = path.join(tmpDir, 'age-mock.sh');
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const qrMock = path.join(tmpDir, 'qr-mock.sh');
 
   await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
   await chmod(interactiveScript, 0o755);
@@ -1395,6 +1396,13 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
 `,
   );
 
+  await makeExecutable(
+    qrMock,
+    `#!/bin/sh
+printf '[qr]\\n'
+`,
+  );
+
   const result = await runCommand(
     interactiveScript,
     [],
@@ -1402,6 +1410,7 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
       DUD_TEST_STDIN_TTY: '1',
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
+      DUD_QRENCODE_BIN: qrMock,
       DUD_SECRET_TOKEN: 'top-secret',
     },
     {
