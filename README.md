@@ -260,6 +260,8 @@ machine-readable use cases, add `--json` to print the raw upload response.
 Without `--file` or `-m`, `upload` reads plaintext from stdin. `download` writes
 to a file with `--out` or to stdout with `--stdout`.
 
+Use `dud --version` to print the client version.
+
 Encryption mode flags:
 
 - `upload` defaults to passphrase mode unless you provide `--recipient` or

@@ -12,6 +12,7 @@ DUD_CURL_BIN="${DUD_CURL_BIN:-curl}"
 DUD_AGE_BIN="${DUD_AGE_BIN:-age}"
 DUD_AGE_KEYGEN_BIN="${DUD_AGE_KEYGEN_BIN:-age-keygen}"
 DUD_QRENCODE_BIN="${DUD_QRENCODE_BIN:-qrencode}"
+DUD_VERSION="${DUD_VERSION:-1.2.0}"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -585,6 +586,7 @@ DUD_IMAGE="${DUD_IMAGE:-ghcr.io/wojciechpolak/dud/dud-client:latest}"
 usage() {
   cat <<'EOF'
 Usage:
+  dud --version
   dud test [--url URL] [--doh-url URL]
   dud upload [--file PATH | -m TEXT] [--ttl 24h] [--delete-after-read] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--json] [--no-qr] [--url URL] [--doh-url URL]
   dud download --id ID (--out PATH | --stdout) [--identity PATH] [--url URL] [--doh-url URL]
@@ -601,6 +603,10 @@ Environment:
   DUD_SECRET_TOKEN  Shared secret required for upload and flush
   DUD_IMAGE      Docker image used by install/shell-init output
 EOF
+}
+
+print_version() {
+  printf '%s\n' "$DUD_VERSION"
 }
 
 cmd_install() {
@@ -1085,6 +1091,9 @@ main() {
   shift
 
   case "$command" in
+    --version|version)
+      print_version
+      ;;
     test)
       cmd_test "$@"
       ;;
