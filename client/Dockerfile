@@ -32,10 +32,10 @@ RUN git init openssl \
   && make -j"$(nproc)" \
   && make install_sw
 
-# pin: curl curl-8_19_0
+# pin: curl curl-8_20_0
 RUN git init curl \
   && git -C curl remote add origin https://github.com/curl/curl.git \
-  && git -C curl fetch --depth 1 origin 8c908d2d0a6d32abdedda2c52e90bd56ec76c24d \
+  && git -C curl fetch --depth 1 origin a05f34973e6c4bb629d018f7cb51487be1c904d8 \
   && git -C curl checkout FETCH_HEAD \
   && cd curl \
   && autoreconf -fi \
