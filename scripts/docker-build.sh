@@ -6,7 +6,8 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
-IMAGE_NAME=${IMAGE_NAME:-dud-client}
+COMPONENT=${COMPONENT:-client}
+IMAGE_NAME=${IMAGE_NAME:-}
 IMAGE_TAG=${IMAGE_TAG:-latest}
 PLATFORM_ARG=""
 LOAD_FLAG=${LOAD_FLAG:---load}
@@ -17,7 +18,8 @@ usage() {
 Usage: docker-build.sh [options]
 
 Options:
-  --image NAME          Docker image name. Default: dud-client
+  --component NAME      Build component: client or server. Default: client
+  --image NAME          Docker image name. Default: dud-client or dud-server
   --tag TAG             Docker image tag. Default: latest
   --platform PLATFORM   Buildx platform, for example linux/amd64
   --push                Push the built image instead of loading it locally
@@ -28,6 +30,14 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --component)
+      [ $# -ge 2 ] || {
+        echo "Missing value for --component" >&2
+        exit 1
+      }
+      COMPONENT=$2
+      shift 2
+      ;;
     --image)
       [ $# -ge 2 ] || {
         echo "Missing value for --image" >&2
@@ -77,6 +87,27 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+DOCKERFILE=""
+BUILD_CONTEXT=""
+
+case "$COMPONENT" in
+  client)
+    DOCKERFILE="$REPO_ROOT/client/Dockerfile"
+    BUILD_CONTEXT="$REPO_ROOT/client"
+    IMAGE_NAME=${IMAGE_NAME:-dud-client}
+    ;;
+  server)
+    DOCKERFILE="$REPO_ROOT/server/Dockerfile"
+    BUILD_CONTEXT="$REPO_ROOT"
+    IMAGE_NAME=${IMAGE_NAME:-dud-server}
+    ;;
+  *)
+    echo "Unknown component: $COMPONENT" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
 set -- docker buildx build
 
 if [ -n "$PLATFORM_ARG" ]; then
@@ -95,8 +126,7 @@ fi
 
 set -- "$@" \
   --tag "${IMAGE_NAME}:${IMAGE_TAG}" \
-  --file "$REPO_ROOT/client/Dockerfile" \
-  "$REPO_ROOT/client"
+  --file "$DOCKERFILE" \
+  "$BUILD_CONTEXT"
 
 exec "$@"
-

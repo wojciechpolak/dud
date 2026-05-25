@@ -8,6 +8,8 @@ DUD_BASE_URL="${DUD_BASE_URL:-https://dud.example.com}"
 DUD_DOH_URL="${DUD_DOH_URL:-https://cloudflare-dns.com/dns-query}"
 DUD_ECH_MODE="${DUD_ECH_MODE:-hard}"
 DUD_SECRET_TOKEN="${DUD_SECRET_TOKEN:-}"
+DUD_CA_BUNDLE="${DUD_CA_BUNDLE:-}"
+DUD_CONNECT_TO="${DUD_CONNECT_TO:-}"
 DUD_CURL_BIN="${DUD_CURL_BIN:-curl}"
 DUD_AGE_BIN="${DUD_AGE_BIN:-age}"
 DUD_AGE_KEYGEN_BIN="${DUD_AGE_KEYGEN_BIN:-age-keygen}"
@@ -59,7 +61,7 @@ age_keygen_supports_pq() {
 run_secure_curl() {
   validate_ech_mode
 
-  "$DUD_CURL_BIN" \
+  set -- \
     --silent \
     --show-error \
     --fail \
@@ -69,6 +71,16 @@ run_secure_curl() {
     --ech "$DUD_ECH_MODE" \
     --doh-url "$DUD_DOH_URL" \
     "$@"
+
+  if [ -n "$DUD_CA_BUNDLE" ]; then
+    set -- --cacert "$DUD_CA_BUNDLE" "$@"
+  fi
+
+  if [ -n "$DUD_CONNECT_TO" ]; then
+    set -- --connect-to "$DUD_CONNECT_TO" "$@"
+  fi
+
+  "$DUD_CURL_BIN" "$@"
 }
 
 UPLOAD_ID=""
@@ -265,16 +277,8 @@ cmd_test() {
 
   validate_ech_mode
 
-  if ! "$DUD_CURL_BIN" \
-    --silent \
-    --show-error \
-    --fail \
+  if ! run_secure_curl \
     --verbose \
-    --proto '=https' \
-    --tlsv1.3 \
-    --tls-max 1.3 \
-    --ech "$DUD_ECH_MODE" \
-    --doh-url "$DUD_DOH_URL" \
     --output "$response_file" \
     "$url" \
     2>"$trace_file"; then
@@ -737,6 +741,9 @@ Environment:
   DUD_DOH_URL    DNS-over-HTTPS resolver. Default: https://cloudflare-dns.com/dns-query
   DUD_ECH_MODE   curl ECH mode. Allowed: hard, grease. Default: hard
   DUD_SECRET_TOKEN  Shared secret required for upload and flush
+  DUD_CA_BUNDLE  Optional CA bundle path inside the client container
+  DUD_CONNECT_TO Optional curl --connect-to mapping for local integration tests
+  DUD_DOCKER_NETWORK  Optional docker network for install/shell-init wrappers
   DUD_IMAGE      Docker image used by install/shell-init output
 EOF
 }
@@ -800,7 +807,7 @@ dud_docker_env_args() {
     args="\$(dud_shell_quote --env-file) \$(dud_shell_quote .env)"
   fi
 
-  for name in DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN; do
+  for name in DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN DUD_CA_BUNDLE DUD_CONNECT_TO; do
     eval "value=\\\${\$name-}"
     if [ -n "\$value" ]; then
       if [ -n "\$args" ]; then
@@ -813,7 +820,16 @@ dud_docker_env_args() {
   printf '%s' "\$args"
 }
 
+dud_docker_run_args() {
+  args=""
+  if [ -n "\${DUD_DOCKER_NETWORK:-}" ]; then
+    args="\$(dud_shell_quote --network) \$(dud_shell_quote "\$DUD_DOCKER_NETWORK")"
+  fi
+  printf '%s' "\$args"
+}
+
 dud_env_args="\$(dud_docker_env_args)"
+dud_run_args="\$(dud_docker_run_args)"
 
 if [ "\$#" -gt 0 ] && { [ "\$1" = "upload" ] || [ "\$1" = "send" ]; } && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "\$@"; then
   dud_stdin_file="\$(mktemp /tmp/dud-wrapper-stdin-XXXXXX)"
@@ -825,16 +841,16 @@ if [ "\$#" -gt 0 ] && { [ "\$1" = "upload" ] || [ "\$1" = "send" ]; } && ! [ -t 
   dud_cli_args="\$(dud_docker_cli_args "\$@")"
   dud_stdin_mount="\$(dud_shell_quote -v) \$(dud_shell_quote "\$dud_stdin_file:/tmp/dud-stdin:ro")"
   dud_tty_input="\$(dud_tty_input_path)"
-  eval "exec docker run --rm -it \$dud_env_args \$dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args" <"\$dud_tty_input"
+  eval "exec docker run --rm -it \$dud_env_args \$dud_run_args \$dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args" <"\$dud_tty_input"
 fi
 
 dud_cli_args="\$(dud_docker_cli_args "\$@")"
 
 if [ -t 0 ] && [ -t 1 ]; then
-  eval "exec docker run --rm -it \$dud_env_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
+  eval "exec docker run --rm -it \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
 fi
 
-eval "exec docker run --rm -i \$dud_env_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
+eval "exec docker run --rm -i \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
 EOF
 }
 
@@ -886,12 +902,13 @@ dud_docker_cli_args() {
 
 dud() {
   dud_env_args=""
+  dud_run_args=""
 
   if [ -r .env ]; then
     dud_env_args="\$(_dud_shell_quote --env-file) \$(_dud_shell_quote .env)"
   fi
 
-  for name in DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN; do
+  for name in DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN DUD_CA_BUNDLE DUD_CONNECT_TO; do
     eval "value=\\\${\$name-}"
     if [ -n "\$value" ]; then
       if [ -n "\$dud_env_args" ]; then
@@ -900,6 +917,10 @@ dud() {
       dud_env_args="\$dud_env_args\$(_dud_shell_quote -e) \$(_dud_shell_quote "\$name=\$value")"
     fi
   done
+
+  if [ -n "\${DUD_DOCKER_NETWORK:-}" ]; then
+    dud_run_args="\$(_dud_shell_quote --network) \$(_dud_shell_quote "\$DUD_DOCKER_NETWORK")"
+  fi
 
   if [ "\$#" -gt 0 ] && { [ "\$1" = "upload" ] || [ "\$1" = "send" ]; } && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "\$@"; then
     dud_stdin_file="\$(mktemp /tmp/dud-wrapper-stdin-XXXXXX)"
@@ -911,7 +932,7 @@ dud() {
     dud_stdin_mount="\$(_dud_shell_quote -v) \$(_dud_shell_quote "\$dud_stdin_file:/tmp/dud-stdin:ro")"
     dud_tty_input="\$(dud_tty_input_path)"
     trap 'rm -f "\$dud_stdin_file"' EXIT HUP INT TERM
-    eval "docker run --rm -it \$dud_env_args \$dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args" <"\$dud_tty_input"
+    eval "docker run --rm -it \$dud_env_args \$dud_run_args \$dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args" <"\$dud_tty_input"
     status=\$?
     rm -f "\$dud_stdin_file"
     trap - EXIT HUP INT TERM
@@ -921,11 +942,11 @@ dud() {
   dud_cli_args="\$(dud_docker_cli_args "\$@")"
 
   if [ -t 0 ] && [ -t 1 ]; then
-    eval "docker run --rm -it \$dud_env_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
+    eval "docker run --rm -it \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
     return
   fi
 
-  eval "docker run --rm -i \$dud_env_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
+  eval "docker run --rm -i \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
 }
 EOF
 }

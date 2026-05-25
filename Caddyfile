@@ -1,0 +1,11 @@
+{
+	# For real ECH on a public hostname, use a Caddy build with the correct
+	# caddy-dns provider module for your DNS service, then uncomment and adapt:
+	#
+	# dns <provider ...>
+	# ech {$DUD_ECH_PUBLIC_NAME}
+}
+
+{$DUD_HOSTNAME:dud.localhost} {
+	reverse_proxy {$DUD_UPSTREAM:127.0.0.1:8787}
+}

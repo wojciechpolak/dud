@@ -181,7 +181,7 @@ export function createDudService(dependencies: DudDependencies) {
       return null;
     }
 
-    return errorResponse(503, 'Storage is not configured. Bind R2 as FILES.');
+    return errorResponse(503, config.storageNotConfiguredMessage);
   }
 
   function scheduleCleanup(ctx: ExecutionContextLike, limit?: number): void {

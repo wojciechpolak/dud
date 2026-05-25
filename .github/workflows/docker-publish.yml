@@ -8,11 +8,22 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/dud-client
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: client
+            image_name: ${{ github.repository }}/dud-client
+            context: ./client
+            file: ./client/Dockerfile
+          - component: server
+            image_name: ${{ github.repository }}/dud-server
+            context: .
+            file: ./server/Dockerfile
     permissions:
       contents: read
       packages: write
@@ -62,7 +73,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ matrix.image_name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}},priority=1000
             type=semver,pattern={{version}},priority=950
@@ -74,8 +85,8 @@ jobs:
         id: build-and-push
         uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
-          context: ./client
-          file: ./client/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -87,5 +98,5 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/attest@v4
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.image_name }}
           subject-digest: ${{ steps.build-and-push.outputs.digest }}

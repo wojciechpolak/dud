@@ -15,6 +15,8 @@ function buildService(env: Env) {
       version: env.APP_VERSION ?? DEFAULT_CONFIG.version,
       secretToken: env.DUD_SECRET_TOKEN,
       storageConfigured,
+      storageNotConfiguredMessage:
+        'Storage is not configured. Bind R2 as FILES.',
     },
   });
 }

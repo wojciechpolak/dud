@@ -95,6 +95,49 @@ printf '{"ok":true}\n' > "$output"
   assert.match(args, /--tlsv1.3/);
 });
 
+test('test command supports custom CA bundles and connect-to mappings', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-connect-to-'),
+  );
+  const logFile = path.join(tmpDir, 'curl.log');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${logFile}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s\n' '* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey' >&2
+printf '%s\n' '* ECH: result: status is succeeded, inner is dud.example.com, outer is cloudflare-ech.com' >&2
+printf '%s\n' '* ALPN: server accepted http/1.1' >&2
+printf '{"ok":true}\n' > "$output"
+`,
+  );
+
+  const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
+    DUD_CURL_BIN: curlMock,
+    DUD_CA_BUNDLE: '/work/.dud-dev/caddy-data/pki/authorities/local/root.crt',
+    DUD_CONNECT_TO: 'dud.local.test:443:caddy:443',
+  });
+
+  assert.equal(result.code, 0);
+  const args = await readFile(logFile, 'utf8');
+  assert.match(args, /--cacert/);
+  assert.match(
+    args,
+    /\/work\/\.dud-dev\/caddy-data\/pki\/authorities\/local\/root\.crt/,
+  );
+  assert.match(args, /--connect-to/);
+  assert.match(args, /dud\.local\.test:443:caddy:443/);
+});
+
 test('test command allows DUD_ECH_MODE=grease', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-grease-'));
   const logFile = path.join(tmpDir, 'curl.log');
@@ -1716,8 +1759,10 @@ test('install command prints a TTY-aware wrapper', async () => {
   assert.match(result.stdout, /--env-file/);
   assert.match(
     result.stdout,
-    /DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN/,
+    /DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN DUD_CA_BUNDLE DUD_CONNECT_TO/,
   );
+  assert.match(result.stdout, /dud_docker_run_args\(\)/);
+  assert.match(result.stdout, /DUD_DOCKER_NETWORK/);
   assert.match(result.stdout, /dud_shell_quote -e/);
   assert.match(result.stdout, /if \[ -t 0 \] && \[ -t 1 \]; then/);
   assert.match(result.stdout, /docker run --rm -it/);
@@ -1734,8 +1779,9 @@ test('shell-init command prints a TTY-aware shell function', async () => {
   assert.match(result.stdout, /--env-file/);
   assert.match(
     result.stdout,
-    /DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN/,
+    /DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_SECRET_TOKEN DUD_CA_BUNDLE DUD_CONNECT_TO/,
   );
+  assert.match(result.stdout, /DUD_DOCKER_NETWORK/);
   assert.match(result.stdout, /_dud_shell_quote -e/);
   assert.match(result.stdout, /docker run --rm -it/);
   assert.match(result.stdout, /docker run --rm -i/);
@@ -1761,6 +1807,9 @@ printf '%s\n' "$@" > "${logFile}"
     {
       PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
       DUD_SECRET_TOKEN: 'top-secret',
+      DUD_DOCKER_NETWORK: 'dud_dev',
+      DUD_CA_BUNDLE: '/work/.dud-dev/caddy-data/pki/authorities/local/root.crt',
+      DUD_CONNECT_TO: 'dud.local.test:443:caddy:443',
     },
   );
 
@@ -1770,7 +1819,13 @@ printf '%s\n' "$@" > "${logFile}"
   assert.match(args, /--rm/);
   assert.match(args, /ghcr\.io\/wojciechpolak\/dud\/dud-client:latest/);
   assert.match(args, /test/);
+  assert.match(args, /--network\ndud_dev/);
   assert.match(args, /-e\nDUD_SECRET_TOKEN=top-secret/);
+  assert.match(
+    args,
+    /-e\nDUD_CA_BUNDLE=\/work\/\.dud-dev\/caddy-data\/pki\/authorities\/local\/root\.crt/,
+  );
+  assert.match(args, /-e\nDUD_CONNECT_TO=dud\.local\.test:443:caddy:443/);
 });
 
 test('shell-init output does not pass an empty command argument', async () => {

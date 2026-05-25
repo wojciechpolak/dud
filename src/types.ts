@@ -42,6 +42,7 @@ export interface DudConfig {
   maxUploadBytes: number;
   cleanupBatchSize: number;
   flushMaxIterations: number;
+  storageNotConfiguredMessage: string;
   secretToken?: string;
   storageConfigured: boolean;
 }

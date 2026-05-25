@@ -145,7 +145,7 @@ test('upload returns 503 when R2 binding is missing', async () => {
 
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), {
-    error: 'Storage is not configured. Bind R2 as FILES.',
+    error: 'Storage is not configured.',
   });
 });
 

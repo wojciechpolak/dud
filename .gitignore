@@ -3,6 +3,7 @@
 .env
 .idea/
 .wrangler/
+.dud-dev/
 coverage/
 dist/
 node_modules/

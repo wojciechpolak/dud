@@ -1,0 +1,41 @@
+services:
+  dud-server:
+    image: ${DUD_SERVER_IMAGE:-ghcr.io/wojciechpolak/dud/dud-server}:${DUD_SERVER_TAG:-latest}
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - '8787:8787'
+    environment:
+      DUD_SECRET_TOKEN:
+        ${DUD_SECRET_TOKEN:?set DUD_SECRET_TOKEN in .env or your shell}
+      DUD_PUBLIC_BASE_URL: ${DUD_PUBLIC_BASE_URL:-}
+      DUD_LOG_MODE: ${DUD_LOG_MODE:-normal}
+      DUD_DEFAULT_TTL: ${DUD_DEFAULT_TTL:-24h}
+      DUD_MAX_TTL: ${DUD_MAX_TTL:-30d}
+      DUD_MAX_UPLOAD_BYTES: ${DUD_MAX_UPLOAD_BYTES:-104857600}
+      DUD_CLEANUP_BATCH_SIZE: ${DUD_CLEANUP_BATCH_SIZE:-100}
+      DUD_FLUSH_MAX_ITERATIONS: ${DUD_FLUSH_MAX_ITERATIONS:-20}
+    volumes:
+      - dud_data:/data
+  caddy:
+    profiles: ['integration']
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - dud-server
+    environment:
+      DUD_HOSTNAME: ${DUD_INTEGRATION_HOSTNAME:-dud.local.test}
+      DUD_UPSTREAM: ${DUD_INTEGRATION_UPSTREAM:-dud-server:8787}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./.dud-dev/caddy-data:/data
+      - ./.dud-dev/caddy-config:/config
+
+networks:
+  default:
+    name: ${DUD_DOCKER_NETWORK_NAME:-dud_dev}
+
+volumes:
+  dud_data:

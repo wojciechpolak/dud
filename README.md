@@ -1,13 +1,14 @@
 # DUD
 
-Discreet upload / download using a Cloudflare Worker on `dud.example.com`, R2
-for storage, and a Dockerized client that uses `curl`, `age`, and `age-keygen`.
+Discreet upload / download with either a Cloudflare Worker backed by R2 or a
+self-hosted Node server backed by local disk, plus a Dockerized client that uses
+`curl`, `age`, and `age-keygen`.
 
 ## What this does
 
 - Encrypts files locally with `age` before upload, using either a passphrase or
   recipient public keys.
-- Uploads only ciphertext to the Worker.
+- Uploads only ciphertext to the server.
 - Returns an opaque ID that the recipient can use to fetch ciphertext.
 - Decrypts locally after download with the shared passphrase or recipient
   private key.
@@ -24,6 +25,7 @@ Stack:
 
 - [Cloudflare Worker](https://workers.cloudflare.com/)
 - [R2](https://www.cloudflare.com/developer-platform/products/r2/)
+- [Node.js](https://nodejs.org/)
 - [Docker](https://www.docker.com/)
 - [curl](https://curl.se/)
 - [age](https://github.com/FiloSottile/age)
@@ -39,181 +41,307 @@ Recommended mode:
 - `age` post-quantum recipients generated with `age-keygen -pq` are supported by
   the same public-key flow.
 
-## First steps
+## Deployment targets
 
-These steps assume you want to deploy your own Cloudflare-backed DUD service,
-but use a prebuilt Docker client image rather than building the client locally.
+- Cloudflare Worker + R2 is available for people who want a managed edge
+  deployment.
+- A self-hosted Node server backed by local disk is now supported as the first
+  non-Cloudflare backend.
+- DUD assumes bring-your-own infrastructure. No public shared hosted instance is
+  required or assumed.
 
-### 1. Clone the repository
+## Quick start
+
+Choose one of these deployment paths:
+
+- `Cloudflare Worker + R2`: easiest managed deployment
+- `Cloudflare Tunnel for self-hosted dud-server`: private origin with a public
+  Cloudflare-backed hostname and tested `DUD_ECH_MODE=hard`
+- `Self-hosted without Cloudflare`: most manual path, for operators managing
+  their own HTTPS and DNS stack
+
+### 1. Cloudflare Worker + R2
+
+Who this is for: operators who want the simplest Cloudflare-backed deployment
+without running their own Node server.
+
+Minimum prerequisites:
+
+- a Cloudflare account
+- a hostname managed by Cloudflare
+- Docker for the client image
+
+Setup:
+
+1. Clone the repository and install dependencies:
 
 ```sh
 git clone https://github.com/wojciechpolak/dud.git
 cd dud
-```
-
-### 2. Install dependencies
-
-```sh
 npm ci
 ```
 
-### 3. Sign in to Cloudflare
+2. Sign in to Cloudflare and create the R2 bucket:
 
 ```sh
 npx wrangler login
-```
-
-### 4. Create the storage resources
-
-Create the R2 bucket:
-
-```sh
 npx wrangler r2 bucket create dud-files
 ```
 
-### 5. Create your local `wrangler.toml`
-
-Start from the checked-in example:
+3. Create `wrangler.toml` from the checked-in example:
 
 ```sh
 cp wrangler.example.toml wrangler.toml
 ```
 
-Then edit `wrangler.toml` before the first deployment:
+4. Edit `wrangler.toml` before the first deployment:
 
 - keep `name = "dud"` unless you want a different Worker name
-- change `pattern = "dud.example.com"` if you want to use a different hostname
+- change `pattern = "dud.example.com"` if you want a different hostname
 - keep `bucket_name = "dud-files"` only if that is the bucket you created
+- keep the R2 binding name as `FILES`
 - keep or adjust `APP_VERSION`
 
-The real `wrangler.toml` is gitignored so machine-specific IDs and future local
-changes stay out of the repository.
-
-Important: Wrangler commands may suggest a different `binding` name such as
-`dud_files`. In this repository, the Worker code expects this exact binding:
-
-- R2 binding: `FILES`
-
-So keep this shape in your local `wrangler.toml` unless you also change the
-Worker code:
-
-```toml
-[[r2_buckets]]
-binding = "FILES"
-bucket_name = "dud-files"
-```
-
-### 6. Verify the repo before deploying
+5. Verify the repo and deploy:
 
 ```sh
 npm run check
-```
-
-### 7. Deploy the Worker
-
-```sh
 npx wrangler deploy
 ```
 
-After deploy, make sure `dud.example.com` is actually routed through Cloudflare
-and resolves to the Worker custom domain you configured.
-
-### 8. Configure the shared secret token
-
-Uploads and the manual `flush` command both require the same Worker secret:
+6. Configure the shared upload secret:
 
 ```sh
 npx wrangler secret put DUD_SECRET_TOKEN
 ```
 
-The value of this secret is later passed to the Docker client as
-`DUD_SECRET_TOKEN` when you want to upload files or run `flush`.
-
-### 9. Pull the prebuilt client image
-
-Pick the published image name you want to use and pull it once:
+7. Pull the client image and point it at the Worker hostname:
 
 ```sh
 docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
+export DUD_BASE_URL=https://your-dud-host.example.com
 ```
 
-## Repository layout
+8. Confirm the transport path:
+
+```sh
+dud test
+```
+
+The real `wrangler.toml` is gitignored so machine-specific IDs and future local
+changes stay out of the repository.
+
+### 2. Cloudflare Tunnel for self-hosted `dud-server`
+
+Who this is for: private LAN hosts or NAS systems that should stay self-hosted
+while exposing a public Cloudflare-backed hostname for the Docker client.
+
+Minimum prerequisites:
+
+- a Cloudflare-managed hostname
+- a working [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/)
+  (`cloudflared`)
+- Docker for `dud-server` and the client image
+
+Setup:
+
+1. Create a local `.env` file or export the upload secret:
+
+```dotenv
+DUD_SECRET_TOKEN=replace-me
+```
+
+2. Start the self-hosted server:
+
+```sh
+curl https://raw.githubusercontent.com/wojciechpolak/dud/master/docker-compose.yml | docker compose -f - up
+```
+
+Docker Compose stores server data in the named volume `dud_data` by default,
+which avoids common host bind-mount permission issues.
+
+3. Publish a public subdomain through Cloudflare Tunnel to the private server
+   origin.
+
+Typical origins are:
+
+- `http://127.0.0.1:8787` when `cloudflared` runs on the same host
+- `http://dud-server:8787` when `cloudflared` shares the Docker network
+
+4. Pull the client image and point it at the public tunnel hostname:
+
+```sh
+docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
+export DUD_BASE_URL=https://your-dud-host.example.com
+```
+
+5. Confirm the Cloudflare-backed transport path:
+
+```sh
+dud test
+```
+
+This path has been tested successfully with `dud test`, showing TLS 1.3 and
+`ech: succeeded` against the public hostname.
+
+Expected transport details include:
+
+- `tls: TLSv1.3 ...`
+- `ech: succeeded`
+- `outer sni: cloudflare-ech.com`
+
+Note that ECH protects the client-to-Cloudflare hop. Your origin remains private
+behind the tunnel, but ECH itself does not apply to the Cloudflare-to-origin
+connection.
+
+### 3. Self-hosted without Cloudflare
+
+Who this is for: operators who want to run `dud-server` themselves and manage
+their own HTTPS reverse proxy or direct TLS setup.
+
+Minimum prerequisites:
+
+- a public hostname
+- an HTTPS endpoint in front of `dud-server`
+- Docker for `dud-server` and the client image
+
+Setup:
+
+1. Create a local `.env` file or export the upload secret:
+
+```dotenv
+DUD_SECRET_TOKEN=replace-me
+```
+
+2. Start the self-hosted server:
+
+```sh
+docker compose up -d
+```
+
+3. Publish the service through your own HTTPS stack, either with:
+
+- a reverse proxy in front of `dud-server`
+- or direct TLS via `DUD_TLS_CERT_FILE` and `DUD_TLS_KEY_FILE`
+
+4. Pull the client image and point it at the public hostname:
+
+```sh
+docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
+export DUD_BASE_URL=https://your-dud-host.example.com
+```
+
+5. Choose the transport mode:
+
+- use `export DUD_ECH_MODE=hard` only if your hostname really supports ECH and
+  publishes the required HTTPS DNS records
+- otherwise use `export DUD_ECH_MODE=grease`
+
+6. Confirm the endpoint:
+
+```sh
+dud test
+```
+
+This is the most manual deployment path in the README. It works well when you
+already operate your own HTTPS and DNS stack, but it requires more setup than
+the Cloudflare-backed options above.
+
+## Local testing
+
+These workflows are for local validation and development. They are not the main
+deployment paths above.
+
+### Host Caddy on localhost
+
+For local browser/manual HTTPS testing, run Caddy directly on the host:
+
+```sh
+npm run dev:caddy
+```
+
+If your system does not already trust Caddy's local CA, run:
+
+```sh
+npm run dev:caddy:trust
+```
+
+This repo's [Caddyfile](./Caddyfile) proxies:
+
+- `https://dud.localhost`
+- to the Dockerized `dud-server` at `127.0.0.1:8787`
+
+If you want to point the client at that local HTTPS endpoint:
+
+```sh
+export DUD_BASE_URL=https://dud.localhost
+export DUD_ECH_MODE=grease
+```
+
+Important:
+
+- host Caddy gives you local HTTPS, but not real ECH
+- `DUD_ECH_MODE=hard` will not work against the default local `dud.localhost`
+  setup
+- `dud-client` uses DoH by default, so `dud.localhost` is best treated as a
+  browser/manual HTTPS test target rather than a realistic end-to-end client
+  test target
+
+### Docker-only integration testing
+
+If you want to exercise `dud-client -> HTTPS proxy -> dud-server` entirely in
+Docker, start the optional integration Caddy service on the same Docker network:
+
+```sh
+docker compose --profile integration up -d
+```
+
+Then configure the client wrapper on the host so the `dud-client` container:
+
+- joins the same Docker network
+- trusts the internal Caddy local CA
+- connects to the internal Caddy service without relying on public DNS
+
+```sh
+export DUD_BASE_URL=https://dud.local.test
+export DUD_ECH_MODE=grease
+export DUD_DOCKER_NETWORK=dud_dev
+export DUD_CA_BUNDLE=/work/.dud-dev/caddy-data/pki/authorities/local/root.crt
+export DUD_CONNECT_TO=dud.local.test:443:caddy:443
+```
+
+Then:
+
+```sh
+dud test
+```
+
+This mode is useful for local Dockerized integration testing, but it is still
+not a realistic substitute for public-DNS validation or real ECH.
+
+### Real ECH notes
+
+For real ECH beyond local testing:
+
+- use a public hostname that already has an A/AAAA record pointing to your
+  server
+- use DoH or DoT on the client side
+- use a Caddy build with the right `caddy-dns` provider module
+- configure the global `dns` and `ech` options in [Caddyfile](./Caddyfile)
+
+Caddy's documentation notes that functioning ECH requires publishing HTTPS DNS
+records and therefore a Caddy build with a DNS provider module.
+
+### Repository layout
 
 - `src/`: Worker code and Cloudflare adapters.
+- `src/node-server.ts`: self-hosted Node server adapter.
+- `src/filesystem.ts`: local-disk `BlobStore` implementation.
+- `server/`: Docker packaging for the Node server image.
 - `client/`: Docker client image and entrypoint script.
 - `tests/`: Worker and client tests.
 
-## API
-
-### `GET /v1/test`
-
-Returns readiness JSON:
-
-```json
-{
-  "ok": true,
-  "service": "dud",
-  "host": "dud.example.com",
-  "version": "1.2.0"
-}
-```
-
-### `POST /v1/files`
-
-Uploads an encrypted payload stream.
-
-Request headers:
-
-- `x-dud-secret-token`: must match the Worker `DUD_SECRET_TOKEN` secret
-- `x-dud-ttl`: TTL such as `15m`, `24h`, `7d`. Default `24h`.
-- `x-dud-delete-after-read`: `true` or `false`. Default `false`.
-- `content-length`: optional but recommended.
-
-Response:
-
-```json
-{
-  "id": "3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe",
-  "expiresAt": "2026-04-19T12:00:00.000Z",
-  "deleteAfterRead": false
-}
-```
-
-### `GET /v1/files/:id`
-
-Streams ciphertext back when the file is still available.
-
-The download endpoint accepts the file ID either as dashed groups of four
-characters or as the original raw 32-character lowercase hex string.
-
-- `404`: unknown ID
-- `410`: expired or already consumed
-
-### `POST /v1/admin/flush`
-
-Deletes expired and already-consumed objects from R2 immediately.
-
-Request headers:
-
-- `x-dud-secret-token`: must match the Worker `DUD_SECRET_TOKEN` secret
-
-Response:
-
-```json
-{
-  "ok": true,
-  "deletedCount": 3
-}
-```
-
-## Deploy
-
-```sh
-npm run check
-npx wrangler deploy
-```
-
-## Docker client
+## DUD Client
 
 Pull the published image:
 
@@ -339,6 +467,50 @@ DUD_SECRET_TOKEN=replace-me
 ```
 
 Set `DUD_IMAGE` to override the image name embedded in the generated output.
+
+## DUD Server
+
+Pull the published server image:
+
+```sh
+docker pull ghcr.io/wojciechpolak/dud/dud-server:latest
+```
+
+Run it with a persistent data volume:
+
+```sh
+docker run --rm -p 8787:8787 \
+  -e DUD_SECRET_TOKEN=replace-me \
+  -v "$PWD/dud-data:/data" \
+  ghcr.io/wojciechpolak/dud/dud-server:latest
+```
+
+Container defaults:
+
+- `DUD_DATA_DIR=/data`
+- `DUD_LISTEN_HOST=0.0.0.0`
+- `DUD_LISTEN_PORT=8787`
+
+The image starts `node dist/src/node-server.js` under `tini` as the non-root
+`dud` user. Mount `/data` if you want uploads to persist across container
+restarts.
+
+If you use Docker Compose, the checked-in `docker-compose.yml` already persists
+`/data` in the named volume `dud_data`.
+
+To reduce routine logs:
+
+- `DUD_LOG_MODE=normal`: startup banner plus access logs with client IP
+- `DUD_LOG_MODE=minimal`: startup banner plus access logs without client IP
+- `DUD_LOG_MODE=silent`: suppress startup and access logs, while still keeping
+  error logging
+
+You can build images locally with the helper script:
+
+```sh
+./scripts/docker-build.sh --component client
+./scripts/docker-build.sh --component server
+```
 
 ## Example usage
 
@@ -539,6 +711,69 @@ dud flush
 
 This deletes expired and already-consumed objects from R2 immediately and
 returns a JSON response with `deletedCount`.
+
+## API
+
+### `GET /v1/test`
+
+Returns readiness JSON:
+
+```json
+{
+  "ok": true,
+  "service": "dud",
+  "host": "dud.example.com",
+  "version": "1.2.0"
+}
+```
+
+### `POST /v1/files`
+
+Uploads an encrypted payload stream.
+
+Request headers:
+
+- `x-dud-secret-token`: must match the Worker `DUD_SECRET_TOKEN` secret
+- `x-dud-ttl`: TTL such as `15m`, `24h`, `7d`. Default `24h`.
+- `x-dud-delete-after-read`: `true` or `false`. Default `false`.
+- `content-length`: optional but recommended.
+
+Response:
+
+```json
+{
+  "id": "3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe",
+  "expiresAt": "2026-04-19T12:00:00.000Z",
+  "deleteAfterRead": false
+}
+```
+
+### `GET /v1/files/:id`
+
+Streams ciphertext back when the file is still available.
+
+The download endpoint accepts the file ID either as dashed groups of four
+characters or as the original raw 32-character lowercase hex string.
+
+- `404`: unknown ID
+- `410`: expired or already consumed
+
+### `POST /v1/admin/flush`
+
+Deletes expired and already-consumed objects from R2 immediately.
+
+Request headers:
+
+- `x-dud-secret-token`: must match the Worker `DUD_SECRET_TOKEN` secret
+
+Response:
+
+```json
+{
+  "ok": true,
+  "deletedCount": 3
+}
+```
 
 ## Notes
 

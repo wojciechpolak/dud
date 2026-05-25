@@ -11,5 +11,6 @@ export const DEFAULT_CONFIG: DudConfig = {
   maxUploadBytes: 100 * 1024 * 1024,
   cleanupBatchSize: 100,
   flushMaxIterations: 20,
+  storageNotConfiguredMessage: 'Storage is not configured.',
   storageConfigured: true,
 };
