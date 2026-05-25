@@ -6,7 +6,7 @@ import { mkdtemp, readFile, writeFile, chmod, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const CLIENT_SCRIPT = path.resolve('client/entrypoint.sh');
 
@@ -263,6 +263,10 @@ printf '[qr]\\n'
   assert.match(result.stdout, /^ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe$/m);
   assert.match(result.stdout, /^Expires: 2026-04-20T12:00:00.000Z$/m);
   assert.match(result.stdout, /^Delete after read: yes$/m);
+  assert.match(
+    result.stdout,
+    /^Receive: dud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com$/m,
+  );
   assert.match(result.stdout, /\nQR Code:\n\[qr\]\n?$/);
   assert.match(await readFile(ageLog, 'utf8'), /--passphrase/);
   const curlArgs = await readFile(curlLog, 'utf8');
@@ -272,7 +276,7 @@ printf '[qr]\\n'
   assert.equal(await readFile(curlPayload, 'utf8'), 'plaintext');
   assert.match(
     await readFile(qrLog, 'utf8'),
-    /-t\nansiutf8\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe/,
+    /-t\nansiutf8\ndud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com/,
   );
 });
 
@@ -674,6 +678,102 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
   assert.equal(await readFile(curlPayload, 'utf8'), 'stdin plaintext');
 });
 
+test('upload command can bundle multiple files and directories', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-bundle-'),
+  );
+  const firstFile = path.join(tmpDir, 'alpha.txt');
+  const secondDir = path.join(tmpDir, 'docs');
+  const secondFile = path.join(secondDir, 'beta.txt');
+  const curlPayload = path.join(tmpDir, 'payload.tar');
+  const curlLog = path.join(tmpDir, 'curl.log');
+  const qrLog = path.join(tmpDir, 'qr.log');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const qrMock = path.join(tmpDir, 'qr-mock.sh');
+
+  await writeFile(firstFile, 'alpha payload', 'utf8');
+  await mkdir(secondDir);
+  await writeFile(secondFile, 'beta payload', 'utf8');
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${curlLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--data-binary" ]; then
+    payload="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "\${payload#@}" "${curlPayload}"
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    qrMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${qrLog}"
+printf '[qr]\\n'
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'send', '--file', firstFile, '--file', secondDir],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_QRENCODE_BIN: qrMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(
+    result.stdout,
+    /^Receive: dud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com --extract$/m,
+  );
+  const bundleEntries = execFileSync('tar', ['-tf', curlPayload], {
+    encoding: 'utf8',
+  })
+    .trim()
+    .split('\n');
+  assert.deepEqual(bundleEntries.sort(), [
+    'alpha.txt',
+    'docs/',
+    'docs/beta.txt',
+  ]);
+  assert.match(
+    await readFile(qrLog, 'utf8'),
+    /dud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com --extract/,
+  );
+});
+
 test('upload command rejects conflicting source options', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-upload-conflict-'),
@@ -764,6 +864,10 @@ printf '[qr]\\n'
   assert.match(result.stdout, /^Upload complete$/m);
   assert.match(result.stdout, /^ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe$/m);
   assert.match(result.stdout, /^Delete after read: no$/m);
+  assert.match(
+    result.stdout,
+    /^Receive: dud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com$/m,
+  );
   assert.doesNotMatch(result.stdout, /QR Code:/);
   await assert.rejects(readFile(qrLog, 'utf8'));
 });
@@ -952,6 +1056,92 @@ printf 'plain stdout' > "$output"
   assert.equal(result.stdout, 'plain stdout');
 });
 
+test('receive command can extract a bundled archive', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-download-extract-'),
+  );
+  const archivePath = path.join(tmpDir, 'bundle.tar');
+  const archiveRoot = path.join(tmpDir, 'bundle-root');
+  const nestedDir = path.join(archiveRoot, 'docs');
+  const extractDir = path.join(tmpDir, 'extracted');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+
+  await mkdir(archiveRoot);
+  await mkdir(nestedDir);
+  await writeFile(path.join(archiveRoot, 'alpha.txt'), 'alpha payload', 'utf8');
+  await writeFile(path.join(nestedDir, 'beta.txt'), 'beta payload', 'utf8');
+  execFileSync(
+    'tar',
+    ['-cf', archivePath, '-C', archiveRoot, 'alpha.txt', 'docs'],
+    { encoding: 'utf8' },
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "${archivePath}" "$output"
+`,
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'receive',
+      '--id',
+      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
+      '--extract',
+      '--out-dir',
+      extractDir,
+    ],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(
+    result.stdout,
+    new RegExp(
+      `Extracted bundle to ${extractDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+    ),
+  );
+  assert.equal(
+    await readFile(path.join(extractDir, 'alpha.txt'), 'utf8'),
+    'alpha payload',
+  );
+  assert.equal(
+    await readFile(path.join(extractDir, 'docs', 'beta.txt'), 'utf8'),
+    'beta payload',
+  );
+});
+
 test('download command can decrypt with an explicit identity file', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-download-identity-'),
@@ -1050,6 +1240,21 @@ test('download command validates stdout and file output options', async () => {
 
   assert.notEqual(missingResult.code, 0);
   assert.match(missingResult.stderr, /requires either --out or --stdout/);
+
+  const extractStdoutResult = await runCommand('sh', [
+    CLIENT_SCRIPT,
+    'download',
+    '--id',
+    '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
+    '--extract',
+    '--stdout',
+  ]);
+
+  assert.notEqual(extractStdoutResult.code, 0);
+  assert.match(
+    extractStdoutResult.stderr,
+    /does not support --stdout with --extract/,
+  );
 });
 
 test('interactive upload can collect typed text and upload it', async () => {
@@ -1344,6 +1549,86 @@ printf 'interactive identity output' > "$output"
   assert.match(
     ageArgs,
     new RegExp(identityPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+});
+
+test('interactive download can extract a bundle into a directory', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-interactive-download-extract-'),
+  );
+  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const archivePath = path.join(tmpDir, 'bundle.tar');
+  const archiveRoot = path.join(tmpDir, 'bundle-root');
+  const nestedDir = path.join(archiveRoot, 'docs');
+  const extractDir = path.join(tmpDir, 'output-dir');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+
+  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
+  await chmod(interactiveScript, 0o755);
+  await mkdir(archiveRoot);
+  await mkdir(nestedDir);
+  await writeFile(path.join(archiveRoot, 'alpha.txt'), 'alpha payload', 'utf8');
+  await writeFile(path.join(nestedDir, 'beta.txt'), 'beta payload', 'utf8');
+  execFileSync(
+    'tar',
+    ['-cf', archivePath, '-C', archiveRoot, 'alpha.txt', 'docs'],
+    { encoding: 'utf8' },
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "${archivePath}" "$output"
+`,
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  const result = await runCommand(
+    interactiveScript,
+    [],
+    {
+      DUD_TEST_STDIN_TTY: '1',
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+    {
+      input: `3\n\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe\n3\n${extractDir}\n\n`,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /extract bundle/);
+  assert.equal(
+    await readFile(path.join(extractDir, 'alpha.txt'), 'utf8'),
+    'alpha payload',
+  );
+  assert.equal(
+    await readFile(path.join(extractDir, 'docs', 'beta.txt'), 'utf8'),
+    'beta payload',
   );
 });
 

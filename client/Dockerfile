@@ -89,7 +89,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
+    findutils \
     qrencode \
+    tar \
     tini \
   && rm -rf /var/lib/apt/lists/*
 

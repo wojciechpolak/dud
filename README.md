@@ -254,11 +254,12 @@ docker run --rm -i --tmpfs /tmp:rw,noexec,nosuid,size=128m ghcr.io/wojciechpolak
 docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN ghcr.io/wojciechpolak/dud/dud-client:latest flush
 ```
 
-`upload` prints a human-friendly summary and a terminal QR code for the returned
-ID by default. Add `--no-qr` to suppress the QR block. For scripts or other
-machine-readable use cases, add `--json` to print the raw upload response.
-Without `--file` or `-m`, `upload` reads plaintext from stdin. `download` writes
-to a file with `--out` or to stdout with `--stdout`.
+`upload` prints a human-friendly summary, a suggested `dud receive ...` command,
+and a terminal QR code for that command by default. Add `--no-qr` to suppress
+the QR block. For scripts or other machine-readable use cases, add `--json` to
+print the raw upload response. Without `--file` or `-m`, `upload` reads
+plaintext from stdin. `download` writes to a file with `--out`, to stdout with
+`--stdout`, or extracts bundled archives with `--extract`.
 
 Use `dud --version` to print the client version.
 
@@ -363,7 +364,7 @@ docker run --rm -it \
   ghcr.io/wojciechpolak/dud/dud-client:latest test
 ```
 
-### 2. Upload a file or message as the sender
+### 2. Upload a file, directory, or message as the sender
 
 #### Passphrase mode
 
@@ -371,7 +372,7 @@ Suppose the sender wants to share `secret.pdf` and keep it available for 48
 hours:
 
 ```sh
-dud upload --file /work/secret.pdf --ttl 48h
+dud send --file /work/secret.pdf --ttl 48h
 ```
 
 To suppress the terminal QR code and print only the text summary, add `--no-qr`:
@@ -390,6 +391,7 @@ Upload complete
 ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe
 Expires: 2026-04-20T12:00:00.000Z
 Delete after read: no
+Receive: dud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https://dud.example.com
 ```
 
 If you need the raw JSON instead, run the same command with `--json`.
@@ -409,6 +411,16 @@ printf '%s' 'streamed secret' | dud upload --json
 If stdin is a TTY and you run `dud upload` without `--file` or `-m`, the client
 accepts typed or pasted input until you press Ctrl-D, then prompts for the `age`
 passphrase and uploads the encrypted payload.
+
+To send multiple files or a directory tree, repeat `--file`. DUD creates a local
+tar archive, encrypts it, and uploads only ciphertext:
+
+```sh
+dud send --file /work/report.pdf --file /work/photos --ttl 24h
+```
+
+The suggested receive command and QR code automatically include `--extract` for
+bundle transfers.
 
 Only two things need to be shared with the recipient:
 
@@ -455,7 +467,7 @@ On another machine, the recipient can fetch and decrypt a passphrase-encrypted
 upload like this:
 
 ```sh
-dud download \
+dud receive \
   --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
   --out /work/received-secret.pdf
 ```
@@ -475,6 +487,16 @@ or pipe it as needed:
 dud download \
   --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
   --stdout > /work/received-secret.pdf
+```
+
+For bundled transfers, add `--extract`. If you omit `--out-dir`, DUD extracts
+into `./dud-<id>`:
+
+```sh
+dud receive \
+  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
+  --extract \
+  --out-dir /work/incoming
 ```
 
 For public-key mode, pass the recipient identity file:

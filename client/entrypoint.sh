@@ -74,6 +74,8 @@ run_secure_curl() {
 UPLOAD_ID=""
 UPLOAD_EXPIRES_AT=""
 UPLOAD_DELETE_AFTER_READ_LABEL=""
+UPLOAD_RECEIVE_COMMAND=""
+UPLOAD_IS_BUNDLE="false"
 
 upload_json_string_field() {
   field="$1"
@@ -120,16 +122,85 @@ load_upload_response() {
   UPLOAD_DELETE_AFTER_READ_LABEL="$delete_after_read_label"
 }
 
+build_receive_command() {
+  base_url="$1"
+  receive_command="dud receive --id $UPLOAD_ID --url $base_url"
+
+  if [ "$UPLOAD_IS_BUNDLE" = "true" ]; then
+    receive_command="$receive_command --extract"
+  fi
+
+  UPLOAD_RECEIVE_COMMAND="$receive_command"
+}
+
 print_upload_response() {
   printf 'Upload complete\n'
   printf 'ID: %s\n' "$UPLOAD_ID"
   printf 'Expires: %s\n' "$UPLOAD_EXPIRES_AT"
   printf 'Delete after read: %s\n' "$UPLOAD_DELETE_AFTER_READ_LABEL"
+  printf 'Receive: %s\n' "$UPLOAD_RECEIVE_COMMAND"
 }
 
 print_upload_qr() {
   printf '\nQR Code:\n'
-  "$DUD_QRENCODE_BIN" -t ansiutf8 "$UPLOAD_ID"
+  "$DUD_QRENCODE_BIN" -t ansiutf8 "$UPLOAD_RECEIVE_COMMAND"
+}
+
+create_bundle_archive() {
+  archive_path="$1"
+  source_list_file="$2"
+  archive_names=""
+
+  set -- -cf "$archive_path"
+
+  while IFS= read -r source || [ -n "$source" ]; do
+    [ -n "$source" ] || continue
+    [ -e "$source" ] || die "Path not found: $source"
+
+    if find "$source" -type l -print -quit | grep -q .; then
+      die "Bundle sources cannot include symlinks: $source"
+    fi
+
+    archive_name="$(basename "$source")"
+    case "$archive_name" in
+      ''|.|..)
+        die "Bundle source has an invalid top-level name: $source"
+        ;;
+    esac
+
+    if [ -n "$archive_names" ] && printf '%s\n' "$archive_names" | grep -Fx -- "$archive_name" >/dev/null 2>&1; then
+      die "Bundle sources must have unique top-level names: $archive_name"
+    fi
+    if [ -n "$archive_names" ]; then
+      archive_names="${archive_names}
+$archive_name"
+    else
+      archive_names="$archive_name"
+    fi
+
+    parent_dir="$(dirname "$source")"
+    set -- "$@" -C "$parent_dir" "$archive_name"
+  done <"$source_list_file"
+
+  tar "$@"
+}
+
+validate_bundle_listing() {
+  listing_file="$1"
+
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    [ -n "$entry" ] || continue
+
+    case "$entry" in
+      /*)
+        die "Bundle contains an absolute path: $entry"
+        ;;
+    esac
+
+    if printf '%s\n' "$entry" | grep -Eq '(^|/)\.\.(/|$)'; then
+      die "Bundle contains an unsafe path: $entry"
+    fi
+  done <"$listing_file"
 }
 
 print_test_details() {
@@ -219,7 +290,7 @@ cmd_test() {
 }
 
 cmd_upload() {
-  file=""
+  file_list=""
   message=""
   ttl="24h"
   delete_after_read="false"
@@ -234,7 +305,12 @@ cmd_upload() {
     case "$1" in
       --file)
         need_value "$@"
-        file="$2"
+        if [ -n "$file_list" ]; then
+          file_list="${file_list}
+$2"
+        else
+          file_list="$2"
+        fi
         shift 2
         ;;
       -m)
@@ -295,16 +371,13 @@ $2"
   done
 
   source_count=0
-  if [ -n "$file" ]; then
+  if [ -n "$file_list" ]; then
     source_count=$((source_count + 1))
   fi
   if [ -n "$message" ]; then
     source_count=$((source_count + 1))
   fi
   [ "$source_count" -le 1 ] || die "upload accepts only one source: --file, -m, or stdin"
-  if [ -n "$file" ]; then
-    [ -f "$file" ] || die "File not found: $file"
-  fi
   if [ -n "$recipients_file" ]; then
     [ -f "$recipients_file" ] || die "Recipients file not found: $recipients_file"
   fi
@@ -322,17 +395,42 @@ $2"
   encrypted_file="$(mktemp /tmp/dud-upload-XXXXXX.age)"
   response_file="$(mktemp /tmp/dud-upload-response-XXXXXX.json)"
   inline_recipients_file=""
-  trap 'rm -f "$plaintext_file" "$encrypted_file" "$response_file" "$inline_recipients_file"' EXIT HUP INT TERM
+  source_list_file=""
+  trap 'rm -f "$plaintext_file" "$encrypted_file" "$response_file" "$inline_recipients_file" "$source_list_file"' EXIT HUP INT TERM
 
-  if [ -n "$file" ]; then
-    cat "$file" >"$plaintext_file"
+  if [ -n "$file_list" ]; then
+    source_list_file="$(mktemp /tmp/dud-upload-sources-XXXXXX.txt)"
+    printf '%s\n' "$file_list" >"$source_list_file"
+
+    path_count=0
+    bundle_mode="false"
+    while IFS= read -r source || [ -n "$source" ]; do
+      [ -n "$source" ] || continue
+      [ -e "$source" ] || die "Path not found: $source"
+      path_count=$((path_count + 1))
+
+      if [ -d "$source" ] || [ "$path_count" -gt 1 ]; then
+        bundle_mode="true"
+      fi
+    done <"$source_list_file"
+
+    if [ "$bundle_mode" = "true" ]; then
+      create_bundle_archive "$plaintext_file" "$source_list_file"
+      UPLOAD_IS_BUNDLE="true"
+    else
+      first_path="$(sed -n '1p' "$source_list_file")"
+      cat "$first_path" >"$plaintext_file"
+      UPLOAD_IS_BUNDLE="false"
+    fi
   elif [ -n "$message" ]; then
     printf '%s' "$message" >"$plaintext_file"
+    UPLOAD_IS_BUNDLE="false"
   else
     if stdin_is_tty; then
       printf 'Enter plaintext, then press Ctrl-D when finished.\n' >&2
     fi
     cat >"$plaintext_file"
+    UPLOAD_IS_BUNDLE="false"
   fi
 
   if [ "$recipient_mode" = "true" ]; then
@@ -385,6 +483,7 @@ $2"
   fi
 
   load_upload_response "$response_file"
+  build_receive_command "$base_url"
   print_upload_response
   if [ "$output_qr" = "true" ]; then
     print_upload_qr
@@ -394,9 +493,11 @@ $2"
 cmd_download() {
   id=""
   out=""
+  out_dir=""
   output_stdout="false"
   base_url="$DUD_BASE_URL"
   identity=""
+  extract_bundle="false"
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -413,6 +514,15 @@ cmd_download() {
       --stdout)
         output_stdout="true"
         shift 1
+        ;;
+      --extract)
+        extract_bundle="true"
+        shift 1
+        ;;
+      --out-dir)
+        need_value "$@"
+        out_dir="$2"
+        shift 2
         ;;
       --identity|-i)
         need_value "$@"
@@ -436,10 +546,19 @@ cmd_download() {
   done
 
   [ -n "$id" ] || die "download requires --id"
+  if [ "$extract_bundle" = "true" ] && [ "$output_stdout" = "true" ]; then
+    die "download does not support --stdout with --extract"
+  fi
+  if [ "$extract_bundle" = "true" ] && [ -n "$out" ]; then
+    die "download accepts --out-dir instead of --out when using --extract"
+  fi
   if [ -n "$out" ] && [ "$output_stdout" = "true" ]; then
     die "download accepts only one output target: --out or --stdout"
   fi
-  if [ -z "$out" ] && [ "$output_stdout" != "true" ]; then
+  if [ "$extract_bundle" != "true" ] && [ -n "$out_dir" ]; then
+    die "download accepts --out-dir only with --extract"
+  fi
+  if [ "$extract_bundle" != "true" ] && [ -z "$out" ] && [ "$output_stdout" != "true" ]; then
     die "download requires either --out or --stdout"
   fi
   if [ -n "$identity" ]; then
@@ -448,7 +567,8 @@ cmd_download() {
 
   encrypted_file="$(mktemp /tmp/dud-download-XXXXXX.age)"
   plaintext_file="$(mktemp /tmp/dud-download-plain-XXXXXX)"
-  trap 'rm -f "$encrypted_file" "$plaintext_file"' EXIT HUP INT TERM
+  listing_file=""
+  trap 'rm -f "$encrypted_file" "$plaintext_file" "$listing_file"' EXIT HUP INT TERM
 
   run_secure_curl -o "$encrypted_file" "$base_url/v1/files/$id"
   if [ -n "$identity" ]; then
@@ -460,6 +580,20 @@ cmd_download() {
       "$encrypted_file"
   else
     run_age_command "$DUD_AGE_BIN" --decrypt -o "$plaintext_file" "$encrypted_file"
+  fi
+
+  if [ "$extract_bundle" = "true" ]; then
+    if [ -z "$out_dir" ]; then
+      out_dir="./dud-$id"
+    fi
+
+    mkdir -p "$out_dir"
+    listing_file="$(mktemp /tmp/dud-download-listing-XXXXXX.txt)"
+    tar -tf "$plaintext_file" >"$listing_file"
+    validate_bundle_listing "$listing_file"
+    tar -xf "$plaintext_file" -C "$out_dir"
+    printf 'Extracted bundle to %s\n' "$out_dir"
+    return
   fi
 
   if [ "$output_stdout" = "true" ]; then
@@ -588,8 +722,10 @@ usage() {
 Usage:
   dud --version
   dud test [--url URL] [--doh-url URL]
-  dud upload [--file PATH | -m TEXT] [--ttl 24h] [--delete-after-read] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--json] [--no-qr] [--url URL] [--doh-url URL]
-  dud download --id ID (--out PATH | --stdout) [--identity PATH] [--url URL] [--doh-url URL]
+  dud upload [--file PATH ... | -m TEXT] [--ttl 24h] [--delete-after-read] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--json] [--no-qr] [--url URL] [--doh-url URL]
+  dud download --id ID (--out PATH | --stdout | --extract [--out-dir PATH]) [--identity PATH] [--url URL] [--doh-url URL]
+  dud send ...
+  dud receive ...
   dud flush [--url URL] [--doh-url URL]
   dud keygen [--pq] [--out PATH] [-R PATH]
   dud keygen [INPUT] [--out PATH | -R PATH]
@@ -679,12 +815,13 @@ dud_docker_env_args() {
 
 dud_env_args="\$(dud_docker_env_args)"
 
-if [ "\$#" -gt 0 ] && [ "\$1" = "upload" ] && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "\$@"; then
+if [ "\$#" -gt 0 ] && { [ "\$1" = "upload" ] || [ "\$1" = "send" ]; } && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "\$@"; then
   dud_stdin_file="\$(mktemp /tmp/dud-wrapper-stdin-XXXXXX)"
   trap 'rm -f "\$dud_stdin_file"' EXIT HUP INT TERM
   cat >"\$dud_stdin_file"
+  dud_command="\$1"
   shift
-  set -- upload --file /tmp/dud-stdin "\$@"
+  set -- "\$dud_command" --file /tmp/dud-stdin "\$@"
   dud_cli_args="\$(dud_docker_cli_args "\$@")"
   dud_stdin_mount="\$(dud_shell_quote -v) \$(dud_shell_quote "\$dud_stdin_file:/tmp/dud-stdin:ro")"
   dud_tty_input="\$(dud_tty_input_path)"
@@ -764,11 +901,12 @@ dud() {
     fi
   done
 
-  if [ "\$#" -gt 0 ] && [ "\$1" = "upload" ] && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "\$@"; then
+  if [ "\$#" -gt 0 ] && { [ "\$1" = "upload" ] || [ "\$1" = "send" ]; } && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "\$@"; then
     dud_stdin_file="\$(mktemp /tmp/dud-wrapper-stdin-XXXXXX)"
     cat >"\$dud_stdin_file"
+    dud_command="\$1"
     shift
-    set -- upload --file /tmp/dud-stdin "\$@"
+    set -- "\$dud_command" --file /tmp/dud-stdin "\$@"
     dud_cli_args="\$(dud_docker_cli_args "\$@")"
     dud_stdin_mount="\$(_dud_shell_quote -v) \$(_dud_shell_quote "\$dud_stdin_file:/tmp/dud-stdin:ro")"
     dud_tty_input="\$(dud_tty_input_path)"
@@ -965,6 +1103,7 @@ interactive_download() {
   printf 'Download output:\n'
   printf '  1) file path\n'
   printf '  2) stdout\n'
+  printf '  3) extract bundle\n'
   printf 'Choice [1]: '
   read -r output_choice
   output_choice="${output_choice:-1}"
@@ -974,6 +1113,12 @@ interactive_download() {
     read -r out
     [ -n "$out" ] || die "output path required"
     out="$(abs_path_if_relative "$out")"
+  elif [ "$output_choice" = "3" ] || [ "$output_choice" = "extract" ]; then
+    printf 'Output directory (leave empty for ./dud-%s): ' "$id"
+    read -r out_dir
+    if [ -n "$out_dir" ]; then
+      out_dir="$(abs_path_if_relative "$out_dir")"
+    fi
   fi
 
   printf 'Identity file (leave empty if not needed): '
@@ -996,6 +1141,21 @@ interactive_download() {
       fi
 
       exec "$0" download --id "$id" --stdout --url "$url"
+      ;;
+    3|extract)
+      if [ -n "$identity" ]; then
+        if [ -n "$out_dir" ]; then
+          exec "$0" receive --id "$id" --extract --out-dir "$out_dir" --url "$url" -i "$identity"
+        fi
+
+        exec "$0" receive --id "$id" --extract --url "$url" -i "$identity"
+      fi
+
+      if [ -n "$out_dir" ]; then
+        exec "$0" receive --id "$id" --extract --out-dir "$out_dir" --url "$url"
+      fi
+
+      exec "$0" receive --id "$id" --extract --url "$url"
       ;;
     *)
       die "Unknown download output: $output_choice"
@@ -1097,10 +1257,10 @@ main() {
     test)
       cmd_test "$@"
       ;;
-    upload)
+    upload|send)
       cmd_upload "$@"
       ;;
-    download)
+    download|receive)
       cmd_download "$@"
       ;;
     flush)
