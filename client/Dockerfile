@@ -6,6 +6,7 @@ FROM debian:stable-slim@${DEBIAN_DIGEST} AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 ENV OPENSSL_PREFIX=/opt/ech-openssl
 ENV CURL_PREFIX=/opt/ech-curl
+ENV AGE_PREFIX=/opt/age
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -14,6 +15,7 @@ RUN apt-get update \
     build-essential \
     ca-certificates \
     git \
+    golang-go \
     libtool \
     make \
     perl \
@@ -72,13 +74,20 @@ RUN git init curl \
   && make -j"$(nproc)" \
   && make install
 
+# pin: age v1.3.1
+RUN git init age \
+  && git -C age remote add origin https://github.com/FiloSottile/age.git \
+  && git -C age fetch --depth 1 origin b8564adb6d58329b8a3e267360ca2b0abc4efe1d \
+  && git -C age checkout FETCH_HEAD \
+  && cd age \
+  && GOBIN="$AGE_PREFIX/bin" go install ./cmd/...
+
 FROM debian:stable-slim@${DEBIAN_DIGEST}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    age \
     ca-certificates \
     qrencode \
     tini \
@@ -88,6 +97,8 @@ RUN useradd -r -u 1000 -s /sbin/nologin -d /work dud
 
 WORKDIR /work
 
+COPY --from=builder /opt/age/bin/age /usr/local/bin/age
+COPY --from=builder /opt/age/bin/age-keygen /usr/local/bin/age-keygen
 COPY --from=builder /opt/ech-curl/bin/curl /usr/local/bin/curl
 COPY entrypoint.sh /usr/local/bin/dud
 

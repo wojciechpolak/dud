@@ -171,7 +171,7 @@ printf '{"ok":true}\n' > "$output"
   assert.match(args, /--verbose/);
 });
 
-test('upload command encrypts locally and posts the encrypted file', async () => {
+test('upload command encrypts locally with a passphrase and posts the encrypted file', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-upload-'));
   const filePath = path.join(tmpDir, 'plain.bin');
   const ageLog = path.join(tmpDir, 'age.log');
@@ -266,6 +266,227 @@ printf '[qr]\\n'
     await readFile(qrLog, 'utf8'),
     /-t\nansiutf8\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe/,
   );
+});
+
+test('upload command can encrypt to public recipients', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-recipient-'),
+  );
+  const filePath = path.join(tmpDir, 'plain.bin');
+  const ageLog = path.join(tmpDir, 'age.log');
+  const curlPayload = path.join(tmpDir, 'payload.bin');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await writeFile(filePath, 'plaintext', 'utf8');
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${ageLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "-R" ]; then
+    recipients_file="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cat "$recipients_file" > "${tmpDir}/recipients.txt"
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--data-binary" ]; then
+    payload="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "\${payload#@}" "${curlPayload}"
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'upload',
+      '--file',
+      filePath,
+      '-r',
+      'age1examplepublickey0000000000000000000000000000000000000000000000',
+      '--json',
+    ],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const ageArgs = await readFile(ageLog, 'utf8');
+  assert.match(ageArgs, /--encrypt/);
+  assert.match(ageArgs, /-R/);
+  assert.doesNotMatch(ageArgs, /--passphrase/);
+  assert.match(
+    await readFile(path.join(tmpDir, 'recipients.txt'), 'utf8'),
+    /age1examplepublickey0000000000000000000000000000000000000000000000/,
+  );
+  assert.equal(await readFile(curlPayload, 'utf8'), 'plaintext');
+});
+
+test('upload command accepts recipient file aliases', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-recipient-file-'),
+  );
+  const filePath = path.join(tmpDir, 'plain.bin');
+  const recipientsPath = path.join(tmpDir, 'recipients.txt');
+  const ageLog = path.join(tmpDir, 'age.log');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await writeFile(filePath, 'plaintext', 'utf8');
+  await writeFile(
+    recipientsPath,
+    'age1examplepublickey0000000000000000000000000000000000000000000000\n',
+    'utf8',
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${ageLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  for (const flag of ['-R', '--recipient-file']) {
+    const result = await runCommand(
+      'sh',
+      [
+        CLIENT_SCRIPT,
+        'upload',
+        '--file',
+        filePath,
+        flag,
+        recipientsPath,
+        '--json',
+      ],
+      {
+        DUD_CURL_BIN: curlMock,
+        DUD_AGE_BIN: ageMock,
+        DUD_SECRET_TOKEN: 'top-secret',
+      },
+    );
+
+    assert.equal(result.code, 0, `expected success for ${flag}`);
+    const ageArgs = await readFile(ageLog, 'utf8');
+    assert.match(ageArgs, /-R/);
+    assert.match(
+      ageArgs,
+      new RegExp(recipientsPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
+  }
+});
+
+test('upload command rejects the removed --recipients-file alias', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-recipient-file-removed-'),
+  );
+  const filePath = path.join(tmpDir, 'plain.bin');
+  const recipientsPath = path.join(tmpDir, 'recipients.txt');
+
+  await writeFile(filePath, 'plaintext', 'utf8');
+  await writeFile(recipientsPath, 'age1examplepublickey\n', 'utf8');
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'upload',
+      '--file',
+      filePath,
+      '--recipients-file',
+      recipientsPath,
+    ],
+    {
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /Unknown upload option: --recipients-file/);
+});
+
+test('upload command rejects passphrase and recipient options together', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-upload-mode-conflict-'),
+  );
+  const filePath = path.join(tmpDir, 'plain.bin');
+
+  await writeFile(filePath, 'plaintext', 'utf8');
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'upload',
+      '--file',
+      filePath,
+      '--passphrase',
+      '--recipient',
+      'age1examplepublickey0000000000000000000000000000000000000000000000',
+    ],
+    {
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /either --passphrase or recipient options/);
 });
 
 test('upload command can print raw JSON with --json', async () => {
@@ -723,6 +944,81 @@ printf 'plain stdout' > "$output"
   assert.equal(result.stdout, 'plain stdout');
 });
 
+test('download command can decrypt with an explicit identity file', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-download-identity-'),
+  );
+  const outDir = path.join(tmpDir, 'work');
+  const outputPath = path.join(outDir, 'output.bin');
+  const identityPath = path.join(tmpDir, 'key.txt');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const ageLog = path.join(tmpDir, 'age.log');
+
+  await mkdir(outDir);
+  await writeFile(identityPath, 'AGE-SECRET-KEY-1EXAMPLE', 'utf8');
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf 'ciphertext' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${ageLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+printf 'plain with identity' > "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'download',
+      '--id',
+      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
+      '-i',
+      identityPath,
+      '--out',
+      outputPath,
+    ],
+    {
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(await readFile(outputPath, 'utf8'), 'plain with identity');
+  const ageArgs = await readFile(ageLog, 'utf8');
+  assert.match(ageArgs, /--decrypt/);
+  assert.match(ageArgs, /-i/);
+  assert.match(
+    ageArgs,
+    new RegExp(identityPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+});
+
 test('download command validates stdout and file output options', async () => {
   const bothResult = await runCommand('sh', [
     CLIENT_SCRIPT,
@@ -815,7 +1111,7 @@ printf '[qr]\\n'
       DUD_QRENCODE_BIN: qrMock,
       DUD_SECRET_TOKEN: 'top-secret',
     },
-    { input: '2\n2\n\n\n\nmenu payload' },
+    { input: '2\n\n2\n\n\n\nmenu payload' },
   );
 
   assert.equal(result.code, 0);
@@ -829,6 +1125,86 @@ printf '[qr]\\n'
     ).length,
     1,
   );
+});
+
+test('interactive upload can use a recipient file with a file source', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-interactive-upload-recipient-file-'),
+  );
+  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const filePath = path.join(tmpDir, 'plain.bin');
+  const recipientPath = path.join(tmpDir, 'recipient.txt');
+  const curlPayload = path.join(tmpDir, 'payload.bin');
+  const ageLog = path.join(tmpDir, 'age.log');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
+  await chmod(interactiveScript, 0o755);
+  await writeFile(filePath, 'plaintext', 'utf8');
+  await writeFile(recipientPath, 'age1recipientexample\n', 'utf8');
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${ageLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--data-binary" ]; then
+    payload="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "\${payload#@}" "${curlPayload}"
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  const result = await runCommand(
+    interactiveScript,
+    [],
+    {
+      DUD_TEST_STDIN_TTY: '1',
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+    {
+      input: `2\n\n1\n${filePath}\n3\n${recipientPath}\n15m\ny\n`,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(await readFile(curlPayload, 'utf8'), 'plaintext');
+  const ageArgs = await readFile(ageLog, 'utf8');
+  assert.match(ageArgs, /-R/);
+  assert.match(
+    ageArgs,
+    new RegExp(recipientPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+  assert.match(result.stdout, /Recipient file:/);
 });
 
 test('interactive download can write decrypted output to stdout', async () => {
@@ -881,12 +1257,128 @@ printf 'interactive stdout' > "$output"
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
     },
-    { input: '3\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe\n2\n\n' },
+    { input: '3\n\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe\n2\n\n' },
   );
 
   assert.equal(result.code, 0);
   assert.match(result.stdout, /Download output:/);
   assert.match(result.stdout, /interactive stdout$/);
+});
+
+test('interactive download can use an identity file', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-interactive-download-identity-'),
+  );
+  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const identityPath = path.join(tmpDir, 'identity.txt');
+  const outputPath = path.join(tmpDir, 'output.txt');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const ageLog = path.join(tmpDir, 'age.log');
+
+  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
+  await chmod(interactiveScript, 0o755);
+  await writeFile(identityPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf 'ciphertext' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${ageLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+printf 'interactive identity output' > "$output"
+`,
+  );
+
+  const result = await runCommand(
+    interactiveScript,
+    [],
+    {
+      DUD_TEST_STDIN_TTY: '1',
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+    {
+      input: `3\n\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe\n1\n${outputPath}\n${identityPath}\n`,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(
+    await readFile(outputPath, 'utf8'),
+    'interactive identity output',
+  );
+  assert.match(result.stdout, /Identity file/);
+  const ageArgs = await readFile(ageLog, 'utf8');
+  assert.match(ageArgs, /-i/);
+  assert.match(
+    ageArgs,
+    new RegExp(identityPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+});
+
+test('interactive keygen can convert an identity to recipients', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-interactive-keygen-'),
+  );
+  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const keyPath = path.join(tmpDir, 'identity.txt');
+  const recipientPath = path.join(tmpDir, 'recipient.txt');
+  const ageKeygenMock = path.join(tmpDir, 'age-keygen-mock.sh');
+
+  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
+  await chmod(interactiveScript, 0o755);
+  await writeFile(keyPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
+
+  await makeExecutable(
+    ageKeygenMock,
+    `#!/bin/sh
+if [ "$1" = "-y" ] && [ "$2" = "-o" ]; then
+  printf '%s\n' 'age1interactiveconverted' > "$3"
+  exit 0
+fi
+exit 1
+`,
+  );
+
+  const result = await runCommand(
+    interactiveScript,
+    [],
+    {
+      DUD_TEST_STDIN_TTY: '1',
+      DUD_AGE_KEYGEN_BIN: ageKeygenMock,
+    },
+    { input: `4\n2\n${keyPath}\n${recipientPath}\n` },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(
+    await readFile(recipientPath, 'utf8'),
+    'age1interactiveconverted\n',
+  );
+  assert.match(result.stdout, /Keygen mode:/);
 });
 
 test('flush command posts the secret token header', async () => {
@@ -1057,4 +1549,206 @@ cat "$host_path" > "${payloadFile}"
   assert.match(args, /\/tmp\/dud-stdin:ro/);
   assert.match(args, /--file\n\/tmp\/dud-stdin/);
   assert.equal(await readFile(payloadFile, 'utf8'), 'streamed-payload');
+});
+
+test('keygen command can generate post-quantum keys and a recipient file', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-keygen-'));
+  const keyPath = path.join(tmpDir, 'key.txt');
+  const recipientPath = path.join(tmpDir, 'recipient.txt');
+  const ageKeygenMock = path.join(tmpDir, 'age-keygen-mock.sh');
+  const keygenLog = path.join(tmpDir, 'age-keygen.log');
+
+  await makeExecutable(
+    ageKeygenMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${keygenLog}"
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+Usage:
+    age-keygen [-pq] [-o OUTPUT]
+    age-keygen -y [-o OUTPUT] [INPUT]
+EOF
+  exit 0
+fi
+if [ "$1" = "-y" ]; then
+  printf '%s\n' 'age1pq1examplepublicrecipient'
+  exit 0
+fi
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s\n' 'AGE-SECRET-KEY-PQ-1EXAMPLE' > "$output"
+printf '%s\n' 'Public key: age1pq1examplepublicrecipient' >&2
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'keygen', '--pq', '--out', keyPath, '-R', recipientPath],
+    {
+      DUD_AGE_KEYGEN_BIN: ageKeygenMock,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /Public key: age1pq1examplepublicrecipient/);
+  assert.equal(
+    await readFile(recipientPath, 'utf8'),
+    'age1pq1examplepublicrecipient\n',
+  );
+  const keygenArgs = await readFile(keygenLog, 'utf8');
+  assert.match(keygenArgs, /-pq/);
+  assert.match(
+    keygenArgs,
+    new RegExp(keyPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+  assert.match(keygenArgs, /-y/);
+});
+
+test('keygen command reports a clear error when age-keygen lacks -pq support', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-keygen-no-pq-'),
+  );
+  const ageKeygenMock = path.join(tmpDir, 'age-keygen-mock.sh');
+
+  await makeExecutable(
+    ageKeygenMock,
+    `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+Usage:
+    age-keygen [-o OUTPUT]
+    age-keygen -y [-o OUTPUT] [INPUT]
+EOF
+  exit 0
+fi
+exit 1
+`,
+  );
+
+  const result = await runCommand('sh', [CLIENT_SCRIPT, 'keygen', '--pq'], {
+    DUD_AGE_KEYGEN_BIN: ageKeygenMock,
+  });
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /does not support -pq/);
+});
+
+test('keygen command can generate a key to stdout without --out', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-keygen-stdout-'),
+  );
+  const ageKeygenMock = path.join(tmpDir, 'age-keygen-mock.sh');
+  const keygenLog = path.join(tmpDir, 'age-keygen.log');
+
+  await makeExecutable(
+    ageKeygenMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${keygenLog}"
+printf '%s\n' '# public key: age1example'
+printf '%s\n' 'AGE-SECRET-KEY-1EXAMPLE'
+`,
+  );
+
+  const result = await runCommand('sh', [CLIENT_SCRIPT, 'keygen'], {
+    DUD_AGE_KEYGEN_BIN: ageKeygenMock,
+  });
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /AGE-SECRET-KEY-1EXAMPLE/);
+  assert.equal((await readFile(keygenLog, 'utf8')).trim(), '');
+});
+
+test('keygen command can convert an identity to a recipient file without --out', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-keygen-convert-file-'),
+  );
+  const keyPath = path.join(tmpDir, 'key.txt');
+  const recipientPath = path.join(tmpDir, 'recipient.txt');
+  const ageKeygenMock = path.join(tmpDir, 'age-keygen-mock.sh');
+  const keygenLog = path.join(tmpDir, 'age-keygen.log');
+
+  await writeFile(keyPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
+
+  await makeExecutable(
+    ageKeygenMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${keygenLog}"
+if [ "$1" = "-y" ]; then
+  shift
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    input="$3"
+    printf '%s\n' "age1converted-from-$input" > "$output"
+    exit 0
+  fi
+fi
+exit 1
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'keygen', '-R', recipientPath, keyPath],
+    {
+      DUD_AGE_KEYGEN_BIN: ageKeygenMock,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, '');
+  assert.equal(
+    await readFile(recipientPath, 'utf8'),
+    `age1converted-from-${keyPath}\n`,
+  );
+  const keygenArgs = await readFile(keygenLog, 'utf8');
+  assert.match(keygenArgs, /-y/);
+  assert.match(keygenArgs, /-o/);
+  assert.match(
+    keygenArgs,
+    new RegExp(recipientPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+});
+
+test('keygen command can convert an identity to stdout', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-keygen-convert-stdout-'),
+  );
+  const keyPath = path.join(tmpDir, 'key.txt');
+  const ageKeygenMock = path.join(tmpDir, 'age-keygen-mock.sh');
+  const keygenLog = path.join(tmpDir, 'age-keygen.log');
+
+  await writeFile(keyPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
+
+  await makeExecutable(
+    ageKeygenMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${keygenLog}"
+if [ "$1" = "-y" ]; then
+  printf '%s\n' 'age1convertedstdout'
+  exit 0
+fi
+exit 1
+`,
+  );
+
+  const result = await runCommand('sh', [CLIENT_SCRIPT, 'keygen', keyPath], {
+    DUD_AGE_KEYGEN_BIN: ageKeygenMock,
+  });
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, 'age1convertedstdout\n');
+  assert.equal(result.stderr, '');
+  const keygenArgs = await readFile(keygenLog, 'utf8');
+  assert.match(keygenArgs, /-y/);
+  assert.match(
+    keygenArgs,
+    new RegExp(keyPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
 });

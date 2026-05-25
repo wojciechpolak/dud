@@ -8,3 +8,5 @@ dist/
 node_modules/
 tmp/
 wrangler.toml
+*.key
+*.recipient

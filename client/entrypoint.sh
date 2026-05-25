@@ -10,6 +10,7 @@ DUD_ECH_MODE="${DUD_ECH_MODE:-hard}"
 DUD_SECRET_TOKEN="${DUD_SECRET_TOKEN:-}"
 DUD_CURL_BIN="${DUD_CURL_BIN:-curl}"
 DUD_AGE_BIN="${DUD_AGE_BIN:-age}"
+DUD_AGE_KEYGEN_BIN="${DUD_AGE_KEYGEN_BIN:-age-keygen}"
 DUD_QRENCODE_BIN="${DUD_QRENCODE_BIN:-qrencode}"
 
 die() {
@@ -48,6 +49,10 @@ run_age_command() {
   fi
 
   "$@"
+}
+
+age_keygen_supports_pq() {
+  "$DUD_AGE_KEYGEN_BIN" --help 2>&1 | grep -q -- '-pq'
 }
 
 run_secure_curl() {
@@ -220,6 +225,9 @@ cmd_upload() {
   base_url="$DUD_BASE_URL"
   output_json="false"
   output_qr="true"
+  passphrase_requested="false"
+  inline_recipients=""
+  recipients_file=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -241,6 +249,25 @@ cmd_upload() {
       --delete-after-read)
         delete_after_read="true"
         shift 1
+        ;;
+      --passphrase)
+        passphrase_requested="true"
+        shift 1
+        ;;
+      --recipient|-r)
+        need_value "$@"
+        if [ -n "$inline_recipients" ]; then
+          inline_recipients="${inline_recipients}
+$2"
+        else
+          inline_recipients="$2"
+        fi
+        shift 2
+        ;;
+      --recipient-file|-R)
+        need_value "$@"
+        recipients_file="$2"
+        shift 2
         ;;
       --json)
         output_json="true"
@@ -277,12 +304,24 @@ cmd_upload() {
   if [ -n "$file" ]; then
     [ -f "$file" ] || die "File not found: $file"
   fi
+  if [ -n "$recipients_file" ]; then
+    [ -f "$recipients_file" ] || die "Recipients file not found: $recipients_file"
+  fi
   [ -n "$DUD_SECRET_TOKEN" ] || die "upload requires DUD_SECRET_TOKEN"
+
+  recipient_mode="false"
+  if [ -n "$inline_recipients" ] || [ -n "$recipients_file" ]; then
+    recipient_mode="true"
+  fi
+  if [ "$passphrase_requested" = "true" ] && [ "$recipient_mode" = "true" ]; then
+    die "upload accepts either --passphrase or recipient options, not both"
+  fi
 
   plaintext_file="$(mktemp /tmp/dud-upload-plain-XXXXXX)"
   encrypted_file="$(mktemp /tmp/dud-upload-XXXXXX.age)"
   response_file="$(mktemp /tmp/dud-upload-response-XXXXXX.json)"
-  trap 'rm -f "$plaintext_file" "$encrypted_file" "$response_file"' EXIT HUP INT TERM
+  inline_recipients_file=""
+  trap 'rm -f "$plaintext_file" "$encrypted_file" "$response_file" "$inline_recipients_file"' EXIT HUP INT TERM
 
   if [ -n "$file" ]; then
     cat "$file" >"$plaintext_file"
@@ -295,7 +334,38 @@ cmd_upload() {
     cat >"$plaintext_file"
   fi
 
-  run_age_command "$DUD_AGE_BIN" --encrypt --passphrase -o "$encrypted_file" "$plaintext_file"
+  if [ "$recipient_mode" = "true" ]; then
+    if [ -n "$inline_recipients" ]; then
+      inline_recipients_file="$(mktemp /tmp/dud-upload-recipients-XXXXXX.txt)"
+      printf '%s\n' "$inline_recipients" >"$inline_recipients_file"
+    fi
+
+    if [ -n "$inline_recipients_file" ] && [ -n "$recipients_file" ]; then
+      run_age_command \
+        "$DUD_AGE_BIN" \
+        --encrypt \
+        -R "$inline_recipients_file" \
+        -R "$recipients_file" \
+        -o "$encrypted_file" \
+        "$plaintext_file"
+    elif [ -n "$inline_recipients_file" ]; then
+      run_age_command \
+        "$DUD_AGE_BIN" \
+        --encrypt \
+        -R "$inline_recipients_file" \
+        -o "$encrypted_file" \
+        "$plaintext_file"
+    else
+      run_age_command \
+        "$DUD_AGE_BIN" \
+        --encrypt \
+        -R "$recipients_file" \
+        -o "$encrypted_file" \
+        "$plaintext_file"
+    fi
+  else
+    run_age_command "$DUD_AGE_BIN" --encrypt --passphrase -o "$encrypted_file" "$plaintext_file"
+  fi
 
   run_secure_curl \
     -X POST \
@@ -325,6 +395,7 @@ cmd_download() {
   out=""
   output_stdout="false"
   base_url="$DUD_BASE_URL"
+  identity=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -341,6 +412,11 @@ cmd_download() {
       --stdout)
         output_stdout="true"
         shift 1
+        ;;
+      --identity|-i)
+        need_value "$@"
+        identity="$2"
+        shift 2
         ;;
       --url)
         need_value "$@"
@@ -365,13 +441,25 @@ cmd_download() {
   if [ -z "$out" ] && [ "$output_stdout" != "true" ]; then
     die "download requires either --out or --stdout"
   fi
+  if [ -n "$identity" ]; then
+    [ -f "$identity" ] || die "Identity file not found: $identity"
+  fi
 
   encrypted_file="$(mktemp /tmp/dud-download-XXXXXX.age)"
   plaintext_file="$(mktemp /tmp/dud-download-plain-XXXXXX)"
   trap 'rm -f "$encrypted_file" "$plaintext_file"' EXIT HUP INT TERM
 
   run_secure_curl -o "$encrypted_file" "$base_url/v1/files/$id"
-  run_age_command "$DUD_AGE_BIN" --decrypt -o "$plaintext_file" "$encrypted_file"
+  if [ -n "$identity" ]; then
+    run_age_command \
+      "$DUD_AGE_BIN" \
+      --decrypt \
+      -i "$identity" \
+      -o "$plaintext_file" \
+      "$encrypted_file"
+  else
+    run_age_command "$DUD_AGE_BIN" --decrypt -o "$plaintext_file" "$encrypted_file"
+  fi
 
   if [ "$output_stdout" = "true" ]; then
     cat "$plaintext_file"
@@ -412,15 +500,97 @@ cmd_flush() {
   printf '\n'
 }
 
+cmd_keygen() {
+  out=""
+  recipient_out=""
+  pq="false"
+  input=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out)
+        need_value "$@"
+        out="$2"
+        shift 2
+        ;;
+      --recipient-out|-R)
+        need_value "$@"
+        recipient_out="$2"
+        shift 2
+        ;;
+      --pq)
+        pq="true"
+        shift 1
+        ;;
+      -*)
+        die "Unknown keygen option: $1"
+        ;;
+      *)
+        if [ -n "$input" ]; then
+          die "keygen accepts at most one input path"
+        fi
+        input="$1"
+        shift 1
+        ;;
+    esac
+  done
+
+  if [ -n "$input" ]; then
+    if [ "$pq" = "true" ]; then
+      die "keygen does not accept --pq when converting an identity to recipients"
+    fi
+    if [ -n "$out" ] && [ -n "$recipient_out" ]; then
+      die "keygen accepts only one recipient output target: --out or -R"
+    fi
+
+    if [ -n "$recipient_out" ]; then
+      "$DUD_AGE_KEYGEN_BIN" -y -o "$recipient_out" "$input"
+    elif [ -n "$out" ]; then
+      "$DUD_AGE_KEYGEN_BIN" -y -o "$out" "$input"
+    else
+      "$DUD_AGE_KEYGEN_BIN" -y "$input"
+    fi
+    return
+  fi
+
+  if [ -n "$recipient_out" ] && [ -z "$out" ]; then
+    die "keygen requires --out when generating a new identity with -R"
+  fi
+
+  if [ "$pq" = "true" ] && ! age_keygen_supports_pq; then
+    die "The bundled age-keygen does not support -pq. Rebuild the client image with age v1.3.0 or later."
+  fi
+
+  if [ "$pq" = "true" ]; then
+    if [ -n "$out" ]; then
+      "$DUD_AGE_KEYGEN_BIN" -pq -o "$out"
+    else
+      "$DUD_AGE_KEYGEN_BIN" -pq
+    fi
+  else
+    if [ -n "$out" ]; then
+      "$DUD_AGE_KEYGEN_BIN" -o "$out"
+    else
+      "$DUD_AGE_KEYGEN_BIN"
+    fi
+  fi
+
+  if [ -n "$recipient_out" ]; then
+    "$DUD_AGE_KEYGEN_BIN" -y "$out" >"$recipient_out"
+  fi
+}
+
 DUD_IMAGE="${DUD_IMAGE:-ghcr.io/wojciechpolak/dud/dud-client:latest}"
 
 usage() {
   cat <<'EOF'
 Usage:
   dud test [--url URL] [--doh-url URL]
-  dud upload [--file PATH | -m TEXT] [--ttl 24h] [--delete-after-read] [--json] [--no-qr] [--url URL] [--doh-url URL]
-  dud download --id ID (--out PATH | --stdout) [--url URL] [--doh-url URL]
+  dud upload [--file PATH | -m TEXT] [--ttl 24h] [--delete-after-read] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--json] [--no-qr] [--url URL] [--doh-url URL]
+  dud download --id ID (--out PATH | --stdout) [--identity PATH] [--url URL] [--doh-url URL]
   dud flush [--url URL] [--doh-url URL]
+  dud keygen [--pq] [--out PATH] [-R PATH]
+  dud keygen [INPUT] [--out PATH | -R PATH]
   dud install        Print a host wrapper script to stdout
   dud shell-init     Print a shell function definition to stdout
 
@@ -621,7 +791,8 @@ interactive_menu() {
   printf '  1) test\n'
   printf '  2) upload\n'
   printf '  3) download\n'
-  printf '  4) flush\n'
+  printf '  4) keygen\n'
+  printf '  5) flush\n'
   printf '  q) quit\n\n'
   printf 'Choice: '
   read -r choice
@@ -629,9 +800,17 @@ interactive_menu() {
     1|test)      interactive_test ;;
     2|upload)    interactive_upload ;;
     3|download)  interactive_download ;;
-    4|flush)     interactive_flush ;;
+    4|keygen)    interactive_keygen ;;
+    5|flush)     interactive_flush ;;
     q|quit)      exit 0 ;;
     *)           die "Unknown choice: $choice" ;;
+  esac
+}
+
+abs_path_if_relative() {
+  case "$1" in
+    /*) printf '%s' "$1" ;;
+    *) printf '%s/%s' "$(pwd)" "$1" ;;
   esac
 }
 
@@ -643,6 +822,10 @@ interactive_test() {
 }
 
 interactive_upload() {
+  printf 'Server URL [%s]: ' "$DUD_BASE_URL"
+  read -r url
+  url="${url:-$DUD_BASE_URL}"
+
   printf 'Upload source:\n'
   printf '  1) file path\n'
   printf '  2) typed or pasted text (Ctrl-D to finish)\n'
@@ -650,6 +833,55 @@ interactive_upload() {
   printf 'Choice [1]: '
   read -r source_choice
   source_choice="${source_choice:-1}"
+
+  case $source_choice in
+    1|file)
+      printf 'File path: '
+      read -r file
+      [ -n "$file" ] || die "file path required"
+      file="$(abs_path_if_relative "$file")"
+      ;;
+    2|text|stdin)
+      ;;
+    3|message)
+      printf 'Message: '
+      read -r message
+      [ -n "$message" ] || die "message required"
+      ;;
+    *)
+      die "Unknown upload source: $source_choice"
+      ;;
+  esac
+
+  printf 'Encryption mode:\n'
+  printf '  1) passphrase\n'
+  printf '  2) recipient string\n'
+  printf '  3) recipient file\n'
+  printf 'Choice [1]: '
+  read -r encryption_choice
+  encryption_choice="${encryption_choice:-1}"
+
+  case $encryption_choice in
+    1|passphrase)
+      encryption_mode="passphrase"
+      ;;
+    2|recipient)
+      printf 'Recipient: '
+      read -r recipient
+      [ -n "$recipient" ] || die "recipient required"
+      encryption_mode="recipient"
+      ;;
+    3|recipient-file)
+      printf 'Recipient file: '
+      read -r recipient_file
+      [ -n "$recipient_file" ] || die "recipient file required"
+      recipient_file="$(abs_path_if_relative "$recipient_file")"
+      encryption_mode="recipient-file"
+      ;;
+    *)
+      die "Unknown encryption mode: $encryption_choice"
+      ;;
+  esac
 
   printf 'TTL [24h]: '
   read -r ttl
@@ -660,34 +892,54 @@ interactive_upload() {
   dar_flag=""
   case $ans in [Yy]*) dar_flag="--delete-after-read" ;; esac
 
-  printf 'Server URL [%s]: ' "$DUD_BASE_URL"
-  read -r url
-  url="${url:-$DUD_BASE_URL}"
-
   case $source_choice in
     1|file)
-      printf 'File path: '
-      read -r file
-      [ -n "$file" ] || die "file path required"
-      case "$file" in
-        /*) ;;
-        *) file="$(pwd)/$file" ;;
+      case $encryption_mode in
+        passphrase)
+          # shellcheck disable=SC2086
+          exec "$0" upload --file "$file" --ttl "$ttl" --url "$url" $dar_flag
+          ;;
+        recipient)
+          # shellcheck disable=SC2086
+          exec "$0" upload --file "$file" --ttl "$ttl" --url "$url" $dar_flag -r "$recipient"
+          ;;
+        recipient-file)
+          # shellcheck disable=SC2086
+          exec "$0" upload --file "$file" --ttl "$ttl" --url "$url" $dar_flag -R "$recipient_file"
+          ;;
       esac
-
-      # shellcheck disable=SC2086
-      exec "$0" upload --file "$file" --ttl "$ttl" --url "$url" $dar_flag
       ;;
     2|text|stdin)
-      # shellcheck disable=SC2086
-      exec "$0" upload --ttl "$ttl" --url "$url" $dar_flag
+      case $encryption_mode in
+        passphrase)
+          # shellcheck disable=SC2086
+          exec "$0" upload --ttl "$ttl" --url "$url" $dar_flag
+          ;;
+        recipient)
+          # shellcheck disable=SC2086
+          exec "$0" upload --ttl "$ttl" --url "$url" $dar_flag -r "$recipient"
+          ;;
+        recipient-file)
+          # shellcheck disable=SC2086
+          exec "$0" upload --ttl "$ttl" --url "$url" $dar_flag -R "$recipient_file"
+          ;;
+      esac
       ;;
     3|message)
-      printf 'Message: '
-      read -r message
-      [ -n "$message" ] || die "message required"
-
-      # shellcheck disable=SC2086
-      exec "$0" upload -m "$message" --ttl "$ttl" --url "$url" $dar_flag
+      case $encryption_mode in
+        passphrase)
+          # shellcheck disable=SC2086
+          exec "$0" upload -m "$message" --ttl "$ttl" --url "$url" $dar_flag
+          ;;
+        recipient)
+          # shellcheck disable=SC2086
+          exec "$0" upload -m "$message" --ttl "$ttl" --url "$url" $dar_flag -r "$recipient"
+          ;;
+        recipient-file)
+          # shellcheck disable=SC2086
+          exec "$0" upload -m "$message" --ttl "$ttl" --url "$url" $dar_flag -R "$recipient_file"
+          ;;
+      esac
       ;;
     *)
       die "Unknown upload source: $source_choice"
@@ -696,6 +948,10 @@ interactive_upload() {
 }
 
 interactive_download() {
+  printf 'Server URL [%s]: ' "$DUD_BASE_URL"
+  read -r url
+  url="${url:-$DUD_BASE_URL}"
+
   printf 'File ID: '
   read -r id
   [ -n "$id" ] || die "file ID required"
@@ -707,27 +963,101 @@ interactive_download() {
   read -r output_choice
   output_choice="${output_choice:-1}"
 
-  printf 'Server URL [%s]: ' "$DUD_BASE_URL"
-  read -r url
-  url="${url:-$DUD_BASE_URL}"
+  if [ "$output_choice" = "1" ] || [ "$output_choice" = "file" ]; then
+    printf 'Output path: '
+    read -r out
+    [ -n "$out" ] || die "output path required"
+    out="$(abs_path_if_relative "$out")"
+  fi
+
+  printf 'Identity file (leave empty if not needed): '
+  read -r identity
+  if [ -n "$identity" ]; then
+    identity="$(abs_path_if_relative "$identity")"
+  fi
 
   case $output_choice in
     1|file)
-      printf 'Output path: '
-      read -r out
-      [ -n "$out" ] || die "output path required"
-      case "$out" in
-        /*) ;;
-        *) out="$(pwd)/$out" ;;
-      esac
+      if [ -n "$identity" ]; then
+        exec "$0" download --id "$id" --out "$out" --url "$url" -i "$identity"
+      fi
 
       exec "$0" download --id "$id" --out "$out" --url "$url"
       ;;
     2|stdout)
+      if [ -n "$identity" ]; then
+        exec "$0" download --id "$id" --stdout --url "$url" -i "$identity"
+      fi
+
       exec "$0" download --id "$id" --stdout --url "$url"
       ;;
     *)
       die "Unknown download output: $output_choice"
+      ;;
+  esac
+}
+
+interactive_keygen() {
+  printf 'Keygen mode:\n'
+  printf '  1) generate a new identity\n'
+  printf '  2) convert an identity to recipients\n'
+  printf 'Choice [1]: '
+  read -r mode_choice
+  mode_choice="${mode_choice:-1}"
+
+  case $mode_choice in
+    1|generate)
+      printf 'Post-quantum key? [y/N]: '
+      read -r pq_answer
+      case $pq_answer in [Yy]*) pq_flag="--pq" ;; esac
+
+      printf 'Identity output path (leave empty for stdout): '
+      read -r out
+
+      if [ -n "$out" ]; then
+        out="$(abs_path_if_relative "$out")"
+
+        printf 'Recipient output path (leave empty to skip): '
+        read -r recipient_out
+        if [ -n "$recipient_out" ]; then
+          recipient_out="$(abs_path_if_relative "$recipient_out")"
+          if [ -n "${pq_flag:-}" ]; then
+            exec "$0" keygen --pq --out "$out" -R "$recipient_out"
+          fi
+
+          exec "$0" keygen --out "$out" -R "$recipient_out"
+        fi
+
+        if [ -n "${pq_flag:-}" ]; then
+          exec "$0" keygen --pq --out "$out"
+        fi
+
+        exec "$0" keygen --out "$out"
+      fi
+
+      if [ -n "${pq_flag:-}" ]; then
+        exec "$0" keygen --pq
+      fi
+
+      exec "$0" keygen
+      ;;
+    2|convert)
+      printf 'Identity file: '
+      read -r input
+      [ -n "$input" ] || die "identity file required"
+      input="$(abs_path_if_relative "$input")"
+
+      printf 'Recipient output path (leave empty for stdout): '
+      read -r recipient_out
+      if [ -n "$recipient_out" ]; then
+        recipient_out="$(abs_path_if_relative "$recipient_out")"
+        exec "$0" keygen -R "$recipient_out" "$input"
+      fi
+
+      exec "$0" keygen "$input"
+      ;;
+    *)
+      die "Unknown keygen mode: $mode_choice"
       ;;
   esac
 }
@@ -766,6 +1096,9 @@ main() {
       ;;
     flush)
       cmd_flush "$@"
+      ;;
+    keygen)
+      cmd_keygen "$@"
       ;;
     install)
       cmd_install

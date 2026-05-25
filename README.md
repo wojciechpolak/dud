@@ -1,14 +1,16 @@
 # DUD
 
 Discreet upload / download using a Cloudflare Worker on `dud.example.com`, R2
-for storage, and a Dockerized client that uses `curl` plus `age`.
+for storage, and a Dockerized client that uses `curl`, `age`, and `age-keygen`.
 
 ## What this does
 
-- Encrypts files locally with `age --passphrase` before upload.
+- Encrypts files locally with `age` before upload, using either a passphrase or
+  recipient public keys.
 - Uploads only ciphertext to the Worker.
 - Returns an opaque ID that the recipient can use to fetch ciphertext.
-- Decrypts locally after download with the shared passphrase.
+- Decrypts locally after download with the shared passphrase or recipient
+  private key.
 - Opportunistically cleans up expired or consumed R2 objects during normal
   traffic.
 - Verifies secure transport from the client with DoH, TLS 1.3, and `curl --ech`,
@@ -27,6 +29,15 @@ Stack:
 - [age](https://github.com/FiloSottile/age)
 - [DoH](https://en.wikipedia.org/wiki/DNS_over_HTTPS)
 - [ECH](https://en.wikipedia.org/wiki/Server_Name_Indication#Encrypted_Client_Hello)
+
+Recommended mode:
+
+- For the strongest async sharing model, prefer public-key mode with
+  `dud upload -r ...` and `dud download -i ...`.
+- Passphrase mode remains available for ad hoc sharing, but ciphertext can still
+  be subjected to offline guessing if the passphrase is weak.
+- `age` post-quantum recipients generated with `age-keygen -pq` are supported by
+  the same public-key flow.
 
 ## First steps
 
@@ -249,10 +260,32 @@ machine-readable use cases, add `--json` to print the raw upload response.
 Without `--file` or `-m`, `upload` reads plaintext from stdin. `download` writes
 to a file with `--out` or to stdout with `--stdout`.
 
+Encryption mode flags:
+
+- `upload` defaults to passphrase mode unless you provide `--recipient` or
+  `--recipient-file`
+- `upload --recipient AGE_RECIPIENT` or `upload -r AGE_RECIPIENT` can be
+  repeated
+- `upload --recipient-file /work/recipients.txt` or
+  `upload -R /work/recipients.txt` reads one or more age recipients from a file
+- `download --identity /work/key.txt` or `download -i /work/key.txt` decrypts
+  with an age identity file
+- `keygen` creates a standard age key pair on stdout
+- `keygen --out /work/key.txt` creates a standard age key pair in a file
+- `keygen --pq` creates a post-quantum age key pair on stdout
+- `keygen --pq --out /work/key.txt` creates a post-quantum age key pair in a
+  file
+- `keygen /work/key.txt` converts an identity file to recipient output on stdout
+- `keygen -R /work/recipient.txt /work/key.txt` writes recipient output to a
+  file
+
 When you run `dud` with no command in an interactive terminal, it opens a small
-menu for `test`, `upload`, `download`, and `flush`. Interactive upload can use a
-file path, a one-line message, or typed/pasted text that finishes on Ctrl-D.
-Interactive download can write to a file or stdout. If stdin is not a TTY, it
+menu for `test`, `upload`, `download`, `keygen`, and `flush`. Interactive upload
+can use a file path, a one-line message, or typed/pasted text that finishes on
+Ctrl-D, and it groups source-specific and encryption-specific prompts together.
+Interactive download groups output-specific prompts before the optional identity
+file prompt. Interactive keygen supports both generating new identities and
+converting an existing identity into recipient output. If stdin is not a TTY, it
 prints usage information and exits instead.
 
 > **Security note**: `--tmpfs /tmp` keeps sensitive intermediate files
@@ -330,6 +363,8 @@ docker run --rm -it \
 
 ### 2. Upload a file or message as the sender
 
+#### Passphrase mode
+
 Suppose the sender wants to share `secret.pdf` and keep it available for 48
 hours:
 
@@ -378,9 +413,44 @@ Only two things need to be shared with the recipient:
 - the `id`
 - the passphrase
 
+#### Public-key mode
+
+First generate a recipient key pair. For standard age keys:
+
+```sh
+dud keygen --out /work/alice.key -R /work/alice.recipient
+```
+
+For post-quantum age keys:
+
+```sh
+dud keygen --pq --out /work/alice-pq.key -R /work/alice-pq.recipient
+```
+
+Then encrypt to the recipient's public key instead of a passphrase:
+
+```sh
+dud upload \
+  --file /work/secret.pdf \
+  --ttl 48h \
+  -r "$(cat /work/alice.recipient)"
+```
+
+Or use a recipients file:
+
+```sh
+dud upload \
+  --file /work/secret.pdf \
+  --ttl 48h \
+  -R /work/alice.recipient
+```
+
+In public-key mode, only the `id` needs to be shared with the recipient.
+
 ### 3. Download the file as the recipient
 
-On another machine, the recipient can fetch and decrypt it like this:
+On another machine, the recipient can fetch and decrypt a passphrase-encrypted
+upload like this:
 
 ```sh
 dud download \
@@ -403,6 +473,21 @@ or pipe it as needed:
 dud download \
   --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
   --stdout > /work/received-secret.pdf
+```
+
+For public-key mode, pass the recipient identity file:
+
+```sh
+dud download \
+  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
+  -i /work/alice.key \
+  --out /work/received-secret.pdf
+```
+
+To print the recipient form of an existing identity to stdout, use:
+
+```sh
+dud keygen /work/alice.key
 ```
 
 ### 4. Optional one-time retrieval
@@ -435,6 +520,8 @@ returns a JSON response with `deletedCount`.
 
 - v1 is designed for files up to 100 MB, which keeps the transfer path
   compatible with common Cloudflare request body limits.
+- Public-key mode is the preferred async sharing mode because it avoids relying
+  on a human-memorable passphrase for file encryption.
 - The Worker is not the trust boundary for ECH. The client verifies secure
   transport before upload or download.
 - Cleanup is cron-free. Expired and consumed objects are removed during normal
