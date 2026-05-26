@@ -686,7 +686,7 @@ test('flush returns partial:true when iteration cap is reached', async () => {
 test('all JSON responses include defensive security headers', async () => {
   const service = createDudService({
     blobStore: new MemoryBlobStore(),
-    config: { version: '1.2.0' },
+    config: { version: '1.3.0' },
   });
 
   const endpoints = [

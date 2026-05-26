@@ -14,7 +14,7 @@ DUD_CURL_BIN="${DUD_CURL_BIN:-curl}"
 DUD_AGE_BIN="${DUD_AGE_BIN:-age}"
 DUD_AGE_KEYGEN_BIN="${DUD_AGE_KEYGEN_BIN:-age-keygen}"
 DUD_QRENCODE_BIN="${DUD_QRENCODE_BIN:-qrencode}"
-DUD_VERSION="${DUD_VERSION:-1.2.0}"
+DUD_VERSION="${DUD_VERSION:-1.3.0}"
 
 die() {
   printf '%s\n' "$*" >&2

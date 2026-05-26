@@ -740,7 +740,7 @@ Returns readiness JSON:
   "ok": true,
   "service": "dud",
   "host": "dud.example.com",
-  "version": "1.2.0"
+  "version": "1.3.0"
 }
 ```
 

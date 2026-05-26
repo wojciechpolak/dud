@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for public releases.
 
+## [1.3.0] - 2026-05-26
+
+### Added
+
+- Add self-hosted dud server
+- Add bundled send and extract receive flows
+- Add --version to dud client
+- Add public-key encryption mode and key aliases
+
+### Fixed
+
+- Include age in docker pin updater
+
+### Chore
+
+- Bump curl to 8.20.0
+- Update dependencies
+
 ## [1.2.0] - 2026-05-12
 
 ### Added
