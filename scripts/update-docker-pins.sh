@@ -8,6 +8,7 @@
 #   ./scripts/update-docker-pins.sh                          # re-pin current tags
 #   ./scripts/update-docker-pins.sh openssl-4.0.1            # upgrade OpenSSL
 #   ./scripts/update-docker-pins.sh openssl-4.0.1 curl-8_20_0  # upgrade both
+#   ./scripts/update-docker-pins.sh openssl-4.0.1 curl-8_20_0 v1.3.2  # upgrade all
 #
 # Pin comments in the Dockerfile (# pin: <lib> <tag>) record the current tag
 # names and are updated alongside the SHAs when tags change.
@@ -41,6 +42,13 @@ else
   [ -n "$CURL_TAG" ] || die "No '# pin: curl <tag>' comment found in Dockerfile"
 fi
 
+if [ $# -ge 3 ]; then
+  AGE_TAG="$3"
+else
+  AGE_TAG="$(pin_tag age)"
+  [ -n "$AGE_TAG" ] || die "No '# pin: age <tag>' comment found in Dockerfile"
+fi
+
 # --- fetch new SHAs ---------------------------------------------------------
 
 printf 'Fetching openssl tag %s...\n' "$OPENSSL_TAG"
@@ -53,6 +61,11 @@ CURL_NEW=$(git ls-remote https://github.com/curl/curl.git \
   "refs/tags/${CURL_TAG}^{}" | cut -f1)
 [ -n "$CURL_NEW" ] || die "Tag $CURL_TAG not found in curl/curl"
 
+printf 'Fetching age tag %s...\n' "$AGE_TAG"
+AGE_NEW=$(git ls-remote https://github.com/FiloSottile/age.git \
+  "refs/tags/${AGE_TAG}^{}" | cut -f1)
+[ -n "$AGE_NEW" ] || die "Tag $AGE_TAG not found in FiloSottile/age"
+
 printf 'Fetching debian:stable-slim multi-arch digest...\n'
 DEBIAN_NEW=$(docker buildx imagetools inspect debian:stable-slim 2>/dev/null | \
   awk '/^Digest:/{print $2}')
@@ -62,16 +75,20 @@ DEBIAN_NEW=$(docker buildx imagetools inspect debian:stable-slim 2>/dev/null | \
 
 OPENSSL_OLD_TAG="$(pin_tag openssl)"
 CURL_OLD_TAG="$(pin_tag curl)"
+AGE_OLD_TAG="$(pin_tag age)"
 
 OPENSSL_OLD=$(grep -oE 'openssl fetch --depth 1 origin [0-9a-f]{40}' "$DOCKERFILE" | \
   grep -oE '[0-9a-f]{40}')
 CURL_OLD=$(grep -oE 'curl fetch --depth 1 origin [0-9a-f]{40}' "$DOCKERFILE" | \
+  grep -oE '[0-9a-f]{40}')
+AGE_OLD=$(grep -oE 'age fetch --depth 1 origin [0-9a-f]{40}' "$DOCKERFILE" | \
   grep -oE '[0-9a-f]{40}')
 DEBIAN_OLD=$(grep -oE 'DEBIAN_DIGEST=sha256:[0-9a-f]+' "$DOCKERFILE" | \
   grep -oE 'sha256:[0-9a-f]+')
 
 [ -n "$OPENSSL_OLD" ] || die "Could not find current OpenSSL SHA in Dockerfile"
 [ -n "$CURL_OLD" ]   || die "Could not find current curl SHA in Dockerfile"
+[ -n "$AGE_OLD" ]    || die "Could not find current age SHA in Dockerfile"
 [ -n "$DEBIAN_OLD" ] || die "Could not find current Debian digest in Dockerfile"
 
 # --- patch Dockerfile -------------------------------------------------------
@@ -85,6 +102,7 @@ text = path.read_text()
 # Update SHAs
 text = text.replace("$OPENSSL_OLD", "$OPENSSL_NEW")
 text = text.replace("$CURL_OLD",    "$CURL_NEW")
+text = text.replace("$AGE_OLD",     "$AGE_NEW")
 text = text.replace("$DEBIAN_OLD",  "$DEBIAN_NEW")
 
 # Update pin comments if tags changed
@@ -95,6 +113,10 @@ text = text.replace(
 text = text.replace(
     "# pin: curl $CURL_OLD_TAG\n",
     "# pin: curl $CURL_TAG\n",
+)
+text = text.replace(
+    "# pin: age $AGE_OLD_TAG\n",
+    "# pin: age $AGE_TAG\n",
 )
 
 path.write_text(text)
@@ -116,6 +138,13 @@ if [ "$CURL_OLD_TAG $CURL_OLD" = "$CURL_TAG $CURL_NEW" ]; then
 else
   printf '  curl     %s %s -> %s %s\n' \
     "$CURL_OLD_TAG" "$CURL_OLD" "$CURL_TAG" "$CURL_NEW"
+fi
+
+if [ "$AGE_OLD_TAG $AGE_OLD" = "$AGE_TAG $AGE_NEW" ]; then
+  printf '  age      %s %s  (unchanged)\n' "$AGE_TAG" "$AGE_NEW"
+else
+  printf '  age      %s %s -> %s %s\n' \
+    "$AGE_OLD_TAG" "$AGE_OLD" "$AGE_TAG" "$AGE_NEW"
 fi
 
 if [ "$DEBIAN_OLD" = "$DEBIAN_NEW" ]; then
