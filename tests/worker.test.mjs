@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createDudService } from '../dist/src/service.js';
+import { MemoryBlobStore, makeContext, textStream } from './helpers.mjs';
 
 // Valid 32-char lowercase hex IDs used across tests
 const ID_UPLOAD = 'a'.repeat(32);
@@ -14,92 +15,6 @@ const ID_CANCEL = 'd'.repeat(32);
 const ID_FAIL = 'e'.repeat(32);
 const ID_NEW = 'f'.repeat(32);
 const PRETTY_ID_UPLOAD = 'aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa';
-
-function textStream(text) {
-  const bytes = new TextEncoder().encode(text);
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
-
-function makeContext() {
-  const promises = [];
-  return {
-    waitUntil(promise) {
-      promises.push(Promise.resolve(promise));
-    },
-    async flush() {
-      await Promise.allSettled(promises);
-    },
-  };
-}
-
-class MemoryBlobStore {
-  constructor() {
-    this.objects = new Map();
-    this.deletedKeys = [];
-    this.failPut = false;
-  }
-
-  async put(key, body, metadata) {
-    if (this.failPut) {
-      throw new Error('put failed');
-    }
-
-    const bytes = new Uint8Array(await new Response(body).arrayBuffer());
-    this.objects.set(key, {
-      bytes,
-      contentType: metadata.contentType,
-      customMetadata: { ...(metadata.customMetadata ?? {}) },
-    });
-  }
-
-  async get(key) {
-    const entry = this.objects.get(key);
-    if (!entry) {
-      return null;
-    }
-
-    return {
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(entry.bytes);
-          controller.close();
-        },
-      }),
-      size: entry.bytes.byteLength,
-      customMetadata: { ...entry.customMetadata },
-    };
-  }
-
-  async head(key) {
-    const entry = this.objects.get(key);
-    if (!entry) {
-      return null;
-    }
-
-    return {
-      size: entry.bytes.byteLength,
-      customMetadata: { ...entry.customMetadata },
-    };
-  }
-
-  async list(prefix, limit) {
-    return Array.from(this.objects.keys())
-      .filter((key) => key.startsWith(prefix))
-      .sort()
-      .slice(0, limit)
-      .map((key) => ({ key }));
-  }
-
-  async delete(key) {
-    this.deletedKeys.push(key);
-    this.objects.delete(key);
-  }
-}
 
 test('GET /v1/test returns readiness JSON', async () => {
   const service = createDudService({

@@ -1,6 +1,7 @@
 .DS_Store
 .claude/
 .env
+.fallow/
 .idea/
 .wrangler/
 .dud-dev/

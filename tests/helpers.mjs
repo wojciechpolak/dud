@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
+// fallow-ignore-file unused-class-member
 
 export function textStream(text) {
   const bytes = new TextEncoder().encode(text);

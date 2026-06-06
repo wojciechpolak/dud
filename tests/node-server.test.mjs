@@ -63,6 +63,15 @@ async function closeServer(server) {
   });
 }
 
+function createCapturingLogger(messages) {
+  return {
+    error() {},
+    log(...args) {
+      messages.push(args.join(' '));
+    },
+  };
+}
+
 async function startTestServer(config = {}, options = {}) {
   const dataDir =
     config.dataDir ?? (await mkdtemp(path.join(os.tmpdir(), 'dud-node-data-')));
@@ -89,6 +98,24 @@ async function startTestServer(config = {}, options = {}) {
   const protocol = config.tlsCertFile && config.tlsKeyFile ? 'https' : 'http';
   const baseUrl = `${protocol}://127.0.0.1:${address.port}`;
   return { baseUrl, dataDir, server };
+}
+
+async function startLoggedTestServer(config = {}) {
+  const messages = [];
+  const serverState = await startTestServer(config, {
+    logger: createCapturingLogger(messages),
+  });
+
+  return {
+    ...serverState,
+    messages,
+  };
+}
+
+async function fetchTestEndpoint(baseUrl) {
+  const response = await fetch(`${baseUrl}/v1/test`);
+  assert.equal(response.status, 200);
+  return response;
 }
 
 test('node server can upload and download ciphertext through the shared API', async () => {
@@ -285,22 +312,10 @@ test('node server exposes a middleware point for operator policy', async () => {
 });
 
 test('node server logs request summaries', async () => {
-  const messages = [];
-  const { baseUrl, server } = await startTestServer(
-    {},
-    {
-      logger: {
-        error() {},
-        log(...args) {
-          messages.push(args.join(' '));
-        },
-      },
-    },
-  );
+  const { baseUrl, messages, server } = await startLoggedTestServer();
 
   try {
-    const response = await fetch(`${baseUrl}/v1/test`);
-    assert.equal(response.status, 200);
+    await fetchTestEndpoint(baseUrl);
     assert.equal(messages.length >= 1, true);
     assert.equal(
       messages.some((message) =>
@@ -314,24 +329,12 @@ test('node server logs request summaries', async () => {
 });
 
 test('node server supports minimal request logging without client IPs', async () => {
-  const messages = [];
-  const { baseUrl, server } = await startTestServer(
-    {
-      logMode: 'minimal',
-    },
-    {
-      logger: {
-        error() {},
-        log(...args) {
-          messages.push(args.join(' '));
-        },
-      },
-    },
-  );
+  const { baseUrl, messages, server } = await startLoggedTestServer({
+    logMode: 'minimal',
+  });
 
   try {
-    const response = await fetch(`${baseUrl}/v1/test`);
-    assert.equal(response.status, 200);
+    await fetchTestEndpoint(baseUrl);
     assert.equal(
       messages.some((message) => /GET \/v1\/test -> 200 \d+ms/.test(message)),
       true,
@@ -348,24 +351,12 @@ test('node server supports minimal request logging without client IPs', async ()
 });
 
 test('node server silent log mode suppresses startup and access logs', async () => {
-  const messages = [];
-  const { baseUrl, server } = await startTestServer(
-    {
-      logMode: 'silent',
-    },
-    {
-      logger: {
-        error() {},
-        log(...args) {
-          messages.push(args.join(' '));
-        },
-      },
-    },
-  );
+  const { baseUrl, messages, server } = await startLoggedTestServer({
+    logMode: 'silent',
+  });
 
   try {
-    const response = await fetch(`${baseUrl}/v1/test`);
-    assert.equal(response.status, 200);
+    await fetchTestEndpoint(baseUrl);
     assert.deepEqual(messages, []);
   } finally {
     await closeServer(server);

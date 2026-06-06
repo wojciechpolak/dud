@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "entry": ["src/index.ts", "src/node-server.ts"],
+  "usedClassMembers": [
+    {
+      "implements": "BlobStore",
+      "members": ["put", "get", "head", "list", "delete"]
+    }
+  ],
+  "duplicates": {
+    "minOccurrences": 3
+  },
+  "rules": {}
+}

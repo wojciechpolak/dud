@@ -47,16 +47,7 @@ async function makeExecutable(filePath, content) {
   await chmod(filePath, 0o755);
 }
 
-test('version flag prints the client version', async () => {
-  const result = await runCommand('sh', [CLIENT_SCRIPT, '--version']);
-
-  assert.equal(result.code, 0);
-  assert.equal(result.stdout, '1.3.0\n');
-  assert.equal(result.stderr, '');
-});
-
-test('test command enforces secure curl flags', async () => {
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-test-'));
+async function createVerboseCurlMock(tmpDir, responseBody = '{"ok":true}') {
   const logFile = path.join(tmpDir, 'curl.log');
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
 
@@ -75,9 +66,33 @@ done
 printf '%s\n' '* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey' >&2
 printf '%s\n' '* ECH: result: status is succeeded, inner is dud.example.com, outer is cloudflare-ech.com' >&2
 printf '%s\n' '* ALPN: server accepted http/1.1' >&2
-printf '{"ok":true}\n' > "$output"
+printf '%s\n' '${responseBody}' > "$output"
 `,
   );
+
+  return { curlMock, logFile };
+}
+
+function createQrUploadToolPaths(tmpDir) {
+  return {
+    qrLog: path.join(tmpDir, 'qr.log'),
+    ageMock: path.join(tmpDir, 'age-mock.sh'),
+    curlMock: path.join(tmpDir, 'curl-mock.sh'),
+    qrMock: path.join(tmpDir, 'qr-mock.sh'),
+  };
+}
+
+test('version flag prints the client version', async () => {
+  const result = await runCommand('sh', [CLIENT_SCRIPT, '--version']);
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, '1.3.0\n');
+  assert.equal(result.stderr, '');
+});
+
+test('test command enforces secure curl flags', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-test-'));
+  const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
   const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
     DUD_CURL_BIN: curlMock,
@@ -99,27 +114,7 @@ test('test command supports custom CA bundles and connect-to mappings', async ()
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-connect-to-'),
   );
-  const logFile = path.join(tmpDir, 'curl.log');
-  const curlMock = path.join(tmpDir, 'curl-mock.sh');
-
-  await makeExecutable(
-    curlMock,
-    `#!/bin/sh
-printf '%s\n' "$@" > "${logFile}"
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--output" ]; then
-    output="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-printf '%s\n' '* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey' >&2
-printf '%s\n' '* ECH: result: status is succeeded, inner is dud.example.com, outer is cloudflare-ech.com' >&2
-printf '%s\n' '* ALPN: server accepted http/1.1' >&2
-printf '{"ok":true}\n' > "$output"
-`,
-  );
+  const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
   const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
     DUD_CURL_BIN: curlMock,
@@ -140,27 +135,7 @@ printf '{"ok":true}\n' > "$output"
 
 test('test command allows DUD_ECH_MODE=grease', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-grease-'));
-  const logFile = path.join(tmpDir, 'curl.log');
-  const curlMock = path.join(tmpDir, 'curl-mock.sh');
-
-  await makeExecutable(
-    curlMock,
-    `#!/bin/sh
-printf '%s\n' "$@" > "${logFile}"
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--output" ]; then
-    output="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-printf '%s\n' '* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey' >&2
-printf '%s\n' '* ECH: result: status is succeeded, inner is dud.example.com, outer is cloudflare-ech.com' >&2
-printf '%s\n' '* ALPN: server accepted http/1.1' >&2
-printf '{"ok":true}\n' > "$output"
-`,
-  );
+  const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
   const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
     DUD_CURL_BIN: curlMock,
@@ -175,27 +150,7 @@ printf '{"ok":true}\n' > "$output"
 
 test('test command can print TLS and ECH details', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-details-'));
-  const logFile = path.join(tmpDir, 'curl.log');
-  const curlMock = path.join(tmpDir, 'curl-mock.sh');
-
-  await makeExecutable(
-    curlMock,
-    `#!/bin/sh
-printf '%s\n' "$@" > "${logFile}"
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--output" ]; then
-    output="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-printf '%s\n' '* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey' >&2
-printf '%s\n' '* ECH: result: status is succeeded, inner is dud.example.com, outer is cloudflare-ech.com' >&2
-printf '%s\n' '* ALPN: server accepted http/1.1' >&2
-printf '{"ok":true}\n' > "$output"
-`,
-  );
+  const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
   const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
     DUD_CURL_BIN: curlMock,
@@ -228,10 +183,7 @@ test('upload command encrypts locally with a passphrase and posts the encrypted 
   const ageLog = path.join(tmpDir, 'age.log');
   const curlLog = path.join(tmpDir, 'curl.log');
   const curlPayload = path.join(tmpDir, 'payload.bin');
-  const qrLog = path.join(tmpDir, 'qr.log');
-  const ageMock = path.join(tmpDir, 'age-mock.sh');
-  const curlMock = path.join(tmpDir, 'curl-mock.sh');
-  const qrMock = path.join(tmpDir, 'qr-mock.sh');
+  const { qrLog, ageMock, curlMock, qrMock } = createQrUploadToolPaths(tmpDir);
 
   await writeFile(filePath, 'plaintext', 'utf8');
 
@@ -730,10 +682,7 @@ test('upload command can bundle multiple files and directories', async () => {
   const secondFile = path.join(secondDir, 'beta.txt');
   const curlPayload = path.join(tmpDir, 'payload.tar');
   const curlLog = path.join(tmpDir, 'curl.log');
-  const qrLog = path.join(tmpDir, 'qr.log');
-  const ageMock = path.join(tmpDir, 'age-mock.sh');
-  const curlMock = path.join(tmpDir, 'curl-mock.sh');
-  const qrMock = path.join(tmpDir, 'qr-mock.sh');
+  const { qrLog, ageMock, curlMock, qrMock } = createQrUploadToolPaths(tmpDir);
 
   await writeFile(firstFile, 'alpha payload', 'utf8');
   await mkdir(secondDir);
@@ -842,10 +791,7 @@ test('upload command can suppress QR output with --no-qr', async () => {
     path.join(os.tmpdir(), 'dud-client-upload-no-qr-'),
   );
   const filePath = path.join(tmpDir, 'plain.bin');
-  const qrLog = path.join(tmpDir, 'qr.log');
-  const ageMock = path.join(tmpDir, 'age-mock.sh');
-  const curlMock = path.join(tmpDir, 'curl-mock.sh');
-  const qrMock = path.join(tmpDir, 'qr-mock.sh');
+  const { qrLog, ageMock, curlMock, qrMock } = createQrUploadToolPaths(tmpDir);
 
   await writeFile(filePath, 'plaintext', 'utf8');
 

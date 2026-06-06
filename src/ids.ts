@@ -10,11 +10,11 @@ export function generateOpaqueId(): string {
   );
 }
 
-export function normalizeOpaqueId(id: string): string {
+function normalizeOpaqueId(id: string): string {
   return id.replaceAll('-', '');
 }
 
-export function isOpaqueId(id: string): boolean {
+function isOpaqueId(id: string): boolean {
   return /^[0-9a-f]{32}$/.test(id);
 }
 

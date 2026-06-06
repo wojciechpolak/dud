@@ -5,7 +5,12 @@ import { DEFAULT_CONFIG } from './config.js';
 import { errorResponse, jsonResponse } from './http.js';
 import { formatOpaqueId, generateOpaqueId, parseOpaqueId } from './ids.js';
 import { parseTtl } from './ttl.js';
-import type { BlobStore, DudConfig, ExecutionContextLike } from './types.js';
+import type {
+  BlobObject,
+  BlobStore,
+  DudConfig,
+  ExecutionContextLike,
+} from './types.js';
 
 interface StoredFileMetadata {
   id: string;
@@ -167,378 +172,603 @@ export interface DudDependencies {
   createId?: () => string;
 }
 
-export function createDudService(dependencies: DudDependencies) {
-  const blobStore = dependencies.blobStore;
-  const config: DudConfig = {
-    ...DEFAULT_CONFIG,
-    ...dependencies.config,
-  };
-  const now = dependencies.now ?? (() => Date.now());
-  const createId = dependencies.createId ?? generateOpaqueId;
+interface DudServiceContext {
+  blobStore: BlobStore;
+  config: DudConfig;
+  now: () => number;
+  createId: () => string;
+}
 
-  function ensureStorageConfigured(): Response | null {
-    if (config.storageConfigured) {
-      return null;
-    }
+interface UploadRequestData {
+  body: ReadableStream<Uint8Array>;
+  contentLength: number | null;
+  contentType: string;
+  deleteAfterRead: boolean;
+  ttlMs: number;
+}
 
-    return errorResponse(503, config.storageNotConfiguredMessage);
+interface DownloadReadyResult {
+  blob: BlobObject;
+  metadata: StoredFileMetadata;
+}
+
+function ensureStorageConfigured(config: DudConfig): Response | null {
+  if (config.storageConfigured) {
+    return null;
   }
 
-  function scheduleCleanup(ctx: ExecutionContextLike, limit?: number): void {
-    ctx.waitUntil(cleanup(limit));
+  return errorResponse(503, config.storageNotConfiguredMessage);
+}
+
+function scheduleCleanup(
+  service: DudServiceContext,
+  ctx: ExecutionContextLike,
+  limit?: number,
+): void {
+  ctx.waitUntil(cleanup(service, limit));
+}
+
+function isSecretAuthorized(request: Request, secretToken: string): boolean {
+  const provided = request.headers.get('x-dud-secret-token');
+  if (!provided) {
+    return false;
   }
 
-  function isSecretAuthorized(request: Request): boolean {
-    const provided = request.headers.get('x-dud-secret-token');
-    if (!config.secretToken || !provided) {
-      return false;
-    }
+  const enc = new TextEncoder();
+  const a = enc.encode(provided);
+  const b = enc.encode(secretToken);
+  const maxLen = Math.max(a.byteLength, b.byteLength);
+  const ap = new Uint8Array(maxLen);
+  const bp = new Uint8Array(maxLen);
+  ap.set(a);
+  bp.set(b);
+  // Include length mismatch in diff so unequal-length tokens always fail
+  // without short-circuiting on the first byte difference.
+  let diff = a.byteLength ^ b.byteLength;
+  for (let i = 0; i < maxLen; i++) {
+    diff |= ap[i] ^ bp[i];
+  }
+  return diff === 0;
+}
 
-    const enc = new TextEncoder();
-    const a = enc.encode(provided);
-    const b = enc.encode(config.secretToken);
-    const maxLen = Math.max(a.byteLength, b.byteLength);
-    const ap = new Uint8Array(maxLen);
-    const bp = new Uint8Array(maxLen);
-    ap.set(a);
-    bp.set(b);
-    // Include length mismatch in diff so unequal-length tokens always fail
-    // without short-circuiting on the first byte difference.
-    let diff = a.byteLength ^ b.byteLength;
-    for (let i = 0; i < maxLen; i++) {
-      diff |= ap[i] ^ bp[i];
-    }
-    return diff === 0;
+function requireAuthorizedRequest(
+  service: DudServiceContext,
+  request: Request,
+  unavailableMessage: string,
+): Response | null {
+  const storageError = ensureStorageConfigured(service.config);
+  if (storageError) {
+    return storageError;
   }
 
-  async function writeTombstone(
-    id: string,
-    reason: TombstoneMetadata['reason'],
-    expiresAt: number,
-  ): Promise<void> {
-    await blobStore.put(
-      tombstoneKey(id),
-      encodeJsonStream({
-        id,
-        reason,
-        expiresAt,
-      }),
-      {
-        contentType: 'application/json',
-        customMetadata: {
-          expiresAt: String(expiresAt),
-          reason,
-        },
-      },
-    );
+  if (!service.config.secretToken) {
+    return errorResponse(503, unavailableMessage);
   }
 
-  async function cleanupPrefix(
-    prefix: string,
-    limit: number,
-    onEntry: (key: string) => Promise<boolean>,
-  ): Promise<number> {
-    const entries = await blobStore.list(prefix, limit);
-    let deletedCount = 0;
-
-    for (const entry of entries) {
-      if (await onEntry(entry.key)) {
-        deletedCount += 1;
-      }
-    }
-
-    return deletedCount;
+  if (!isSecretAuthorized(request, service.config.secretToken)) {
+    return errorResponse(403, 'Invalid secret token.');
   }
 
-  async function cleanup(limit = config.cleanupBatchSize): Promise<number> {
-    const currentTime = now();
-    let remaining = limit;
-    let deletedCount = 0;
+  return null;
+}
 
-    deletedCount += await cleanupPrefix(
-      'files/',
-      remaining,
-      async (key): Promise<boolean> => {
-        const head = await blobStore.head(key);
-        const metadata = parseStoredFileMetadata(head?.customMetadata);
-
-        if (!metadata || metadata.expiresAt > currentTime) {
-          return false;
-        }
-
-        await blobStore.delete(key).catch(() => undefined);
-        return true;
-      },
-    );
-
-    remaining = limit - deletedCount;
-    if (remaining <= 0) {
-      return deletedCount;
-    }
-
-    deletedCount += await cleanupPrefix(
-      'tombstones/',
-      remaining,
-      async (key): Promise<boolean> => {
-        const head = await blobStore.head(key);
-        const metadata = parseTombstoneMetadata(head?.customMetadata);
-
-        if (!metadata || metadata.expiresAt > currentTime) {
-          return false;
-        }
-
-        await blobStore.delete(key).catch(() => undefined);
-        return true;
-      },
-    );
-
-    return deletedCount;
-  }
-
-  async function handleUpload(
-    request: Request,
-    ctx: ExecutionContextLike,
-  ): Promise<Response> {
-    const storageError = ensureStorageConfigured();
-    if (storageError) {
-      return storageError;
-    }
-
-    if (!config.secretToken) {
-      return errorResponse(503, 'Upload endpoint is not configured.');
-    }
-
-    if (!isSecretAuthorized(request)) {
-      return errorResponse(403, 'Invalid secret token.');
-    }
-
-    if (!request.body) {
-      return errorResponse(400, 'Request body is required.');
-    }
-
-    const contentLength = Number(request.headers.get('content-length') ?? NaN);
-    if (!Number.isNaN(contentLength) && contentLength > config.maxUploadBytes) {
-      return errorResponse(413, 'Payload exceeds the maximum upload size.');
-    }
-
-    const requestedTtl = request.headers.get('x-dud-ttl');
-    const deleteAfterRead = parseDeleteAfterRead(
-      request.headers.get('x-dud-delete-after-read'),
-    );
-
-    let ttlMs: number;
-    try {
-      ttlMs = parseTtl(requestedTtl, config.defaultTtlMs, config.maxTtlMs);
-    } catch (error) {
-      return errorResponse(
-        400,
-        error instanceof Error ? error.message : 'Invalid TTL.',
-      );
-    }
-
-    const createdAt = now();
-    const id = createId();
-    const metadata: StoredFileMetadata = {
+async function writeTombstone(
+  service: DudServiceContext,
+  id: string,
+  reason: TombstoneMetadata['reason'],
+  expiresAt: number,
+): Promise<void> {
+  await service.blobStore.put(
+    tombstoneKey(id),
+    encodeJsonStream({
       id,
-      createdAt,
-      expiresAt: createdAt + ttlMs,
-      deleteAfterRead,
+      reason,
+      expiresAt,
+    }),
+    {
+      contentType: 'application/json',
+      customMetadata: {
+        expiresAt: String(expiresAt),
+        reason,
+      },
+    },
+  );
+}
+
+async function cleanupPrefix(
+  blobStore: BlobStore,
+  prefix: string,
+  limit: number,
+  onEntry: (key: string) => Promise<boolean>,
+): Promise<number> {
+  const entries = await blobStore.list(prefix, limit);
+  let deletedCount = 0;
+
+  for (const entry of entries) {
+    if (await onEntry(entry.key)) {
+      deletedCount += 1;
+    }
+  }
+
+  return deletedCount;
+}
+
+async function cleanup(
+  service: DudServiceContext,
+  limit = service.config.cleanupBatchSize,
+): Promise<number> {
+  const currentTime = service.now();
+  let remaining = limit;
+  let deletedCount = 0;
+
+  deletedCount += await cleanupPrefix(
+    service.blobStore,
+    'files/',
+    remaining,
+    async (key): Promise<boolean> => {
+      const head = await service.blobStore.head(key);
+      const metadata = parseStoredFileMetadata(head?.customMetadata);
+
+      if (!metadata || metadata.expiresAt > currentTime) {
+        return false;
+      }
+
+      await service.blobStore.delete(key).catch(() => undefined);
+      return true;
+    },
+  );
+
+  remaining = limit - deletedCount;
+  if (remaining <= 0) {
+    return deletedCount;
+  }
+
+  deletedCount += await cleanupPrefix(
+    service.blobStore,
+    'tombstones/',
+    remaining,
+    async (key): Promise<boolean> => {
+      const head = await service.blobStore.head(key);
+      const metadata = parseTombstoneMetadata(head?.customMetadata);
+
+      if (!metadata || metadata.expiresAt > currentTime) {
+        return false;
+      }
+
+      await service.blobStore.delete(key).catch(() => undefined);
+      return true;
+    },
+  );
+
+  return deletedCount;
+}
+
+function parseUploadContentLength(
+  service: DudServiceContext,
+  request: Request,
+): number | null | Response {
+  const rawContentLength = Number(request.headers.get('content-length') ?? NaN);
+  if (
+    !Number.isNaN(rawContentLength) &&
+    rawContentLength > service.config.maxUploadBytes
+  ) {
+    return errorResponse(413, 'Payload exceeds the maximum upload size.');
+  }
+
+  return Number.isFinite(rawContentLength) ? rawContentLength : null;
+}
+
+function parseUploadTtlOrError(
+  service: DudServiceContext,
+  request: Request,
+): number | Response {
+  try {
+    return parseTtl(
+      request.headers.get('x-dud-ttl'),
+      service.config.defaultTtlMs,
+      service.config.maxTtlMs,
+    );
+  } catch (error) {
+    return errorResponse(
+      400,
+      error instanceof Error ? error.message : 'Invalid TTL.',
+    );
+  }
+}
+
+function validateUploadRequest(
+  service: DudServiceContext,
+  request: Request,
+): { ok: true; data: UploadRequestData } | { ok: false; response: Response } {
+  if (!request.body) {
+    return {
+      ok: false,
+      response: errorResponse(400, 'Request body is required.'),
     };
-
-    try {
-      await blobStore.put(
-        fileKey(id),
-        sizeLimitedBody(request.body, config.maxUploadBytes),
-        {
-          contentType:
-            request.headers.get('content-type') ?? 'application/octet-stream',
-          customMetadata: {
-            dudId: metadata.id,
-            createdAt: String(metadata.createdAt),
-            expiresAt: String(metadata.expiresAt),
-            deleteAfterRead: String(metadata.deleteAfterRead),
-          },
-          ...(Number.isFinite(contentLength) ? { length: contentLength } : {}),
-        },
-      );
-      await blobStore.delete(tombstoneKey(id)).catch(() => undefined);
-    } catch (error) {
-      await blobStore.delete(fileKey(id)).catch(() => undefined);
-      if (error instanceof UploadTooLargeError) {
-        return errorResponse(413, 'Payload exceeds the maximum upload size.');
-      }
-      console.error('Upload R2 write failed:', error);
-      return errorResponse(
-        500,
-        'Upload failed before the file could be committed.',
-      );
-    }
-
-    scheduleCleanup(ctx);
-    return uploadResponseBody(metadata);
   }
 
-  async function handleDownload(
-    id: string,
-    ctx: ExecutionContextLike,
-  ): Promise<Response> {
-    const storageError = ensureStorageConfigured();
-    if (storageError) {
-      return storageError;
-    }
-
-    const tombstone = await blobStore.head(tombstoneKey(id));
-    const tombstoneMetadata = parseTombstoneMetadata(tombstone?.customMetadata);
-    if (tombstoneMetadata) {
-      scheduleCleanup(ctx);
-      return errorResponse(410, 'File is no longer available.');
-    }
-
-    const blob = await blobStore.get(fileKey(id));
-    if (!blob) {
-      return errorResponse(404, 'Unknown file ID.');
-    }
-
-    const metadata = parseStoredFileMetadata(blob.customMetadata);
-    if (!metadata) {
-      ctx.waitUntil(blobStore.delete(fileKey(id)).catch(() => undefined));
-      return errorResponse(410, 'File is no longer available.');
-    }
-
-    const currentTime = now();
-    if (metadata.expiresAt <= currentTime) {
-      ctx.waitUntil(
-        Promise.all([
-          blobStore.delete(fileKey(id)).catch(() => undefined),
-          writeTombstone(id, 'expired', metadata.expiresAt).catch(
-            () => undefined,
-          ),
-          cleanup(),
-        ]),
-      );
-      return errorResponse(410, 'File has expired.');
-    }
-
-    const responseBody = streamWithCompletion(
-      blob.body,
-      async () => {
-        if (metadata.deleteAfterRead) {
-          await blobStore.delete(fileKey(id)).catch(() => undefined);
-          await writeTombstone(id, 'consumed', metadata.expiresAt).catch(
-            () => undefined,
-          );
-        }
-        await cleanup();
-      },
-      ctx,
-    );
-
-    return new Response(responseBody, {
-      status: 200,
-      headers: {
-        'content-type': 'application/octet-stream',
-        'cache-control': 'no-store',
-      },
-    });
+  const contentLength = parseUploadContentLength(service, request);
+  if (contentLength instanceof Response) {
+    return { ok: false, response: contentLength };
   }
 
-  async function handleFlush(
-    request: Request,
-    _ctx: ExecutionContextLike,
-  ): Promise<Response> {
-    const storageError = ensureStorageConfigured();
-    if (storageError) {
-      return storageError;
-    }
-
-    if (!config.secretToken) {
-      return errorResponse(503, 'Flush endpoint is not configured.');
-    }
-
-    if (!isSecretAuthorized(request)) {
-      return errorResponse(403, 'Invalid secret token.');
-    }
-
-    let deletedCount = 0;
-    let partial = false;
-
-    for (let i = 0; i < config.flushMaxIterations; i++) {
-      const deletedInBatch = await cleanup();
-      deletedCount += deletedInBatch;
-
-      if (deletedInBatch < config.cleanupBatchSize) {
-        break;
-      }
-
-      if (i === config.flushMaxIterations - 1) {
-        partial = true;
-      }
-    }
-
-    return jsonResponse({ ok: true, deletedCount, partial });
-  }
-
-  async function handleFetch(
-    request: Request,
-    ctx: ExecutionContextLike,
-  ): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname;
-
-    if (request.method === 'GET' && path === '/v1/test') {
-      return jsonResponse({
-        ok: true,
-        service: config.serviceName,
-        host: url.host,
-        version: config.version,
-      });
-    }
-
-    if (request.method === 'POST' && path === '/v1/files') {
-      return handleUpload(request, ctx);
-    }
-
-    if (request.method === 'GET' && path.startsWith('/v1/files/')) {
-      const requestedId = path.slice('/v1/files/'.length).trim();
-      if (!requestedId) {
-        return errorResponse(400, 'File ID is required.');
-      }
-      const id = parseOpaqueId(requestedId);
-      if (!id) {
-        return errorResponse(400, 'Invalid file ID.');
-      }
-      return handleDownload(id, ctx);
-    }
-
-    if (request.method === 'POST' && path === '/v1/admin/flush') {
-      return handleFlush(request, ctx);
-    }
-
-    if (request.method === 'GET' && path === '/robots.txt') {
-      return new Response('User-agent: *\nDisallow: /\n', {
-        headers: {
-          'content-type': 'text/plain; charset=utf-8',
-          'cache-control': 'public, max-age=86400',
-        },
-      });
-    }
-
-    return new Response(
-      '<!DOCTYPE html><html><head><meta name="robots" content="noindex,nofollow"></head><body></body></html>',
-      {
-        status: 200,
-        headers: {
-          'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'no-store',
-          'x-content-type-options': 'nosniff',
-          'x-frame-options': 'DENY',
-          'x-robots-tag': 'noindex, nofollow',
-        },
-      },
-    );
+  const ttlMs = parseUploadTtlOrError(service, request);
+  if (ttlMs instanceof Response) {
+    return { ok: false, response: ttlMs };
   }
 
   return {
-    fetch: handleFetch,
+    ok: true,
+    data: {
+      body: request.body,
+      contentLength,
+      contentType:
+        request.headers.get('content-type') ?? 'application/octet-stream',
+      deleteAfterRead: parseDeleteAfterRead(
+        request.headers.get('x-dud-delete-after-read'),
+      ),
+      ttlMs,
+    },
+  };
+}
+
+async function storeUpload(
+  service: DudServiceContext,
+  requestData: UploadRequestData,
+  metadata: StoredFileMetadata,
+): Promise<Response | null> {
+  try {
+    await service.blobStore.put(
+      fileKey(metadata.id),
+      sizeLimitedBody(requestData.body, service.config.maxUploadBytes),
+      {
+        contentType: requestData.contentType,
+        customMetadata: {
+          dudId: metadata.id,
+          createdAt: String(metadata.createdAt),
+          expiresAt: String(metadata.expiresAt),
+          deleteAfterRead: String(metadata.deleteAfterRead),
+        },
+        ...(requestData.contentLength !== null
+          ? { length: requestData.contentLength }
+          : {}),
+      },
+    );
+    await service.blobStore
+      .delete(tombstoneKey(metadata.id))
+      .catch(() => undefined);
+    return null;
+  } catch (error) {
+    await service.blobStore.delete(fileKey(metadata.id)).catch(() => undefined);
+    if (error instanceof UploadTooLargeError) {
+      return errorResponse(413, 'Payload exceeds the maximum upload size.');
+    }
+    console.error('Upload R2 write failed:', error);
+    return errorResponse(
+      500,
+      'Upload failed before the file could be committed.',
+    );
+  }
+}
+
+async function handleUpload(
+  service: DudServiceContext,
+  request: Request,
+  ctx: ExecutionContextLike,
+): Promise<Response> {
+  const authError = requireAuthorizedRequest(
+    service,
+    request,
+    'Upload endpoint is not configured.',
+  );
+  if (authError) {
+    return authError;
+  }
+
+  const uploadRequest = validateUploadRequest(service, request);
+  if (!uploadRequest.ok) {
+    return uploadRequest.response;
+  }
+
+  const createdAt = service.now();
+  const metadata: StoredFileMetadata = {
+    id: service.createId(),
+    createdAt,
+    expiresAt: createdAt + uploadRequest.data.ttlMs,
+    deleteAfterRead: uploadRequest.data.deleteAfterRead,
+  };
+
+  const uploadError = await storeUpload(service, uploadRequest.data, metadata);
+  if (uploadError) {
+    return uploadError;
+  }
+
+  scheduleCleanup(service, ctx);
+  return uploadResponseBody(metadata);
+}
+
+async function loadDownloadBlob(
+  service: DudServiceContext,
+  id: string,
+  ctx: ExecutionContextLike,
+): Promise<Response | BlobObject> {
+  const storageError = ensureStorageConfigured(service.config);
+  if (storageError) {
+    return storageError;
+  }
+
+  const tombstone = await service.blobStore.head(tombstoneKey(id));
+  const tombstoneMetadata = parseTombstoneMetadata(tombstone?.customMetadata);
+  if (tombstoneMetadata) {
+    scheduleCleanup(service, ctx);
+    return errorResponse(410, 'File is no longer available.');
+  }
+
+  const blob = await service.blobStore.get(fileKey(id));
+  if (!blob) {
+    return errorResponse(404, 'Unknown file ID.');
+  }
+
+  return blob;
+}
+
+function queueExpiredDownloadCleanup(
+  service: DudServiceContext,
+  id: string,
+  ctx: ExecutionContextLike,
+  expiresAt: number,
+): void {
+  ctx.waitUntil(
+    Promise.all([
+      service.blobStore.delete(fileKey(id)).catch(() => undefined),
+      writeTombstone(service, id, 'expired', expiresAt).catch(() => undefined),
+      cleanup(service),
+    ]),
+  );
+}
+
+function loadDownloadMetadata(
+  service: DudServiceContext,
+  id: string,
+  blob: BlobObject,
+  ctx: ExecutionContextLike,
+): Response | StoredFileMetadata {
+  const metadata = parseStoredFileMetadata(blob.customMetadata);
+  if (!metadata) {
+    ctx.waitUntil(service.blobStore.delete(fileKey(id)).catch(() => undefined));
+    return errorResponse(410, 'File is no longer available.');
+  }
+
+  if (metadata.expiresAt <= service.now()) {
+    queueExpiredDownloadCleanup(service, id, ctx, metadata.expiresAt);
+    return errorResponse(410, 'File has expired.');
+  }
+
+  return metadata;
+}
+
+async function loadDownloadReadyResult(
+  service: DudServiceContext,
+  id: string,
+  ctx: ExecutionContextLike,
+): Promise<Response | DownloadReadyResult> {
+  const blob = await loadDownloadBlob(service, id, ctx);
+  if (blob instanceof Response) {
+    return blob;
+  }
+
+  const metadata = loadDownloadMetadata(service, id, blob, ctx);
+  if (metadata instanceof Response) {
+    return metadata;
+  }
+
+  return { blob, metadata };
+}
+
+async function handleDownload(
+  service: DudServiceContext,
+  id: string,
+  ctx: ExecutionContextLike,
+): Promise<Response> {
+  const downloadReady = await loadDownloadReadyResult(service, id, ctx);
+  if (downloadReady instanceof Response) {
+    return downloadReady;
+  }
+
+  const responseBody = streamWithCompletion(
+    downloadReady.blob.body,
+    async () => {
+      if (downloadReady.metadata.deleteAfterRead) {
+        await service.blobStore.delete(fileKey(id)).catch(() => undefined);
+        await writeTombstone(
+          service,
+          id,
+          'consumed',
+          downloadReady.metadata.expiresAt,
+        ).catch(() => undefined);
+      }
+      await cleanup(service);
+    },
+    ctx,
+  );
+
+  return new Response(responseBody, {
+    status: 200,
+    headers: {
+      'content-type': 'application/octet-stream',
+      'cache-control': 'no-store',
+    },
+  });
+}
+
+async function handleFlush(
+  service: DudServiceContext,
+  request: Request,
+): Promise<Response> {
+  const authError = requireAuthorizedRequest(
+    service,
+    request,
+    'Flush endpoint is not configured.',
+  );
+  if (authError) {
+    return authError;
+  }
+
+  const { deletedCount, partial } = await flushExpiredEntries(service);
+  return jsonResponse({ ok: true, deletedCount, partial });
+}
+
+async function flushExpiredEntries(
+  service: DudServiceContext,
+): Promise<{ deletedCount: number; partial: boolean }> {
+  let deletedCount = 0;
+  let partial = false;
+
+  for (let i = 0; i < service.config.flushMaxIterations; i++) {
+    const deletedInBatch = await cleanup(service);
+    deletedCount += deletedInBatch;
+
+    if (deletedInBatch < service.config.cleanupBatchSize) {
+      break;
+    }
+
+    if (i === service.config.flushMaxIterations - 1) {
+      partial = true;
+    }
+  }
+
+  return { deletedCount, partial };
+}
+
+function testResponse(service: DudServiceContext, url: URL): Response {
+  return jsonResponse({
+    ok: true,
+    service: service.config.serviceName,
+    host: url.host,
+    version: service.config.version,
+  });
+}
+
+function robotsResponse(): Response {
+  return new Response('User-agent: *\nDisallow: /\n', {
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'public, max-age=86400',
+    },
+  });
+}
+
+function shellResponse(): Response {
+  return new Response(
+    '<!DOCTYPE html><html><head><meta name="robots" content="noindex,nofollow"></head><body></body></html>',
+    {
+      status: 200,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'x-frame-options': 'DENY',
+        'x-robots-tag': 'noindex, nofollow',
+      },
+    },
+  );
+}
+
+function parseRequestedFileId(path: string): string | Response {
+  const requestedId = path.slice('/v1/files/'.length).trim();
+  if (!requestedId) {
+    return errorResponse(400, 'File ID is required.');
+  }
+
+  const id = parseOpaqueId(requestedId);
+  return id ?? errorResponse(400, 'Invalid file ID.');
+}
+
+function staticGetResponse(
+  service: DudServiceContext,
+  url: URL,
+): Response | null {
+  const path = url.pathname;
+  if (path === '/v1/test') {
+    return testResponse(service, url);
+  }
+
+  if (path === '/robots.txt') {
+    return robotsResponse();
+  }
+
+  return null;
+}
+
+async function handleGetRequest(
+  service: DudServiceContext,
+  path: string,
+  url: URL,
+  ctx: ExecutionContextLike,
+): Promise<Response> {
+  const response = staticGetResponse(service, url);
+  if (response) {
+    return response;
+  }
+
+  if (!path.startsWith('/v1/files/')) {
+    return shellResponse();
+  }
+
+  const id = parseRequestedFileId(path);
+  return id instanceof Response ? id : handleDownload(service, id, ctx);
+}
+
+async function handlePostRequest(
+  service: DudServiceContext,
+  request: Request,
+  path: string,
+  ctx: ExecutionContextLike,
+): Promise<Response> {
+  if (path === '/v1/files') {
+    return handleUpload(service, request, ctx);
+  }
+
+  if (path === '/v1/admin/flush') {
+    return handleFlush(service, request);
+  }
+
+  return shellResponse();
+}
+
+async function handleFetch(
+  service: DudServiceContext,
+  request: Request,
+  ctx: ExecutionContextLike,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  if (request.method === 'GET') {
+    return handleGetRequest(service, path, url, ctx);
+  }
+
+  if (request.method === 'POST') {
+    return handlePostRequest(service, request, path, ctx);
+  }
+
+  return shellResponse();
+}
+
+export function createDudService(dependencies: DudDependencies) {
+  const service: DudServiceContext = {
+    blobStore: dependencies.blobStore,
+    config: {
+      ...DEFAULT_CONFIG,
+      ...dependencies.config,
+    },
+    now: dependencies.now ?? (() => Date.now()),
+    createId: dependencies.createId ?? generateOpaqueId,
+  };
+
+  return {
+    fetch(request: Request, ctx: ExecutionContextLike) {
+      return handleFetch(service, request, ctx);
+    },
   };
 }
