@@ -155,7 +155,7 @@ print_upload_response() {
 
 print_upload_qr() {
   printf '\nQR Code:\n'
-  "$DUD_QRENCODE_BIN" -t ansiutf8 "$UPLOAD_RECEIVE_COMMAND"
+  "$DUD_QRENCODE_BIN" -t ansiutf8 "$UPLOAD_ID"
 }
 
 create_bundle_archive() {

@@ -269,9 +269,9 @@ printf '[qr]\\n'
   assert.match(curlArgs, /x-dud-delete-after-read: true/);
   assert.match(curlArgs, /x-dud-secret-token: top-secret/);
   assert.equal(await readFile(curlPayload, 'utf8'), 'plaintext');
-  assert.match(
+  assert.equal(
     await readFile(qrLog, 'utf8'),
-    /-t\nansiutf8\ndud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com/,
+    '-t\nansiutf8\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe\n',
   );
 });
 
@@ -760,9 +760,9 @@ printf '[qr]\\n'
     'docs/',
     'docs/beta.txt',
   ]);
-  assert.match(
+  assert.equal(
     await readFile(qrLog, 'utf8'),
-    /dud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com --extract/,
+    '-t\nansiutf8\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe\n',
   );
 });
 
