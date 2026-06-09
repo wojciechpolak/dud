@@ -18,6 +18,7 @@ function runCommand(command, args, env = {}, options = {}) {
         ...process.env,
         ...env,
       },
+      cwd: options.cwd,
       stdio: [stdinMode, 'pipe', 'pipe'],
     });
 
@@ -861,6 +862,473 @@ printf '[qr]\\n'
   await assert.rejects(readFile(qrLog, 'utf8'));
 });
 
+test('git push creates a full bundle and uploads it', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-git-push-'));
+  const gitLog = path.join(tmpDir, 'git.log');
+  const curlLog = path.join(tmpDir, 'curl.log');
+  const curlPayload = path.join(tmpDir, 'payload.bundle');
+  const gitMock = path.join(tmpDir, 'git-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const qrMock = path.join(tmpDir, 'qr-mock.sh');
+
+  await makeExecutable(
+    gitMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${gitLog}"
+if [ "$1" = "rev-parse" ]; then
+  printf '.git\n'
+  exit 0
+fi
+if [ "$1" = "bundle" ] && [ "$2" = "create" ]; then
+  printf 'bundle payload' > "$3"
+  exit 0
+fi
+exit 1
+`,
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${curlLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--data-binary" ]; then
+    payload="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "\${payload#@}" "${curlPayload}"
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":true}' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    qrMock,
+    `#!/bin/sh
+printf '[qr]\\n'
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'git',
+      'push',
+      '--ttl',
+      '12h',
+      '--delete-after-read',
+      '-r',
+      'age1examplepublickey0000000000000000000000000000000000000000000000',
+      '--no-qr',
+    ],
+    {
+      DUD_GIT_BIN: gitMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_CURL_BIN: curlMock,
+      DUD_QRENCODE_BIN: qrMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const gitArgs = await readFile(gitLog, 'utf8');
+  assert.match(gitArgs, /rev-parse\n--git-dir/);
+  assert.match(
+    gitArgs,
+    /bundle\ncreate\n\/tmp\/dud-git-push-bundle-[^\n]+\n--branches\n--tags/,
+  );
+  const curlArgs = await readFile(curlLog, 'utf8');
+  assert.match(curlArgs, /x-dud-ttl: 12h/);
+  assert.match(curlArgs, /x-dud-delete-after-read: true/);
+  assert.equal(await readFile(curlPayload, 'utf8'), 'bundle payload');
+  assert.match(
+    result.stdout,
+    /^Receive: dud git fetch --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https:\/\/dud\.example\.com$/m,
+  );
+});
+
+test('git send is an alias for git push', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-git-send-alias-'),
+  );
+  const gitLog = path.join(tmpDir, 'git.log');
+  const gitMock = path.join(tmpDir, 'git-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await makeExecutable(
+    gitMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${gitLog}"
+if [ "$1" = "rev-parse" ]; then exit 0; fi
+if [ "$1" = "bundle" ] && [ "$2" = "create" ]; then printf bundle > "$3"; exit 0; fi
+exit 1
+`,
+  );
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then output="$2"; shift 2; continue; fi
+  input="$1"; shift
+done
+cp "$input" "$output"
+`,
+  );
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'git', 'send', '--json'],
+    {
+      DUD_GIT_BIN: gitMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_CURL_BIN: curlMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(await readFile(gitLog, 'utf8'), /bundle\ncreate/);
+});
+
+test('git fetch downloads, verifies, and fetches remote-tracking refs', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-git-fetch-'));
+  const identityPath = path.join(tmpDir, 'identity.txt');
+  const gitLog = path.join(tmpDir, 'git.log');
+  const ageLog = path.join(tmpDir, 'age.log');
+  const gitMock = path.join(tmpDir, 'git-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await writeFile(identityPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
+
+  await makeExecutable(
+    gitMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${gitLog}"
+if [ "$1" = "rev-parse" ]; then
+  printf '.git\n'
+  exit 0
+fi
+if [ "$1" = "bundle" ] && [ "$2" = "verify" ]; then
+  exit 0
+fi
+if [ "$1" = "ls-remote" ]; then
+  printf 'abc123\trefs/heads/main\n'
+  exit 0
+fi
+if [ "$1" = "fetch" ]; then
+  exit 0
+fi
+exit 1
+`,
+  );
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf 'cipher bundle' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${ageLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'git',
+      'fetch',
+      '--id',
+      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
+      '--identity',
+      identityPath,
+      '--remote',
+      'A',
+    ],
+    {
+      DUD_GIT_BIN: gitMock,
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const ageArgs = await readFile(ageLog, 'utf8');
+  assert.match(ageArgs, /-i/);
+  assert.match(
+    ageArgs,
+    new RegExp(identityPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+  const gitArgs = await readFile(gitLog, 'utf8');
+  assert.match(gitArgs, /bundle\nverify\n\/tmp\/dud-git-fetch-bundle-[^\n]+/);
+  assert.match(
+    gitArgs,
+    /fetch\n\/tmp\/dud-git-fetch-bundle-[^\n]+\nrefs\/heads\/\*:refs\/remotes\/A\/\*/,
+  );
+  assert.match(result.stdout, /Fetched Git bundle into refs\/remotes\/A\/\*/);
+  assert.match(result.stdout, /git merge --ff-only A\/main/);
+});
+
+test('git receive is an alias for git fetch with the default remote', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-git-receive-alias-'),
+  );
+  const gitLog = path.join(tmpDir, 'git.log');
+  const gitMock = path.join(tmpDir, 'git-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await makeExecutable(
+    gitMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${gitLog}"
+if [ "$1" = "rev-parse" ]; then exit 0; fi
+if [ "$1" = "bundle" ] && [ "$2" = "verify" ]; then exit 0; fi
+if [ "$1" = "ls-remote" ]; then printf 'abc123\trefs/heads/main\n'; exit 0; fi
+if [ "$1" = "fetch" ]; then exit 0; fi
+exit 1
+`,
+  );
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+printf bundle > "$output"
+`,
+  );
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then output="$2"; shift 2; continue; fi
+  input="$1"; shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  const result = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'git',
+      'receive',
+      '--id',
+      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
+    ],
+    {
+      DUD_GIT_BIN: gitMock,
+      DUD_CURL_BIN: curlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(
+    await readFile(gitLog, 'utf8'),
+    /refs\/heads\/\*:refs\/remotes\/dud\/\*/,
+  );
+});
+
+test('git command validates required arguments and subcommands', async () => {
+  const missingId = await runCommand('sh', [CLIENT_SCRIPT, 'git', 'fetch']);
+
+  assert.notEqual(missingId.code, 0);
+  assert.match(missingId.stderr, /git fetch requires --id/);
+
+  const unknown = await runCommand('sh', [CLIENT_SCRIPT, 'git', 'dance']);
+
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.stderr, /Unknown git subcommand: dance/);
+});
+
+test('git push and fetch work with a real Git bundle', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-git-real-'));
+  const sourceRepo = path.join(tmpDir, 'source');
+  const targetRepo = path.join(tmpDir, 'target');
+  const storedBundle = path.join(tmpDir, 'stored.bundle');
+  const pushCurlMock = path.join(tmpDir, 'curl-push.sh');
+  const fetchCurlMock = path.join(tmpDir, 'curl-fetch.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+
+  await mkdir(sourceRepo);
+  await mkdir(targetRepo);
+  execFileSync('git', ['init', '-b', 'main'], { cwd: sourceRepo });
+  execFileSync('git', ['config', 'user.email', 'dud@example.com'], {
+    cwd: sourceRepo,
+  });
+  execFileSync('git', ['config', 'user.name', 'DUD Test'], {
+    cwd: sourceRepo,
+  });
+  await writeFile(path.join(sourceRepo, 'README.md'), 'hello git\n', 'utf8');
+  execFileSync('git', ['add', 'README.md'], { cwd: sourceRepo });
+  execFileSync('git', ['commit', '-m', 'initial'], { cwd: sourceRepo });
+  execFileSync('git', ['tag', 'v1'], { cwd: sourceRepo });
+  execFileSync('git', ['init', '-b', 'main'], { cwd: targetRepo });
+
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  input="$1"
+  shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  await makeExecutable(
+    pushCurlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--data-binary" ]; then
+    payload="$2"
+    shift 2
+    continue
+  fi
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "\${payload#@}" "${storedBundle}"
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":false}' > "$output"
+`,
+  );
+
+  await makeExecutable(
+    fetchCurlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+cp "${storedBundle}" "$output"
+`,
+  );
+
+  const pushResult = await runCommand(
+    'sh',
+    [CLIENT_SCRIPT, 'git', 'push', '--json'],
+    {
+      DUD_CURL_BIN: pushCurlMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+    { cwd: sourceRepo },
+  );
+
+  assert.equal(pushResult.code, 0);
+
+  const fetchResult = await runCommand(
+    'sh',
+    [
+      CLIENT_SCRIPT,
+      'git',
+      'fetch',
+      '--id',
+      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
+      '--remote',
+      'source',
+    ],
+    {
+      DUD_CURL_BIN: fetchCurlMock,
+      DUD_AGE_BIN: ageMock,
+    },
+    { cwd: targetRepo },
+  );
+
+  assert.equal(fetchResult.code, 0, fetchResult.stderr);
+  assert.equal(
+    execFileSync('git', ['rev-parse', '--verify', 'refs/remotes/source/main'], {
+      cwd: targetRepo,
+      encoding: 'utf8',
+    }).trim().length,
+    40,
+  );
+  assert.equal(
+    execFileSync('git', ['rev-parse', '--verify', 'refs/tags/v1'], {
+      cwd: targetRepo,
+      encoding: 'utf8',
+    }).trim().length,
+    40,
+  );
+  assert.match(fetchResult.stdout, /git merge --ff-only source\/main/);
+});
+
 test('download command passes dashed IDs through to the API', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-download-'));
   const outDir = path.join(tmpDir, 'work');
@@ -1627,6 +2095,161 @@ cp "$input" "$output"
   assert.equal(
     await readFile(path.join(extractDir, 'docs', 'beta.txt'), 'utf8'),
     'beta payload',
+  );
+});
+
+test('interactive git push can collect recipient settings', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-interactive-git-push-'),
+  );
+  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const recipientPath = path.join(tmpDir, 'recipient.txt');
+  const gitLog = path.join(tmpDir, 'git.log');
+  const curlLog = path.join(tmpDir, 'curl.log');
+  const curlPayload = path.join(tmpDir, 'payload.bundle');
+  const gitMock = path.join(tmpDir, 'git-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  const qrMock = path.join(tmpDir, 'qr-mock.sh');
+
+  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
+  await chmod(interactiveScript, 0o755);
+  await writeFile(recipientPath, 'age1interactivegitrecipient\n', 'utf8');
+
+  await makeExecutable(
+    gitMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${gitLog}"
+if [ "$1" = "rev-parse" ]; then exit 0; fi
+if [ "$1" = "bundle" ] && [ "$2" = "create" ]; then printf git-bundle > "$3"; exit 0; fi
+exit 1
+`,
+  );
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then output="$2"; shift 2; continue; fi
+  input="$1"; shift
+done
+cp "$input" "$output"
+`,
+  );
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${curlLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--data-binary" ]; then payload="$2"; shift 2; continue; fi
+  if [ "$1" = "--output" ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+cp "\${payload#@}" "${curlPayload}"
+printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":true}' > "$output"
+`,
+  );
+  await makeExecutable(
+    qrMock,
+    `#!/bin/sh
+printf '[qr]\\n'
+`,
+  );
+
+  const result = await runCommand(
+    interactiveScript,
+    [],
+    {
+      DUD_TEST_STDIN_TTY: '1',
+      DUD_GIT_BIN: gitMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_CURL_BIN: curlMock,
+      DUD_QRENCODE_BIN: qrMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+    { input: `5\n1\n\n3\n${recipientPath}\n15m\ny\nn\n` },
+  );
+
+  assert.equal(result.code, 0);
+  assert.equal(await readFile(curlPayload, 'utf8'), 'git-bundle');
+  assert.match(result.stdout, /Git mode:/);
+  assert.match(result.stdout, /Show QR code/);
+  assert.match(await readFile(gitLog, 'utf8'), /bundle\ncreate/);
+  const curlArgs = await readFile(curlLog, 'utf8');
+  assert.match(curlArgs, /x-dud-ttl: 15m/);
+  assert.match(curlArgs, /x-dud-delete-after-read: true/);
+  assert.doesNotMatch(result.stdout, /QR Code:/);
+});
+
+test('interactive git fetch can collect identity and remote settings', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-interactive-git-fetch-'),
+  );
+  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const identityPath = path.join(tmpDir, 'identity.txt');
+  const gitLog = path.join(tmpDir, 'git.log');
+  const ageLog = path.join(tmpDir, 'age.log');
+  const gitMock = path.join(tmpDir, 'git-mock.sh');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
+  await chmod(interactiveScript, 0o755);
+  await writeFile(identityPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
+
+  await makeExecutable(
+    gitMock,
+    `#!/bin/sh
+printf '%s\n' "$@" >> "${gitLog}"
+if [ "$1" = "rev-parse" ]; then exit 0; fi
+if [ "$1" = "bundle" ] && [ "$2" = "verify" ]; then exit 0; fi
+if [ "$1" = "ls-remote" ]; then printf 'abc123\trefs/heads/main\n'; exit 0; fi
+if [ "$1" = "fetch" ]; then exit 0; fi
+exit 1
+`,
+  );
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then output="$2"; shift 2; continue; fi
+  shift
+done
+printf bundle > "$output"
+`,
+  );
+  await makeExecutable(
+    ageMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${ageLog}"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then output="$2"; shift 2; continue; fi
+  input="$1"; shift
+done
+cp "$input" "$output"
+`,
+  );
+
+  const result = await runCommand(
+    interactiveScript,
+    [],
+    {
+      DUD_TEST_STDIN_TTY: '1',
+      DUD_GIT_BIN: gitMock,
+      DUD_AGE_BIN: ageMock,
+      DUD_CURL_BIN: curlMock,
+    },
+    {
+      input: `5\n2\n\n3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe\n${identityPath}\nB\n`,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /Git mode:/);
+  assert.match(result.stdout, /Remote name/);
+  assert.match(await readFile(ageLog, 'utf8'), /-i/);
+  assert.match(
+    await readFile(gitLog, 'utf8'),
+    /refs\/heads\/\*:refs\/remotes\/B\/\*/,
   );
 });
 

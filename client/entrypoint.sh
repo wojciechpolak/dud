@@ -13,6 +13,7 @@ DUD_CONNECT_TO="${DUD_CONNECT_TO:-}"
 DUD_CURL_BIN="${DUD_CURL_BIN:-curl}"
 DUD_AGE_BIN="${DUD_AGE_BIN:-age}"
 DUD_AGE_KEYGEN_BIN="${DUD_AGE_KEYGEN_BIN:-age-keygen}"
+DUD_GIT_BIN="${DUD_GIT_BIN:-git}"
 DUD_QRENCODE_BIN="${DUD_QRENCODE_BIN:-qrencode}"
 DUD_VERSION="${DUD_VERSION:-1.3.1}"
 
@@ -87,6 +88,7 @@ UPLOAD_ID=""
 UPLOAD_EXPIRES_AT=""
 UPLOAD_DELETE_AFTER_READ_LABEL=""
 UPLOAD_RECEIVE_COMMAND=""
+UPLOAD_RECEIVE_COMMAND_PREFIX="dud receive"
 UPLOAD_IS_BUNDLE="false"
 
 upload_json_string_field() {
@@ -136,7 +138,7 @@ load_upload_response() {
 
 build_receive_command() {
   base_url="$1"
-  receive_command="dud receive --id $UPLOAD_ID --url $base_url"
+  receive_command="$UPLOAD_RECEIVE_COMMAND_PREFIX --id $UPLOAD_ID --url $base_url"
 
   if [ "$UPLOAD_IS_BUNDLE" = "true" ]; then
     receive_command="$receive_command --extract"
@@ -396,14 +398,14 @@ $2"
   fi
 
   plaintext_file="$(mktemp /tmp/dud-upload-plain-XXXXXX)"
-  encrypted_file="$(mktemp /tmp/dud-upload-XXXXXX.age)"
-  response_file="$(mktemp /tmp/dud-upload-response-XXXXXX.json)"
+  encrypted_file="$(mktemp /tmp/dud-upload-age-XXXXXX)"
+  response_file="$(mktemp /tmp/dud-upload-response-json-XXXXXX)"
   inline_recipients_file=""
   source_list_file=""
   trap 'rm -f "$plaintext_file" "$encrypted_file" "$response_file" "$inline_recipients_file" "$source_list_file"' EXIT HUP INT TERM
 
   if [ -n "$file_list" ]; then
-    source_list_file="$(mktemp /tmp/dud-upload-sources-XXXXXX.txt)"
+    source_list_file="$(mktemp /tmp/dud-upload-sources-txt-XXXXXX)"
     printf '%s\n' "$file_list" >"$source_list_file"
 
     path_count=0
@@ -439,7 +441,7 @@ $2"
 
   if [ "$recipient_mode" = "true" ]; then
     if [ -n "$inline_recipients" ]; then
-      inline_recipients_file="$(mktemp /tmp/dud-upload-recipients-XXXXXX.txt)"
+      inline_recipients_file="$(mktemp /tmp/dud-upload-recipients-txt-XXXXXX)"
       printf '%s\n' "$inline_recipients" >"$inline_recipients_file"
     fi
 
@@ -569,7 +571,7 @@ cmd_download() {
     [ -f "$identity" ] || die "Identity file not found: $identity"
   fi
 
-  encrypted_file="$(mktemp /tmp/dud-download-XXXXXX.age)"
+  encrypted_file="$(mktemp /tmp/dud-download-age-XXXXXX)"
   plaintext_file="$(mktemp /tmp/dud-download-plain-XXXXXX)"
   listing_file=""
   trap 'rm -f "$encrypted_file" "$plaintext_file" "$listing_file"' EXIT HUP INT TERM
@@ -592,7 +594,7 @@ cmd_download() {
     fi
 
     mkdir -p "$out_dir"
-    listing_file="$(mktemp /tmp/dud-download-listing-XXXXXX.txt)"
+    listing_file="$(mktemp /tmp/dud-download-listing-txt-XXXXXX)"
     tar -tf "$plaintext_file" >"$listing_file"
     validate_bundle_listing "$listing_file"
     tar -xf "$plaintext_file" -C "$out_dir"
@@ -606,6 +608,157 @@ cmd_download() {
   fi
 
   cat "$plaintext_file" >"$out"
+}
+
+validate_git_remote_name() {
+  remote="$1"
+
+  [ -n "$remote" ] || die "git fetch requires a non-empty remote name"
+  case "$remote" in
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]*)
+      die "git remote name may contain only letters, numbers, '.', '_', and '-'"
+      ;;
+    .*|*..*|*.)
+      die "git remote name must not start with '.', end with '.', or contain '..'"
+      ;;
+  esac
+}
+
+require_git_repository() {
+  action="$1"
+
+  if ! "$DUD_GIT_BIN" rev-parse --git-dir >/dev/null 2>&1; then
+    die "git $action requires a Git repository"
+  fi
+}
+
+git_bundle_hint_branch() {
+  bundle="$1"
+
+  branches="$("$DUD_GIT_BIN" ls-remote "$bundle" 'refs/heads/*' 2>/dev/null \
+    | sed -n 's#.*refs/heads/##p')"
+
+  if printf '%s\n' "$branches" | grep -Fx -- main >/dev/null 2>&1; then
+    printf '%s' main
+    return
+  fi
+
+  if printf '%s\n' "$branches" | grep -Fx -- master >/dev/null 2>&1; then
+    printf '%s' master
+    return
+  fi
+
+  printf '%s\n' "$branches" | sed -n '1p'
+}
+
+cmd_git_push() {
+  for arg in "$@"; do
+    case "$arg" in
+      --file|-m)
+        die "git push creates its own bundle and does not accept $arg"
+        ;;
+    esac
+  done
+
+  require_git_repository push
+
+  bundle_file="$(mktemp /tmp/dud-git-push-bundle-XXXXXX)"
+  trap 'rm -f "$bundle_file"' EXIT HUP INT TERM
+  "$DUD_GIT_BIN" bundle create "$bundle_file" --branches --tags
+
+  UPLOAD_RECEIVE_COMMAND_PREFIX="dud git fetch"
+  (cmd_upload --file "$bundle_file" "$@")
+  rm -f "$bundle_file"
+  trap - EXIT HUP INT TERM
+}
+
+cmd_git_fetch() {
+  id=""
+  base_url="$DUD_BASE_URL"
+  identity=""
+  remote="dud"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --id)
+        need_value "$@"
+        id="$2"
+        shift 2
+        ;;
+      --identity|-i)
+        need_value "$@"
+        identity="$2"
+        shift 2
+        ;;
+      --remote)
+        need_value "$@"
+        remote="$2"
+        shift 2
+        ;;
+      --url)
+        need_value "$@"
+        base_url="$2"
+        shift 2
+        ;;
+      --doh-url)
+        need_value "$@"
+        DUD_DOH_URL="$2"
+        shift 2
+        ;;
+      *)
+        die "Unknown git fetch option: $1"
+        ;;
+    esac
+  done
+
+  [ -n "$id" ] || die "git fetch requires --id"
+  validate_git_remote_name "$remote"
+  require_git_repository fetch
+
+  bundle_file="$(mktemp /tmp/dud-git-fetch-bundle-XXXXXX)"
+  trap 'rm -f "$bundle_file"' EXIT HUP INT TERM
+
+  if [ -n "$identity" ]; then
+    (cmd_download --id "$id" --out "$bundle_file" --url "$base_url" -i "$identity")
+  else
+    (cmd_download --id "$id" --out "$bundle_file" --url "$base_url")
+  fi
+
+  "$DUD_GIT_BIN" bundle verify "$bundle_file"
+  hint_branch="$(git_bundle_hint_branch "$bundle_file")"
+  "$DUD_GIT_BIN" fetch "$bundle_file" \
+    "refs/heads/*:refs/remotes/$remote/*" \
+    "refs/tags/*:refs/tags/*"
+
+  printf 'Fetched Git bundle into refs/remotes/%s/*\n' "$remote"
+  if [ -n "$hint_branch" ]; then
+    printf 'To apply safely, run:\n'
+    printf '  git merge --ff-only %s/%s\n' "$remote" "$hint_branch"
+  fi
+  rm -f "$bundle_file"
+  trap - EXIT HUP INT TERM
+}
+
+cmd_git() {
+  [ $# -gt 0 ] || die "git requires a subcommand: push, fetch, send, or receive"
+
+  subcommand="$1"
+  shift
+
+  case "$subcommand" in
+    push|send)
+      cmd_git_push "$@"
+      ;;
+    fetch|receive)
+      cmd_git_fetch "$@"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      die "Unknown git subcommand: $subcommand"
+      ;;
+  esac
 }
 
 cmd_flush() {
@@ -730,6 +883,10 @@ Usage:
   dud download --id ID (--out PATH | --stdout | --extract [--out-dir PATH]) [--identity PATH] [--url URL] [--doh-url URL]
   dud send ...
   dud receive ...
+  dud git push [--ttl 24h] [--delete-after-read] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--json] [--no-qr] [--url URL] [--doh-url URL]
+  dud git fetch --id ID [--identity PATH] [--remote NAME] [--url URL] [--doh-url URL]
+  dud git send ...
+  dud git receive ...
   dud flush [--url URL] [--doh-url URL]
   dud keygen [--pq] [--out PATH] [-R PATH]
   dud keygen [INPUT] [--out PATH | -R PATH]
@@ -744,6 +901,7 @@ Environment:
   DUD_CA_BUNDLE  Optional CA bundle path inside the client container
   DUD_CONNECT_TO Optional curl --connect-to mapping for local integration tests
   DUD_DOCKER_NETWORK  Optional docker network for install/shell-init wrappers
+  DUD_GIT_BIN    Git binary used by dud git commands. Default: git
   DUD_IMAGE      Docker image used by install/shell-init output
 EOF
 }
@@ -957,7 +1115,8 @@ interactive_menu() {
   printf '  2) upload\n'
   printf '  3) download\n'
   printf '  4) keygen\n'
-  printf '  5) flush\n'
+  printf '  5) git\n'
+  printf '  6) flush\n'
   printf '  q) quit\n\n'
   printf 'Choice: '
   read -r choice
@@ -966,7 +1125,8 @@ interactive_menu() {
     2|upload)    interactive_upload ;;
     3|download)  interactive_download ;;
     4|keygen)    interactive_keygen ;;
-    5|flush)     interactive_flush ;;
+    5|git)       interactive_git ;;
+    6|flush)     interactive_flush ;;
     q|quit)      exit 0 ;;
     *)           die "Unknown choice: $choice" ;;
   esac
@@ -1184,6 +1344,126 @@ interactive_download() {
   esac
 }
 
+interactive_git() {
+  printf 'Git mode:\n'
+  printf '  1) push\n'
+  printf '  2) fetch\n'
+  printf '  b) back\n'
+  printf '  q) quit\n'
+  printf 'Choice [1]: '
+  read -r git_choice
+  git_choice="${git_choice:-1}"
+
+  case $git_choice in
+    1|push|send)
+      interactive_git_push
+      ;;
+    2|fetch|receive)
+      interactive_git_fetch
+      ;;
+    b|back)
+      interactive_menu
+      ;;
+    q|quit)
+      exit 0
+      ;;
+    *)
+      die "Unknown git mode: $git_choice"
+      ;;
+  esac
+}
+
+interactive_git_push() {
+  printf 'Server URL [%s]: ' "$DUD_BASE_URL"
+  read -r url
+  url="${url:-$DUD_BASE_URL}"
+
+  printf 'Encryption mode:\n'
+  printf '  1) passphrase\n'
+  printf '  2) recipient string\n'
+  printf '  3) recipient file\n'
+  printf 'Choice [1]: '
+  read -r encryption_choice
+  encryption_choice="${encryption_choice:-1}"
+
+  case $encryption_choice in
+    1|passphrase)
+      encryption_mode="passphrase"
+      ;;
+    2|recipient)
+      printf 'Recipient: '
+      read -r recipient
+      [ -n "$recipient" ] || die "recipient required"
+      encryption_mode="recipient"
+      ;;
+    3|recipient-file)
+      printf 'Recipient file: '
+      read -r recipient_file
+      [ -n "$recipient_file" ] || die "recipient file required"
+      recipient_file="$(abs_path_if_relative "$recipient_file")"
+      encryption_mode="recipient-file"
+      ;;
+    *)
+      die "Unknown encryption mode: $encryption_choice"
+      ;;
+  esac
+
+  printf 'TTL [24h]: '
+  read -r ttl
+  ttl="${ttl:-24h}"
+
+  printf 'Delete after read? [y/N]: '
+  read -r ans
+  dar_flag=""
+  case $ans in [Yy]*) dar_flag="--delete-after-read" ;; esac
+
+  printf 'Show QR code? [Y/n]: '
+  read -r qr_ans
+  qr_flag=""
+  case $qr_ans in [Nn]*) qr_flag="--no-qr" ;; esac
+
+  case $encryption_mode in
+    passphrase)
+      # shellcheck disable=SC2086
+      exec "$0" git push --ttl "$ttl" --url "$url" $dar_flag $qr_flag
+      ;;
+    recipient)
+      # shellcheck disable=SC2086
+      exec "$0" git push --ttl "$ttl" --url "$url" $dar_flag $qr_flag -r "$recipient"
+      ;;
+    recipient-file)
+      # shellcheck disable=SC2086
+      exec "$0" git push --ttl "$ttl" --url "$url" $dar_flag $qr_flag -R "$recipient_file"
+      ;;
+  esac
+}
+
+interactive_git_fetch() {
+  printf 'Server URL [%s]: ' "$DUD_BASE_URL"
+  read -r url
+  url="${url:-$DUD_BASE_URL}"
+
+  printf 'File ID: '
+  read -r id
+  [ -n "$id" ] || die "file ID required"
+
+  printf 'Identity file (leave empty if not needed): '
+  read -r identity
+  if [ -n "$identity" ]; then
+    identity="$(abs_path_if_relative "$identity")"
+  fi
+
+  printf 'Remote name [dud]: '
+  read -r remote
+  remote="${remote:-dud}"
+
+  if [ -n "$identity" ]; then
+    exec "$0" git fetch --id "$id" --url "$url" -i "$identity" --remote "$remote"
+  fi
+
+  exec "$0" git fetch --id "$id" --url "$url" --remote "$remote"
+}
+
 interactive_keygen() {
   printf 'Keygen mode:\n'
   printf '  1) generate a new identity\n'
@@ -1283,6 +1563,9 @@ main() {
       ;;
     download|receive)
       cmd_download "$@"
+      ;;
+    git)
+      cmd_git "$@"
       ;;
     flush)
       cmd_flush "$@"

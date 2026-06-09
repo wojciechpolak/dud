@@ -393,6 +393,21 @@ plaintext from stdin. `download` writes to a file with `--out`, to stdout with
 
 Use `dud --version` to print the client version.
 
+Git bundle sync commands:
+
+- `dud git push` creates a full Git bundle from local branches and tags, then
+  uploads it through the normal encrypted DUD upload path
+- `dud git fetch --id ID` downloads, decrypts, verifies, and fetches that bundle
+  into `refs/remotes/dud/*`
+- `dud git send` is an alias for `dud git push`
+- `dud git receive` is an alias for `dud git fetch`
+- add `--remote NAME` during fetch to import branches into
+  `refs/remotes/NAME/*`, for example `refs/remotes/laptop/main`
+
+`dud git fetch` intentionally does not merge, rebase, checkout, reset, or move
+local branches. After fetching, apply the imported branch explicitly with a
+normal Git command such as `git merge --ff-only laptop/main`.
+
 Encryption mode flags:
 
 - `upload` defaults to passphrase mode unless you provide `--recipient` or
@@ -413,13 +428,14 @@ Encryption mode flags:
   file
 
 When you run `dud` with no command in an interactive terminal, it opens a small
-menu for `test`, `upload`, `download`, `keygen`, and `flush`. Interactive upload
-can use a file path, a one-line message, or typed/pasted text that finishes on
-Ctrl-D, and it groups source-specific and encryption-specific prompts together.
-Interactive download groups output-specific prompts before the optional identity
-file prompt. Interactive keygen supports both generating new identities and
-converting an existing identity into recipient output. If stdin is not a TTY, it
-prints usage information and exits instead.
+menu for `test`, `upload`, `download`, `keygen`, `git`, and `flush`. Interactive
+upload can use a file path, a one-line message, or typed/pasted text that
+finishes on Ctrl-D, and it groups source-specific and encryption-specific
+prompts together. Interactive download groups output-specific prompts before the
+optional identity file prompt. Interactive Git mode supports bundle push and
+fetch. Interactive keygen supports both generating new identities and converting
+an existing identity into recipient output. If stdin is not a TTY, it prints
+usage information and exits instead.
 
 > **Security note**: `--tmpfs /tmp` keeps sensitive intermediate files
 > (encrypted payloads, TLS traces) in memory only — they never reach the
@@ -650,7 +666,48 @@ dud upload \
 
 In public-key mode, only the `id` needs to be shared with the recipient.
 
-### 3. Download the file as the recipient
+### 3. Sync a Git repository with encrypted bundles
+
+For Git repositories, use `dud git push` and `dud git fetch`. This keeps DUD as
+a discreet encrypted blob transport while Git still handles branch history and
+merge safety.
+
+On machine A, from the repository root:
+
+```sh
+dud git push \
+  -R /work/machine-b.recipient \
+  --ttl 24h \
+  --delete-after-read
+```
+
+The upload response suggests the matching fetch command:
+
+```text
+Receive: dud git fetch --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https://dud.example.com
+```
+
+On machine B, from an initialized clone or repository:
+
+```sh
+dud git fetch \
+  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
+  -i /work/machine-b.key \
+  --remote machine-a
+```
+
+Branches are fetched into remote-tracking refs such as
+`refs/remotes/machine-a/main`. Local branches are not moved automatically. To
+apply the fetched branch safely:
+
+```sh
+git merge --ff-only machine-a/main
+```
+
+For repeated bidirectional sync, use a different `--remote` name for each peer,
+for example `machine-a` on machine B and `machine-b` on machine A.
+
+### 4. Download the file as the recipient
 
 On another machine, the recipient can fetch and decrypt a passphrase-encrypted
 upload like this:
@@ -703,7 +760,7 @@ To print the recipient form of an existing identity to stdout, use:
 dud keygen /work/alice.key
 ```
 
-### 4. Optional one-time retrieval
+### 5. Optional one-time retrieval
 
 If the sender wants the file to disappear after the first successful download,
 add `--delete-after-read` during upload:
@@ -717,7 +774,7 @@ dud upload \
 
 After one successful retrieval, the same `id` will return `410 Gone`.
 
-### 5. Flush expired objects manually
+### 6. Flush expired objects manually
 
 If you configured the Worker `DUD_SECRET_TOKEN` secret, you can force a cleanup
 pass whenever you want:
