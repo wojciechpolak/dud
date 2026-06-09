@@ -86,7 +86,7 @@ test('version flag prints the client version', async () => {
   const result = await runCommand('sh', [CLIENT_SCRIPT, '--version']);
 
   assert.equal(result.code, 0);
-  assert.equal(result.stdout, '1.3.0\n');
+  assert.equal(result.stdout, '1.3.1\n');
   assert.equal(result.stderr, '');
 });
 
