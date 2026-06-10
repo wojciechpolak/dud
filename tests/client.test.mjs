@@ -13,7 +13,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 
 const CLIENT_BIN = path.resolve('client/bin/dud');
 
@@ -48,6 +48,16 @@ function runCommand(command, args, env = {}, options = {}) {
       resolve({ code, stdout, stderr });
     });
   });
+}
+
+function commandExists(command) {
+  const result = spawnSync(
+    'sh',
+    ['-c', 'command -v -- "$1" >/dev/null 2>&1', 'sh', command],
+    { stdio: 'ignore' },
+  );
+
+  return result.status === 0;
 }
 
 async function makeExecutable(filePath, content) {
@@ -2505,23 +2515,27 @@ test('shell-init bash completion suggests subcommands and file arguments', async
   assert.match(result.stdout, /FILE:.*identity\.txt/);
 });
 
-test('shell-init zsh completion filters partial top-level commands', async () => {
-  const result = await runCommand(
-    'zsh',
-    [
-      '-fc',
-      `autoload -Uz compinit; compinit; eval "$(${CLIENT_BIN} shell-init)"; compadd() { printf 'ADD:%s\\n' "$@"; }; words=(dud gi); CURRENT=2; _dud_complete_zsh`,
-    ],
-    {},
-  );
+test(
+  'shell-init zsh completion filters partial top-level commands',
+  { skip: commandExists('zsh') ? false : 'zsh is not installed' },
+  async () => {
+    const result = await runCommand(
+      'zsh',
+      [
+        '-fc',
+        `autoload -Uz compinit; compinit; eval "$(${CLIENT_BIN} shell-init)"; compadd() { printf 'ADD:%s\\n' "$@"; }; words=(dud gi); CURRENT=2; _dud_complete_zsh`,
+      ],
+      {},
+    );
 
-  assert.equal(result.code, 0);
-  assert.match(result.stdout, /ADD:--/);
-  assert.match(result.stdout, /ADD:git/);
-  assert.doesNotMatch(result.stdout, /ADD:version/);
-  assert.doesNotMatch(result.stdout, /ADD:--version/);
-  assert.doesNotMatch(result.stdout, /ADD:--help/);
-});
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /ADD:--/);
+    assert.match(result.stdout, /ADD:git/);
+    assert.doesNotMatch(result.stdout, /ADD:version/);
+    assert.doesNotMatch(result.stdout, /ADD:--version/);
+    assert.doesNotMatch(result.stdout, /ADD:--help/);
+  },
+);
 
 test('shell-init output honors runtime DUD_IMAGE overrides', async () => {
   const tmpDir = await mkdtemp(
