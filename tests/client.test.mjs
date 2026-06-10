@@ -2,13 +2,20 @@
 // Copyright (C) 2026 Wojciech Polak
 
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, chmod, mkdir } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  writeFile,
+  chmod,
+  mkdir,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { execFileSync, spawn } from 'node:child_process';
 
-const CLIENT_SCRIPT = path.resolve('client/entrypoint.sh');
+const CLIENT_BIN = path.resolve('client/bin/dud');
 
 function runCommand(command, args, env = {}, options = {}) {
   return new Promise((resolve, reject) => {
@@ -83,19 +90,31 @@ function createQrUploadToolPaths(tmpDir) {
   };
 }
 
-test('version flag prints the client version', async () => {
-  const result = await runCommand('sh', [CLIENT_SCRIPT, '--version']);
+test('version flag prints the package.json version', async () => {
+  const packageJson = JSON.parse(await readFile('package.json', 'utf8'));
+  const result = await runCommand(CLIENT_BIN, ['--version']);
 
   assert.equal(result.code, 0);
-  assert.equal(result.stdout, '1.3.1\n');
+  // Guards the full injection chain: package.json -> npm_package_version
+  // -> ldflags -X main.version. A broken link reports "dev" instead.
+  assert.equal(result.stdout, `${packageJson.version}\n`);
   assert.equal(result.stderr, '');
+});
+
+test('version flag honors the DUD_VERSION runtime override', async () => {
+  const result = await runCommand(CLIENT_BIN, ['--version'], {
+    DUD_VERSION: '9.9.9-test',
+  });
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, '9.9.9-test\n');
 });
 
 test('test command enforces secure curl flags', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-test-'));
   const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
+  const result = await runCommand(CLIENT_BIN, ['test'], {
     DUD_CURL_BIN: curlMock,
   });
 
@@ -117,7 +136,7 @@ test('test command supports custom CA bundles and connect-to mappings', async ()
   );
   const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
+  const result = await runCommand(CLIENT_BIN, ['test'], {
     DUD_CURL_BIN: curlMock,
     DUD_CA_BUNDLE: '/work/.dud-dev/caddy-data/pki/authorities/local/root.crt',
     DUD_CONNECT_TO: 'dud.local.test:443:caddy:443',
@@ -138,7 +157,7 @@ test('test command allows DUD_ECH_MODE=grease', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-grease-'));
   const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
+  const result = await runCommand(CLIENT_BIN, ['test'], {
     DUD_CURL_BIN: curlMock,
     DUD_ECH_MODE: 'grease',
   });
@@ -153,7 +172,7 @@ test('test command can print TLS and ECH details', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-details-'));
   const { curlMock, logFile } = await createVerboseCurlMock(tmpDir);
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'test'], {
+  const result = await runCommand(CLIENT_BIN, ['test'], {
     DUD_CURL_BIN: curlMock,
   });
 
@@ -176,6 +195,108 @@ test('test command can print TLS and ECH details', async () => {
 
   const args = await readFile(logFile, 'utf8');
   assert.match(args, /--verbose/);
+});
+
+test('test command reports the ECH status from status-only trace lines', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-ech-status-'),
+  );
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s\n' '* ECH: result: status is not attempted' >&2
+printf '%s\n' '{"ok":true}' > "$output"
+`,
+  );
+
+  const result = await runCommand(CLIENT_BIN, ['test'], {
+    DUD_CURL_BIN: curlMock,
+    DUD_ECH_MODE: 'grease',
+  });
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /ech: not attempted/);
+  assert.doesNotMatch(result.stdout, /ech: unavailable/);
+});
+
+test('exit codes from failing subprocesses are propagated', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-exit-code-'));
+  const curlMock = path.join(tmpDir, 'curl-mock.sh');
+  await makeExecutable(
+    curlMock,
+    `#!/bin/sh
+printf '%s\n' 'curl: (22) The requested URL returned error: 404' >&2
+exit 22
+`,
+  );
+
+  const result = await runCommand(CLIENT_BIN, ['flush'], {
+    DUD_CURL_BIN: curlMock,
+    DUD_SECRET_TOKEN: 'top-secret',
+  });
+
+  assert.equal(result.code, 22);
+  assert.match(result.stderr, /curl: \(22\)/);
+  assert.doesNotMatch(result.stderr, /exit status/);
+});
+
+test('upload removes sensitive temp files when interrupted by SIGINT', async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-client-sigint-'));
+  const scratchDir = path.join(tmpDir, 'scratch');
+  await mkdir(scratchDir);
+  const filePath = path.join(tmpDir, 'input.txt');
+  await writeFile(filePath, 'sensitive plaintext', 'utf8');
+  const ageMock = path.join(tmpDir, 'age-mock.sh');
+  await makeExecutable(ageMock, '#!/bin/sh\nsleep 30\n');
+
+  const child = spawn(CLIENT_BIN, ['upload', '--file', filePath], {
+    env: {
+      ...process.env,
+      TMPDIR: scratchDir,
+      DUD_AGE_BIN: ageMock,
+      DUD_SECRET_TOKEN: 'top-secret',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  // Wait for the upload to stage its plaintext temp file, then interrupt
+  // it while the (stalled) age subprocess still holds everything open.
+  const deadline = Date.now() + 5000;
+  let staged = [];
+  while (Date.now() < deadline) {
+    staged = (await readdir(scratchDir)).filter((name) =>
+      name.startsWith('dud-upload-plain-'),
+    );
+    if (staged.length > 0) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(staged.length > 0, 'expected a staged plaintext temp file');
+
+  // 'exit' instead of 'close': the orphaned age mock keeps the stdio
+  // pipes open after the client itself has terminated.
+  const exited = new Promise((resolve) => {
+    child.on('exit', (code) => resolve(code));
+  });
+  child.kill('SIGINT');
+  const code = await exited;
+
+  assert.equal(code, 130);
+  const leftover = (await readdir(scratchDir)).filter((name) =>
+    name.startsWith('dud-'),
+  );
+  assert.deepEqual(leftover, []);
 });
 
 test('upload command encrypts locally with a passphrase and posts the encrypted file', async () => {
@@ -236,16 +357,8 @@ printf '[qr]\\n'
   );
 
   const result = await runCommand(
-    'sh',
-    [
-      CLIENT_SCRIPT,
-      'upload',
-      '--file',
-      filePath,
-      '--ttl',
-      '48h',
-      '--delete-after-read',
-    ],
+    CLIENT_BIN,
+    ['upload', '--file', filePath, '--ttl', '48h', '--delete-after-read'],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -333,9 +446,8 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
   );
 
   const result = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'upload',
       '--file',
       filePath,
@@ -413,16 +525,8 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
 
   for (const flag of ['-R', '--recipient-file']) {
     const result = await runCommand(
-      'sh',
-      [
-        CLIENT_SCRIPT,
-        'upload',
-        '--file',
-        filePath,
-        flag,
-        recipientsPath,
-        '--json',
-      ],
+      CLIENT_BIN,
+      ['upload', '--file', filePath, flag, recipientsPath, '--json'],
       {
         DUD_CURL_BIN: curlMock,
         DUD_AGE_BIN: ageMock,
@@ -451,15 +555,8 @@ test('upload command rejects the removed --recipients-file alias', async () => {
   await writeFile(recipientsPath, 'age1examplepublickey\n', 'utf8');
 
   const result = await runCommand(
-    'sh',
-    [
-      CLIENT_SCRIPT,
-      'upload',
-      '--file',
-      filePath,
-      '--recipients-file',
-      recipientsPath,
-    ],
+    CLIENT_BIN,
+    ['upload', '--file', filePath, '--recipients-file', recipientsPath],
     {
       DUD_SECRET_TOKEN: 'top-secret',
     },
@@ -478,9 +575,8 @@ test('upload command rejects passphrase and recipient options together', async (
   await writeFile(filePath, 'plaintext', 'utf8');
 
   const result = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'upload',
       '--file',
       filePath,
@@ -539,8 +635,8 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
   );
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'upload', '--file', filePath, '--json'],
+    CLIENT_BIN,
+    ['upload', '--file', filePath, '--json'],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -601,8 +697,8 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
   );
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'upload', '-m', 'hello from dud', '--json'],
+    CLIENT_BIN,
+    ['upload', '-m', 'hello from dud', '--json'],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -660,8 +756,8 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
   );
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'upload', '--json'],
+    CLIENT_BIN,
+    ['upload', '--json'],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -736,8 +832,8 @@ printf '[qr]\\n'
   );
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'send', '--file', firstFile, '--file', secondDir],
+    CLIENT_BIN,
+    ['send', '--file', firstFile, '--file', secondDir],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -776,8 +872,8 @@ test('upload command rejects conflicting source options', async () => {
   await writeFile(filePath, 'plaintext', 'utf8');
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'upload', '--file', filePath, '-m', 'hello'],
+    CLIENT_BIN,
+    ['upload', '--file', filePath, '-m', 'hello'],
     {
       DUD_SECRET_TOKEN: 'top-secret',
     },
@@ -840,8 +936,8 @@ printf '[qr]\\n'
   );
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'upload', '--file', filePath, '--no-qr'],
+    CLIENT_BIN,
+    ['upload', '--file', filePath, '--no-qr'],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -934,9 +1030,8 @@ printf '[qr]\\n'
   );
 
   const result = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'git',
       'push',
       '--ttl',
@@ -960,7 +1055,7 @@ printf '[qr]\\n'
   assert.match(gitArgs, /rev-parse\n--git-dir/);
   assert.match(
     gitArgs,
-    /bundle\ncreate\n\/tmp\/dud-git-push-bundle-[^\n]+\n--branches\n--tags/,
+    /bundle\ncreate\n[^\n]*\/dud-git-push-bundle-[^\n]+\n--branches\n--tags/,
   );
   const curlArgs = await readFile(curlLog, 'utf8');
   assert.match(curlArgs, /x-dud-ttl: 12h/);
@@ -1011,16 +1106,12 @@ printf '%s' '{"id":"3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe","expiresAt":"2026-0
 `,
   );
 
-  const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'git', 'send', '--json'],
-    {
-      DUD_GIT_BIN: gitMock,
-      DUD_AGE_BIN: ageMock,
-      DUD_CURL_BIN: curlMock,
-      DUD_SECRET_TOKEN: 'top-secret',
-    },
-  );
+  const result = await runCommand(CLIENT_BIN, ['git', 'send', '--json'], {
+    DUD_GIT_BIN: gitMock,
+    DUD_AGE_BIN: ageMock,
+    DUD_CURL_BIN: curlMock,
+    DUD_SECRET_TOKEN: 'top-secret',
+  });
 
   assert.equal(result.code, 0);
   assert.match(await readFile(gitLog, 'utf8'), /bundle\ncreate/);
@@ -1092,9 +1183,8 @@ cp "$input" "$output"
   );
 
   const result = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'git',
       'fetch',
       '--id',
@@ -1119,10 +1209,10 @@ cp "$input" "$output"
     new RegExp(identityPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
   );
   const gitArgs = await readFile(gitLog, 'utf8');
-  assert.match(gitArgs, /bundle\nverify\n\/tmp\/dud-git-fetch-bundle-[^\n]+/);
+  assert.match(gitArgs, /bundle\nverify\n[^\n]*\/dud-git-fetch-bundle-[^\n]+/);
   assert.match(
     gitArgs,
-    /fetch\n\/tmp\/dud-git-fetch-bundle-[^\n]+\nrefs\/heads\/\*:refs\/remotes\/A\/\*/,
+    /fetch\n[^\n]*\/dud-git-fetch-bundle-[^\n]+\nrefs\/heads\/\*:refs\/remotes\/A\/\*/,
   );
   assert.match(result.stdout, /Fetched Git bundle into refs\/remotes\/A\/\*/);
   assert.match(result.stdout, /git merge --ff-only A\/main/);
@@ -1170,14 +1260,8 @@ cp "$input" "$output"
   );
 
   const result = await runCommand(
-    'sh',
-    [
-      CLIENT_SCRIPT,
-      'git',
-      'receive',
-      '--id',
-      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
-    ],
+    CLIENT_BIN,
+    ['git', 'receive', '--id', '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe'],
     {
       DUD_GIT_BIN: gitMock,
       DUD_CURL_BIN: curlMock,
@@ -1193,12 +1277,12 @@ cp "$input" "$output"
 });
 
 test('git command validates required arguments and subcommands', async () => {
-  const missingId = await runCommand('sh', [CLIENT_SCRIPT, 'git', 'fetch']);
+  const missingId = await runCommand(CLIENT_BIN, ['git', 'fetch']);
 
   assert.notEqual(missingId.code, 0);
   assert.match(missingId.stderr, /git fetch requires --id/);
 
-  const unknown = await runCommand('sh', [CLIENT_SCRIPT, 'git', 'dance']);
+  const unknown = await runCommand(CLIENT_BIN, ['git', 'dance']);
 
   assert.notEqual(unknown.code, 0);
   assert.match(unknown.stderr, /Unknown git subcommand: dance/);
@@ -1281,8 +1365,8 @@ cp "${storedBundle}" "$output"
   );
 
   const pushResult = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'git', 'push', '--json'],
+    CLIENT_BIN,
+    ['git', 'push', '--json'],
     {
       DUD_CURL_BIN: pushCurlMock,
       DUD_AGE_BIN: ageMock,
@@ -1294,9 +1378,8 @@ cp "${storedBundle}" "$output"
   assert.equal(pushResult.code, 0);
 
   const fetchResult = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'git',
       'fetch',
       '--id',
@@ -1372,9 +1455,8 @@ cp "$input" "$output"
   );
 
   const result = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'download',
       '--id',
       '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
@@ -1442,8 +1524,8 @@ cp "$input" "$output"
 
   const rawId = '3df75d5c0c3b4f53ac1b8eeb23704fbe';
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'download', '--id', rawId, '--out', outputPath],
+    CLIENT_BIN,
+    ['download', '--id', rawId, '--out', outputPath],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -1495,14 +1577,8 @@ printf 'plain stdout' > "$output"
   );
 
   const result = await runCommand(
-    'sh',
-    [
-      CLIENT_SCRIPT,
-      'download',
-      '--id',
-      '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
-      '--stdout',
-    ],
+    CLIENT_BIN,
+    ['download', '--id', '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe', '--stdout'],
     {
       DUD_CURL_BIN: curlMock,
       DUD_AGE_BIN: ageMock,
@@ -1566,9 +1642,8 @@ cp "$input" "$output"
   );
 
   const result = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'receive',
       '--id',
       '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
@@ -1646,9 +1721,8 @@ printf 'plain with identity' > "$output"
   );
 
   const result = await runCommand(
-    'sh',
+    CLIENT_BIN,
     [
-      CLIENT_SCRIPT,
       'download',
       '--id',
       '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
@@ -1675,8 +1749,7 @@ printf 'plain with identity' > "$output"
 });
 
 test('download command validates stdout and file output options', async () => {
-  const bothResult = await runCommand('sh', [
-    CLIENT_SCRIPT,
+  const bothResult = await runCommand(CLIENT_BIN, [
     'download',
     '--id',
     '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
@@ -1688,8 +1761,7 @@ test('download command validates stdout and file output options', async () => {
   assert.notEqual(bothResult.code, 0);
   assert.match(bothResult.stderr, /only one output target/);
 
-  const missingResult = await runCommand('sh', [
-    CLIENT_SCRIPT,
+  const missingResult = await runCommand(CLIENT_BIN, [
     'download',
     '--id',
     '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
@@ -1698,8 +1770,7 @@ test('download command validates stdout and file output options', async () => {
   assert.notEqual(missingResult.code, 0);
   assert.match(missingResult.stderr, /requires either --out or --stdout/);
 
-  const extractStdoutResult = await runCommand('sh', [
-    CLIENT_SCRIPT,
+  const extractStdoutResult = await runCommand(CLIENT_BIN, [
     'download',
     '--id',
     '3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe',
@@ -1718,14 +1789,11 @@ test('interactive upload can collect typed text and upload it', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-upload-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const curlPayload = path.join(tmpDir, 'payload.bin');
   const qrMock = path.join(tmpDir, 'qr-mock.sh');
   const ageMock = path.join(tmpDir, 'age-mock.sh');
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
-
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
 
   await makeExecutable(
     ageMock,
@@ -1801,7 +1869,7 @@ test('interactive upload can use a recipient file with a file source', async () 
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-upload-recipient-file-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const filePath = path.join(tmpDir, 'plain.bin');
   const recipientPath = path.join(tmpDir, 'recipient.txt');
   const curlPayload = path.join(tmpDir, 'payload.bin');
@@ -1810,8 +1878,6 @@ test('interactive upload can use a recipient file with a file source', async () 
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
   const qrMock = path.join(tmpDir, 'qr-mock.sh');
 
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
   await writeFile(filePath, 'plaintext', 'utf8');
   await writeFile(recipientPath, 'age1recipientexample\n', 'utf8');
 
@@ -1890,12 +1956,9 @@ test('interactive download can write decrypted output to stdout', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-download-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
   const ageMock = path.join(tmpDir, 'age-mock.sh');
-
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
 
   await makeExecutable(
     curlMock,
@@ -1948,15 +2011,13 @@ test('interactive download can use an identity file', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-download-identity-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const identityPath = path.join(tmpDir, 'identity.txt');
   const outputPath = path.join(tmpDir, 'output.txt');
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
   const ageMock = path.join(tmpDir, 'age-mock.sh');
   const ageLog = path.join(tmpDir, 'age.log');
 
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
   await writeFile(identityPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
 
   await makeExecutable(
@@ -2022,7 +2083,7 @@ test('interactive download can extract a bundle into a directory', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-download-extract-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const archivePath = path.join(tmpDir, 'bundle.tar');
   const archiveRoot = path.join(tmpDir, 'bundle-root');
   const nestedDir = path.join(archiveRoot, 'docs');
@@ -2030,8 +2091,6 @@ test('interactive download can extract a bundle into a directory', async () => {
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
   const ageMock = path.join(tmpDir, 'age-mock.sh');
 
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
   await mkdir(archiveRoot);
   await mkdir(nestedDir);
   await writeFile(path.join(archiveRoot, 'alpha.txt'), 'alpha payload', 'utf8');
@@ -2102,7 +2161,7 @@ test('interactive git push can collect recipient settings', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-git-push-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const recipientPath = path.join(tmpDir, 'recipient.txt');
   const gitLog = path.join(tmpDir, 'git.log');
   const curlLog = path.join(tmpDir, 'curl.log');
@@ -2112,8 +2171,6 @@ test('interactive git push can collect recipient settings', async () => {
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
   const qrMock = path.join(tmpDir, 'qr-mock.sh');
 
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
   await writeFile(recipientPath, 'age1interactivegitrecipient\n', 'utf8');
 
   await makeExecutable(
@@ -2184,7 +2241,7 @@ test('interactive git fetch can collect identity and remote settings', async () 
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-git-fetch-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const identityPath = path.join(tmpDir, 'identity.txt');
   const gitLog = path.join(tmpDir, 'git.log');
   const ageLog = path.join(tmpDir, 'age.log');
@@ -2192,8 +2249,6 @@ test('interactive git fetch can collect identity and remote settings', async () 
   const ageMock = path.join(tmpDir, 'age-mock.sh');
   const curlMock = path.join(tmpDir, 'curl-mock.sh');
 
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
   await writeFile(identityPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
 
   await makeExecutable(
@@ -2257,13 +2312,11 @@ test('interactive keygen can convert an identity to recipients', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-interactive-keygen-'),
   );
-  const interactiveScript = path.join(tmpDir, 'entrypoint.sh');
+  const interactiveScript = CLIENT_BIN;
   const keyPath = path.join(tmpDir, 'identity.txt');
   const recipientPath = path.join(tmpDir, 'recipient.txt');
   const ageKeygenMock = path.join(tmpDir, 'age-keygen-mock.sh');
 
-  await writeFile(interactiveScript, await readFile(CLIENT_SCRIPT, 'utf8'));
-  await chmod(interactiveScript, 0o755);
   await writeFile(keyPath, 'AGE-SECRET-KEY-1EXAMPLE\n', 'utf8');
 
   await makeExecutable(
@@ -2308,7 +2361,7 @@ printf '{"ok":true,"deletedCount":2}\n'
 `,
   );
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'flush'], {
+  const result = await runCommand(CLIENT_BIN, ['flush'], {
     DUD_CURL_BIN: curlMock,
     DUD_SECRET_TOKEN: 'top-secret',
   });
@@ -2320,7 +2373,7 @@ printf '{"ok":true,"deletedCount":2}\n'
 });
 
 test('install command prints a TTY-aware wrapper', async () => {
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'install']);
+  const result = await runCommand(CLIENT_BIN, ['install']);
 
   assert.equal(result.code, 0);
   assert.match(result.stdout, /dud_docker_env_args\(\)/);
@@ -2339,7 +2392,7 @@ test('install command prints a TTY-aware wrapper', async () => {
 });
 
 test('shell-init command prints a TTY-aware shell function', async () => {
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'shell-init']);
+  const result = await runCommand(CLIENT_BIN, ['shell-init']);
 
   assert.equal(result.code, 0);
   assert.match(result.stdout, /^_dud_shell_quote\(\) \{/m);
@@ -2372,7 +2425,7 @@ printf '%s\n' "$@" > "${logFile}"
 
   const result = await runCommand(
     'bash',
-    ['-c', 'eval "$(sh client/entrypoint.sh shell-init)"; dud test'],
+    ['-c', `eval "$(${CLIENT_BIN} shell-init)"; dud test`],
     {
       PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
       DUD_SECRET_TOKEN: 'top-secret',
@@ -2415,7 +2468,7 @@ printf '%s\n' "$@" > "${logFile}"
     'bash',
     [
       '-c',
-      'eval "$(sh client/entrypoint.sh shell-init)"; DUD_IMAGE=dud-client-local dud test',
+      `eval "$(${CLIENT_BIN} shell-init)"; DUD_IMAGE=dud-client-local dud test`,
     ],
     {
       PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
@@ -2446,7 +2499,7 @@ printf '%s\n' "$@" > "${logFile}"
     'bash',
     [
       '-c',
-      'eval "$(DUD_IMAGE=dud-client-baked sh client/entrypoint.sh shell-init)"; dud test',
+      `eval "$(DUD_IMAGE=dud-client-baked ${CLIENT_BIN} shell-init)"; dud test`,
     ],
     {
       PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
@@ -2475,7 +2528,7 @@ printf '%s\n' "$@" > "${logFile}"
 
   const result = await runCommand(
     'bash',
-    ['-c', 'eval "$(sh client/entrypoint.sh shell-init)"; dud'],
+    ['-c', `eval "$(${CLIENT_BIN} shell-init)"; dud`],
     {
       PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
     },
@@ -2519,7 +2572,7 @@ cat "$host_path" > "${payloadFile}"
     'bash',
     [
       '-c',
-      'eval "$(sh client/entrypoint.sh shell-init)"; printf streamed-payload | dud upload',
+      `eval "$(${CLIENT_BIN} shell-init)"; printf streamed-payload | dud upload`,
     ],
     {
       PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
@@ -2576,8 +2629,8 @@ printf '%s\n' 'Public key: age1pq1examplepublicrecipient' >&2
   );
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'keygen', '--pq', '--out', keyPath, '-R', recipientPath],
+    CLIENT_BIN,
+    ['keygen', '--pq', '--out', keyPath, '-R', recipientPath],
     {
       DUD_AGE_KEYGEN_BIN: ageKeygenMock,
     },
@@ -2620,7 +2673,7 @@ exit 1
 `,
   );
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'keygen', '--pq'], {
+  const result = await runCommand(CLIENT_BIN, ['keygen', '--pq'], {
     DUD_AGE_KEYGEN_BIN: ageKeygenMock,
   });
 
@@ -2644,7 +2697,7 @@ printf '%s\n' 'AGE-SECRET-KEY-1EXAMPLE'
 `,
   );
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'keygen'], {
+  const result = await runCommand(CLIENT_BIN, ['keygen'], {
     DUD_AGE_KEYGEN_BIN: ageKeygenMock,
   });
 
@@ -2682,8 +2735,8 @@ exit 1
   );
 
   const result = await runCommand(
-    'sh',
-    [CLIENT_SCRIPT, 'keygen', '-R', recipientPath, keyPath],
+    CLIENT_BIN,
+    ['keygen', '-R', recipientPath, keyPath],
     {
       DUD_AGE_KEYGEN_BIN: ageKeygenMock,
     },
@@ -2726,7 +2779,7 @@ exit 1
 `,
   );
 
-  const result = await runCommand('sh', [CLIENT_SCRIPT, 'keygen', keyPath], {
+  const result = await runCommand(CLIENT_BIN, ['keygen', keyPath], {
     DUD_AGE_KEYGEN_BIN: ageKeygenMock,
   });
 

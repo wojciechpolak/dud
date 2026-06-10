@@ -1,7 +1,7 @@
 # pin: debian stable-slim
-ARG DEBIAN_DIGEST=sha256:e51bfcd2226c480a5416730e0fa2c40df28b0da5ff562fc465202feeef2f1116
+ARG DEBIAN_DIGEST=sha256:5012d0517aa0075a7150a45aae67586641e898913b7af3b08228108565b5f90c
 
-FROM debian:stable-slim@${DEBIAN_DIGEST} AS builder
+FROM debian:stable-slim@${DEBIAN_DIGEST} AS build-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV OPENSSL_PREFIX=/opt/ech-openssl
@@ -21,6 +21,21 @@ RUN apt-get update \
     perl \
     pkg-config \
   && rm -rf /var/lib/apt/lists/*
+
+FROM build-base AS client-builder
+
+# Version from the repo root package.json; the build context is client/
+# only, so it has to come in as a build arg.
+ARG DUD_VERSION=dev
+
+WORKDIR /client
+
+COPY go.mod ./
+COPY cmd ./cmd
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${DUD_VERSION}" -o /usr/local/bin/dud ./cmd/dud
+
+FROM build-base AS builder
 
 WORKDIR /build
 
@@ -103,7 +118,7 @@ WORKDIR /work
 COPY --from=builder /opt/age/bin/age /usr/local/bin/age
 COPY --from=builder /opt/age/bin/age-keygen /usr/local/bin/age-keygen
 COPY --from=builder /opt/ech-curl/bin/curl /usr/local/bin/curl
-COPY entrypoint.sh /usr/local/bin/dud
+COPY --from=client-builder /usr/local/bin/dud /usr/local/bin/dud
 
 RUN chmod +x /usr/local/bin/dud \
   && chown dud:dud /work

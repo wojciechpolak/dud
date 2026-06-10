@@ -338,7 +338,7 @@ records and therefore a Caddy build with a DNS provider module.
 - `src/node-server.ts`: self-hosted Node server adapter.
 - `src/filesystem.ts`: local-disk `BlobStore` implementation.
 - `server/`: Docker packaging for the Node server image.
-- `client/`: Docker client image and entrypoint script.
+- `client/`: Docker client image and Go CLI.
 - `tests/`: Worker and client tests.
 
 ## DUD Client

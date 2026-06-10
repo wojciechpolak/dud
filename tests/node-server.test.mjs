@@ -12,7 +12,7 @@ import test from 'node:test';
 import { startNodeServer } from '../dist/src/node-server.js';
 import { TEST_CERT_PEM, TEST_KEY_PEM } from './helpers.mjs';
 
-const CLIENT_SCRIPT = path.resolve('client/entrypoint.sh');
+const CLIENT_BIN = path.resolve('client/bin/dud');
 
 function runCommand(command, args, env = {}, options = {}) {
   return new Promise((resolve, reject) => {
@@ -363,7 +363,7 @@ test('node server silent log mode suppresses startup and access logs', async () 
   }
 });
 
-test('client entrypoint can upload and download through the node server over HTTPS', async () => {
+test('client binary can upload and download through the node server over HTTPS', async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-node-client-'));
   const certPath = path.join(tmpDir, 'cert.pem');
   const keyPath = path.join(tmpDir, 'key.pem');
@@ -476,16 +476,8 @@ cp "$input" "$output"
 
   try {
     const upload = await runCommand(
-      'sh',
-      [
-        CLIENT_SCRIPT,
-        'upload',
-        '--file',
-        inputPath,
-        '--json',
-        '--url',
-        baseUrl,
-      ],
+      CLIENT_BIN,
+      ['upload', '--file', inputPath, '--json', '--url', baseUrl],
       {
         DUD_SECRET_TOKEN: 'top-secret',
         DUD_CURL_BIN: curlWrapper,
@@ -497,9 +489,8 @@ cp "$input" "$output"
     const uploadBody = JSON.parse(upload.stdout);
 
     const download = await runCommand(
-      'sh',
+      CLIENT_BIN,
       [
-        CLIENT_SCRIPT,
         'download',
         '--id',
         uploadBody.id,

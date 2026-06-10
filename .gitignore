@@ -6,6 +6,7 @@
 .wrangler/
 .dud-dev/
 coverage/
+client/bin/
 dist/
 node_modules/
 tmp/
