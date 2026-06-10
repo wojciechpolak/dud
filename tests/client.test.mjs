@@ -2396,7 +2396,23 @@ test('shell-init command prints a TTY-aware shell function', async () => {
 
   assert.equal(result.code, 0);
   assert.match(result.stdout, /^_dud_shell_quote\(\) \{/m);
+  assert.match(result.stdout, /^_dud_host_has_tty\(\) \{/m);
+  assert.match(result.stdout, /^_dud_stdout_is_tty\(\) \{/m);
+  assert.match(result.stdout, /^_dud_tty_input_path\(\) \{/m);
+  assert.match(result.stdout, /^_dud_upload_uses_stdin\(\) \{/m);
+  assert.match(result.stdout, /^_dud_docker_cli_args\(\) \{/m);
+  assert.match(result.stdout, /^_dud_complete_wordlist\(\) \{/m);
+  assert.match(result.stdout, /^_dud_complete_filter_prefix\(\) \{/m);
+  assert.match(result.stdout, /^_dud_complete_parse\(\) \{/m);
+  assert.match(result.stdout, /^_dud_complete_candidates\(\) \{/m);
   assert.match(result.stdout, /^dud\(\) \{/m);
+  assert.doesNotMatch(result.stdout, /^dud_host_has_tty\(\) \{/m);
+  assert.doesNotMatch(result.stdout, /^dud_stdout_is_tty\(\) \{/m);
+  assert.doesNotMatch(result.stdout, /^dud_tty_input_path\(\) \{/m);
+  assert.doesNotMatch(result.stdout, /^dud_upload_uses_stdin\(\) \{/m);
+  assert.doesNotMatch(result.stdout, /^dud_docker_cli_args\(\) \{/m);
+  assert.match(result.stdout, /complete -o default -F _dud_complete_bash dud/);
+  assert.match(result.stdout, /compdef _dud_complete_zsh dud/);
   assert.match(result.stdout, /if \[ -r \.env \]; then/);
   assert.match(result.stdout, /--env-file/);
   assert.match(
@@ -2448,6 +2464,63 @@ printf '%s\n' "$@" > "${logFile}"
     /-e\nDUD_CA_BUNDLE=\/work\/\.dud-dev\/caddy-data\/pki\/authorities\/local\/root\.crt/,
   );
   assert.match(args, /-e\nDUD_CONNECT_TO=dud\.local\.test:443:caddy:443/);
+});
+
+test('shell-init registers bash completion for dud', async () => {
+  const result = await runCommand(
+    'bash',
+    ['-c', `eval "$(${CLIENT_BIN} shell-init)"; complete -p dud`],
+    {},
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /complete .*_dud_complete_bash dud/);
+});
+
+test('shell-init bash completion suggests subcommands and file arguments', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-shell-complete-'),
+  );
+  const identityFile = path.join(tmpDir, 'identity.txt');
+  await writeFile(identityFile, 'secret', 'utf8');
+
+  const result = await runCommand(
+    'bash',
+    [
+      '-c',
+      `eval "$(${CLIENT_BIN} shell-init)"; COMP_WORDS=(dud gi); COMP_CWORD=1; _dud_complete_bash; printf 'TOP:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud git ''); COMP_CWORD=2; _dud_complete_bash; printf 'GIT:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud download --identity ${path.basename(identityFile).slice(0, 2)}); COMP_CWORD=3; _dud_complete_bash; printf 'FILE:%s\n' "\${COMPREPLY[*]}"`,
+    ],
+    {},
+    { cwd: tmpDir },
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /TOP:.*git/);
+  assert.doesNotMatch(result.stdout, /GIT:.*--version/);
+  assert.doesNotMatch(result.stdout, /GIT:.*version/);
+  assert.doesNotMatch(result.stdout, /GIT:.*--help/);
+  assert.doesNotMatch(result.stdout, /GIT:.*-h/);
+  assert.match(result.stdout, /GIT:.*push/);
+  assert.match(result.stdout, /GIT:.*fetch/);
+  assert.match(result.stdout, /FILE:.*identity\.txt/);
+});
+
+test('shell-init zsh completion filters partial top-level commands', async () => {
+  const result = await runCommand(
+    'zsh',
+    [
+      '-fc',
+      `autoload -Uz compinit; compinit; eval "$(${CLIENT_BIN} shell-init)"; compadd() { printf 'ADD:%s\\n' "$@"; }; words=(dud gi); CURRENT=2; _dud_complete_zsh`,
+    ],
+    {},
+  );
+
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /ADD:--/);
+  assert.match(result.stdout, /ADD:git/);
+  assert.doesNotMatch(result.stdout, /ADD:version/);
+  assert.doesNotMatch(result.stdout, /ADD:--version/);
+  assert.doesNotMatch(result.stdout, /ADD:--help/);
 });
 
 test('shell-init output honors runtime DUD_IMAGE overrides', async () => {
