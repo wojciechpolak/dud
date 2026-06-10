@@ -2397,6 +2397,68 @@ printf '%s\n' "$@" > "${logFile}"
   assert.match(args, /-e\nDUD_CONNECT_TO=dud\.local\.test:443:caddy:443/);
 });
 
+test('shell-init output honors runtime DUD_IMAGE overrides', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-shell-init-image-'),
+  );
+  const logFile = path.join(tmpDir, 'docker.log');
+  const dockerMock = path.join(tmpDir, 'docker');
+
+  await makeExecutable(
+    dockerMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${logFile}"
+`,
+  );
+
+  const result = await runCommand(
+    'bash',
+    [
+      '-c',
+      'eval "$(sh client/entrypoint.sh shell-init)"; DUD_IMAGE=dud-client-local dud test',
+    ],
+    {
+      PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const args = await readFile(logFile, 'utf8');
+  assert.match(args, /dud-client-local/);
+  assert.doesNotMatch(args, /ghcr\.io\/wojciechpolak\/dud\/dud-client:latest/);
+});
+
+test('shell-init output preserves the generated DUD_IMAGE fallback', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-shell-init-baked-image-'),
+  );
+  const logFile = path.join(tmpDir, 'docker.log');
+  const dockerMock = path.join(tmpDir, 'docker');
+
+  await makeExecutable(
+    dockerMock,
+    `#!/bin/sh
+printf '%s\n' "$@" > "${logFile}"
+`,
+  );
+
+  const result = await runCommand(
+    'bash',
+    [
+      '-c',
+      'eval "$(DUD_IMAGE=dud-client-baked sh client/entrypoint.sh shell-init)"; dud test',
+    ],
+    {
+      PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
+    },
+  );
+
+  assert.equal(result.code, 0);
+  const args = await readFile(logFile, 'utf8');
+  assert.match(args, /dud-client-baked/);
+  assert.doesNotMatch(args, /ghcr\.io\/wojciechpolak\/dud\/dud-client:latest/);
+});
+
 test('shell-init output does not pass an empty command argument', async () => {
   const tmpDir = await mkdtemp(
     path.join(os.tmpdir(), 'dud-client-shell-init-empty-'),

@@ -484,7 +484,9 @@ DUD_SECRET_TOKEN=replace-me
 # DUD_ECH_MODE=hard
 ```
 
-Set `DUD_IMAGE` to override the image name embedded in the generated output.
+Set `DUD_IMAGE` before `shell-init` to change the generated fallback image, or
+set `DUD_IMAGE` later in your shell to override the image used by the generated
+`dud` function at runtime.
 
 ## DUD Server
 

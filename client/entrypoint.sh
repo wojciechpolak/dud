@@ -1061,6 +1061,8 @@ dud_docker_cli_args() {
 dud() {
   dud_env_args=""
   dud_run_args=""
+  dud_image="\${DUD_IMAGE:-$DUD_IMAGE}"
+  dud_image_arg="\$(_dud_shell_quote "\$dud_image")"
 
   if [ -r .env ]; then
     dud_env_args="\$(_dud_shell_quote --env-file) \$(_dud_shell_quote .env)"
@@ -1090,7 +1092,7 @@ dud() {
     dud_stdin_mount="\$(_dud_shell_quote -v) \$(_dud_shell_quote "\$dud_stdin_file:/tmp/dud-stdin:ro")"
     dud_tty_input="\$(dud_tty_input_path)"
     trap 'rm -f "\$dud_stdin_file"' EXIT HUP INT TERM
-    eval "docker run --rm -it \$dud_env_args \$dud_run_args \$dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args" <"\$dud_tty_input"
+    eval "docker run --rm -it \$dud_env_args \$dud_run_args \$dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \$dud_image_arg \$dud_cli_args" <"\$dud_tty_input"
     status=\$?
     rm -f "\$dud_stdin_file"
     trap - EXIT HUP INT TERM
@@ -1100,11 +1102,11 @@ dud() {
   dud_cli_args="\$(dud_docker_cli_args "\$@")"
 
   if [ -t 0 ] && [ -t 1 ]; then
-    eval "docker run --rm -it \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
+    eval "docker run --rm -it \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \$dud_image_arg \$dud_cli_args"
     return
   fi
 
-  eval "docker run --rm -i \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \\"$DUD_IMAGE\\" \$dud_cli_args"
+  eval "docker run --rm -i \$dud_env_args \$dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \\"\$PWD:/work\\" \$dud_image_arg \$dud_cli_args"
 }
 EOF
 }
