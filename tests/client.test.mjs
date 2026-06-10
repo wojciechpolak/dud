@@ -1212,7 +1212,7 @@ cp "$input" "$output"
   assert.match(gitArgs, /bundle\nverify\n[^\n]*\/dud-git-fetch-bundle-[^\n]+/);
   assert.match(
     gitArgs,
-    /fetch\n[^\n]*\/dud-git-fetch-bundle-[^\n]+\nrefs\/heads\/\*:refs\/remotes\/A\/\*/,
+    /fetch\n[^\n]*\/dud-git-fetch-bundle-[^\n]+\n\+refs\/heads\/\*:refs\/remotes\/A\/\*/,
   );
   assert.match(result.stdout, /Fetched Git bundle into refs\/remotes\/A\/\*/);
   assert.match(result.stdout, /git merge --ff-only A\/main/);

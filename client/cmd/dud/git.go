@@ -205,7 +205,7 @@ func (a *app) cmdGitFetch(args []string) error {
 		return err
 	}
 	hintBranch := a.gitBundleHintBranch(bundleFile)
-	cmd = exec.Command(a.cfg.GitBin, "fetch", bundleFile, "refs/heads/*:refs/remotes/"+opts.remote+"/*", "refs/tags/*:refs/tags/*")
+	cmd = exec.Command(a.cfg.GitBin, "fetch", bundleFile, "+refs/heads/*:refs/remotes/"+opts.remote+"/*", "refs/tags/*:refs/tags/*")
 	cmd.Stdout = a.out
 	cmd.Stderr = a.errOut
 	if err := cmd.Run(); err != nil {
