@@ -8,7 +8,7 @@ COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 
 COPY src ./src
-RUN npm run build
+RUN npm run build:server
 
 FROM node:24-alpine
 

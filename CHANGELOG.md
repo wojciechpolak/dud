@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for public releases.
 
+## [1.4.0] - 2026-06-10
+
+### Added
+
+- Add git bundle sync commands
+- Add shell-init completion support
+- Allow runtime DUD_IMAGE overrides in shell-init
+
+### Changed
+
+- Rewrite client entrypoint in Go
+
 ## [1.3.1] - 2026-06-09
 
 ### Fixed
