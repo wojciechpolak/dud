@@ -23,9 +23,9 @@
     "test": "npm run build && node --test tests/*.test.mjs"
   },
   "devDependencies": {
-    "oxfmt": "^0.51.0",
+    "oxfmt": "^0.60.0",
     "oxlint": "^1.60.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "wrangler": "^4.94.0"
   }
 }
