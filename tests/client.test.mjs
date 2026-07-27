@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Wojciech Polak
 
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import {
   mkdtemp,
   readdir,
@@ -2633,6 +2634,7 @@ test('shell-init stages piped upload stdin so age can still use a tty', async ()
   );
   const logFile = path.join(tmpDir, 'docker.log');
   const payloadFile = path.join(tmpDir, 'payload.bin');
+  const hostPathFile = path.join(tmpDir, 'host-path.txt');
   const dockerMock = path.join(tmpDir, 'docker');
 
   await makeExecutable(
@@ -2651,6 +2653,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 host_path="\${stdin_mount%%:/tmp/dud-stdin:ro}"
+printf '%s' "$host_path" > "${hostPathFile}"
 cat "$host_path" > "${payloadFile}"
 `,
   );
@@ -2677,6 +2680,74 @@ cat "$host_path" > "${payloadFile}"
   assert.match(args, /\/tmp\/dud-stdin:ro/);
   assert.match(args, /--file\n\/tmp\/dud-stdin/);
   assert.equal(await readFile(payloadFile, 'utf8'), 'streamed-payload');
+
+  const hostPath = await readFile(hostPathFile, 'utf8');
+  assert.match(hostPath, /dud-wrapper-stdin-/);
+  assert.equal(
+    existsSync(hostPath),
+    false,
+    `shell-init left staged plaintext at ${hostPath}`,
+  );
+});
+
+test('install wrapper stages piped upload stdin and removes it afterwards', async () => {
+  const tmpDir = await mkdtemp(
+    path.join(os.tmpdir(), 'dud-client-install-pipe-'),
+  );
+  const wrapper = path.join(tmpDir, 'dud');
+  const payloadFile = path.join(tmpDir, 'payload.bin');
+  const hostPathFile = path.join(tmpDir, 'host-path.txt');
+  const dockerMock = path.join(tmpDir, 'docker');
+
+  await makeExecutable(
+    dockerMock,
+    `#!/bin/sh
+stdin_mount=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-v" ]; then
+    case "$2" in
+      *:/tmp/dud-stdin:ro) stdin_mount="$2" ;;
+    esac
+    shift 2
+    continue
+  fi
+  shift
+done
+host_path="\${stdin_mount%%:/tmp/dud-stdin:ro}"
+printf '%s' "$host_path" > "${hostPathFile}"
+cat "$host_path" > "${payloadFile}"
+exit 7
+`,
+  );
+
+  const installOutput = await runCommand(CLIENT_BIN, ['install']);
+  assert.equal(installOutput.code, 0);
+  await makeExecutable(wrapper, installOutput.stdout);
+
+  const result = await runCommand(
+    'sh',
+    ['-c', `printf streamed-payload | "${wrapper}" upload`],
+    {
+      PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
+      DUD_SECRET_TOKEN: 'top-secret',
+      DUD_TEST_HOST_TTY: '1',
+      DUD_TEST_STDOUT_TTY: '1',
+      DUD_TEST_TTY_INPUT_PATH: '/dev/null',
+    },
+  );
+
+  // The wrapper must forward the container's exit status even though it can no
+  // longer exec into docker.
+  assert.equal(result.code, 7);
+  assert.equal(await readFile(payloadFile, 'utf8'), 'streamed-payload');
+
+  const hostPath = await readFile(hostPathFile, 'utf8');
+  assert.match(hostPath, /dud-wrapper-stdin-/);
+  assert.equal(
+    existsSync(hostPath),
+    false,
+    `wrapper left staged plaintext at ${hostPath}`,
+  );
 });
 
 test('keygen command can generate post-quantum keys and a recipient file', async () => {

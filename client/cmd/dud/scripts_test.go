@@ -60,3 +60,46 @@ func TestInstallScriptContainsWrapperContracts(t *testing.T) {
 		}
 	}
 }
+
+// The staged stdin file holds the caller's plaintext on the host. exec would
+// replace the wrapper shell and skip both the EXIT trap and the explicit
+// cleanup, so the branch that stages stdin must not use it.
+func TestInstallScriptDoesNotExecWhileStagedStdinNeedsCleanup(t *testing.T) {
+	script := installScript("dud-client-test")
+	stdinBranch, _, found := strings.Cut(script, "dud_cli_args=\"$(dud_docker_cli_args \"$@\")\"\n\nif [ -t 0 ]")
+	if !found {
+		t.Fatal("install script no longer has a separable staged-stdin branch")
+	}
+	if !strings.Contains(stdinBranch, "mktemp /tmp/dud-wrapper-stdin-") {
+		t.Fatal("staged-stdin branch no longer stages stdin to a host file")
+	}
+	if strings.Contains(stdinBranch, "exec docker run") {
+		t.Fatal("staged-stdin branch uses exec, so the staged plaintext is never removed")
+	}
+	for _, needle := range []string{
+		`trap 'rm -f "$dud_stdin_file"' EXIT HUP INT TERM`,
+		`rm -f "$dud_stdin_file"`,
+		"exit $dud_status",
+	} {
+		if !strings.Contains(stdinBranch, needle) {
+			t.Fatalf("staged-stdin branch missing cleanup step %q", needle)
+		}
+	}
+}
+
+// Same exposure in the shell-init wrapper: the trap has to be armed before the
+// payload is written, or an interrupt during a slow read leaks it.
+func TestShellInitArmsStdinCleanupBeforeReading(t *testing.T) {
+	script := shellInitScript("dud-client-test")
+	trapIndex := strings.Index(script, `trap 'rm -f "$dud_stdin_file"' EXIT HUP INT TERM`)
+	if trapIndex < 0 {
+		t.Fatal("shell init no longer traps staged stdin cleanup")
+	}
+	catIndex := strings.Index(script, `cat >"$dud_stdin_file"`)
+	if catIndex < 0 {
+		t.Fatal("shell init no longer stages stdin to a host file")
+	}
+	if trapIndex > catIndex {
+		t.Fatal("shell init arms stdin cleanup only after writing the payload")
+	}
+}

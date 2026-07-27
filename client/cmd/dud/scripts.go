@@ -94,7 +94,14 @@ if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ]; } && ! [ -t 0 ]
   dud_cli_args="$(dud_docker_cli_args "$@")"
   dud_stdin_mount="$(dud_shell_quote -v) $(dud_shell_quote "$dud_stdin_file:/tmp/dud-stdin:ro")"
   dud_tty_input="$(dud_tty_input_path)"
-  eval "exec docker run --rm -it $dud_env_args $dud_run_args $dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \"$PWD:/work\" $dud_image_arg $dud_cli_args" <"$dud_tty_input"
+  # Deliberately not exec: the staged stdin file holds the caller's plaintext
+  # and must be removed once the container exits. exec would replace this shell
+  # and the EXIT trap would never run, leaving the payload on the host.
+  eval "docker run --rm -it $dud_env_args $dud_run_args $dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \"$PWD:/work\" $dud_image_arg $dud_cli_args" <"$dud_tty_input"
+  dud_status=$?
+  rm -f "$dud_stdin_file"
+  trap - EXIT HUP INT TERM
+  exit $dud_status
 fi
 
 dud_cli_args="$(dud_docker_cli_args "$@")"
@@ -477,6 +484,9 @@ dud() {
 
   if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ]; } && ! [ -t 0 ] && _dud_stdout_is_tty && _dud_host_has_tty && _dud_upload_uses_stdin "$@"; then
     dud_stdin_file="$(mktemp /tmp/dud-wrapper-stdin-XXXXXX)"
+    # Armed before the payload is written, so an interrupt while reading a slow
+    # or large stdin cannot leave the caller's plaintext on the host.
+    trap 'rm -f "$dud_stdin_file"' EXIT HUP INT TERM
     cat >"$dud_stdin_file"
     dud_command="$1"
     shift
@@ -484,7 +494,6 @@ dud() {
     dud_cli_args="$(_dud_docker_cli_args "$@")"
     dud_stdin_mount="$(_dud_shell_quote -v) $(_dud_shell_quote "$dud_stdin_file:/tmp/dud-stdin:ro")"
     dud_tty_input="$(_dud_tty_input_path)"
-    trap 'rm -f "$dud_stdin_file"' EXIT HUP INT TERM
     eval "docker run --rm -it $dud_env_args $dud_run_args $dud_stdin_mount --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \"$PWD:/work\" $dud_image_arg $dud_cli_args" <"$dud_tty_input"
     status=$?
     rm -f "$dud_stdin_file"
