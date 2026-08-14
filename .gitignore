@@ -1,6 +1,7 @@
 .DS_Store
+.config/
 .claude/
-.env
+.env*
 .fallow/
 .idea/
 .wrangler/
@@ -13,3 +14,4 @@ tmp/
 wrangler.toml
 *.key
 *.recipient
+client/dud

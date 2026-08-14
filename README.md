@@ -1,25 +1,32 @@
 # DUD
 
 Discreet upload / download with either a Cloudflare Worker backed by R2 or a
-self-hosted Node server backed by local disk, plus a Dockerized client that uses
-`curl`, `age`, and `age-keygen`.
+self-hosted Node server backed by local disk, plus a Go client — a Docker image
+or a native binary — that carries its own HTTPS transport and uses `age` and
+`age-keygen`.
 
 ## What this does
 
-- Encrypts files locally with `age` before upload, using either a passphrase or
-  recipient public keys.
-- Uploads only ciphertext to the server.
-- Returns an opaque ID that the recipient can use to fetch ciphertext.
-- Decrypts locally after download with the shared passphrase or recipient
-  private key.
-- Opportunistically cleans up expired or consumed R2 objects during normal
-  traffic.
-- Verifies secure transport from the client with DoH, TLS 1.3, and `curl --ech`,
-  using `hard` by default.
+- Encrypts and decrypts every payload on the client with `age`: a passphrase or
+  a recipient public key for a dead drop, the peer's hybrid post-quantum
+  recipient for a peer transfer.
+- Uploads only ciphertext. The server stores opaque bodies and bounded metadata
+  and holds no key that opens them.
+- Addresses a dead drop by an opaque ID handed to the recipient out of band, and
+  a peer transfer by the local alias of a device you paired with once.
+- Authenticates the sender of a peer transfer with its Ed25519 device identity,
+  sequences deliveries against a hash chain the receiver acknowledges, and can
+  revoke a relationship when a device or its state is lost.
+- Synchronizes Git repositories over the same two paths — by opaque ID as a
+  bundle in a dead drop, or to a peer as a complete authenticated checkpoint.
+- Opportunistically cleans up expired or consumed objects during normal traffic,
+  on both the R2 and filesystem backends.
+- Verifies secure transport from the client with in-process DoH, exactly TLS
+  1.3, and ECH, using `hard` by default, before either mode moves data.
 
-No web UI is provided by design. Browsers cannot enforce ECH hard mode, DoH, or
-TLS 1.3 the way the Docker client does — the transport security guarantees that
-define this tool's threat model require a controlled client stack.
+> **Important.** There is no web UI, and there will not be one. A browser cannot
+> enforce ECH hard mode, DoH, or exactly TLS 1.3 the way the DUD client does,
+> and those checks are what the threat model rests on.
 
 Stack:
 
@@ -27,51 +34,139 @@ Stack:
 - [R2](https://www.cloudflare.com/developer-platform/products/r2/)
 - [Node.js](https://nodejs.org/)
 - [Docker](https://www.docker.com/)
-- [curl](https://curl.se/)
 - [age](https://github.com/FiloSottile/age)
 - [DoH](https://en.wikipedia.org/wiki/DNS_over_HTTPS)
 - [ECH](https://en.wikipedia.org/wiki/Server_Name_Indication#Encrypted_Client_Hello)
 
-Recommended mode:
+DUD assumes bring-your-own infrastructure: a Cloudflare Worker with R2 for a
+managed edge deployment, or the Node server on your own host. No public shared
+instance is required or assumed.
 
-- For the strongest async sharing model, prefer public-key mode with
-  `dud upload -r ...` and `dud download -i ...`.
-- Passphrase mode remains available for ad hoc sharing, but ciphertext can still
-  be subjected to offline guessing if the passphrase is weak.
-- `age` post-quantum recipients generated with `age-keygen -pq` are supported by
-  the same public-key flow.
+## Two ways to transfer: dead drops and peers
 
-## Deployment targets
+DUD has two transfer modes. Both ship permanently in the same binary, and
+neither one is on its way out; they answer different questions.
 
-- Cloudflare Worker + R2 is available for people who want a managed edge
-  deployment.
-- A self-hosted Node server backed by local disk is now supported as the first
-  non-Cloudflare backend.
-- DUD assumes bring-your-own infrastructure. No public shared hosted instance is
-  required or assumed.
+A **dead drop** is addressed by an opaque ID. Encrypt to a passphrase or an
+`age` recipient, upload, and hand the ID to the other side out of band. Nothing
+is remembered between runs, and the ID is the whole credential.
+
+A **peer** transfer is addressed by the local alias of a device you have paired
+with. Pair once, and `dud send laptop` works from then on. Everything that
+crosses the relationship is signed by the sender, sequenced, acknowledged, and
+revocable.
+
+| Property                     | Dead drop `upload -r`                | Peer `send PEER`                   |
+| ---------------------------- | ------------------------------------ | ---------------------------------- |
+| Payload encryption           | `age` recipient; X25519 unless `-pq` | `age` hybrid PQ recipient, always  |
+| Post-quantum payloads        | opt-in, per upload                   | mandatory, signed `kem_alg`        |
+| Sender authenticity          | none                                 | Ed25519, domain-separated          |
+| Recipient key                | supplied per upload; static          | from pairing; per relationship     |
+| Reaching the recipient       | opaque ID, shared out of band        | slot from relationship secret      |
+| Replay / rollback resistance | none                                 | hash-chained sequences, watermarks |
+| Revocation                   | none                                 | `peer revoke`, epochs, reissue     |
+
+Payload confidentiality is the same primitive in both modes once a drop is made
+to a post-quantum recipient: peer transfers encrypt to the hybrid
+MLKEM768-X25519 recipient that `age-keygen -pq` also produces. What peer mode
+adds sits around the cipher — sender authentication, freshness, revocation, and
+no long-lived public identifier for anyone to correlate. What it costs is reach:
+it only talks to devices you have paired with, which is why `dud send PEER`
+rejects `--recipient` and `--passphrase`.
+
+Neither mode has post-quantum signatures or forward secrecy. `age` offers no
+post-quantum signature type, so sender authentication stays Ed25519, and peer
+recipients derive from a long-lived device seed. See
+[`docs/threat-model-v2.md`](docs/threat-model-v2.md) section 2 for the full
+guarantee table and section 3.21 for the quantum reasoning.
+
+A dead drop reaches someone you have not paired with, and it is the only way to
+reach them. Pair when you expect to keep exchanging data with the same device.
+
+The wire protocols behind the two modes are versioned `v1` and `v2`, and those
+numbers still appear where they name something literal — the `/v1/` and `/v2/`
+routes and the file names of the protocol documents. What an operator configures
+is named by mode instead: `DUD_DROP_*` for dead drops, `DUD_PEER_*` for peers.
+In prose the modes are called drops and peers.
 
 ## Quick start
 
-Choose one of these deployment paths:
+A DUD setup is a client you install once and a server you deploy. Install the
+client first: the deployment paths below end by pointing it at the hostname they
+produced, and one of them derives a credential with it.
 
-- `Cloudflare Worker + R2`: easiest managed deployment
-- `Cloudflare Tunnel for self-hosted dud-server`: private origin with a public
-  Cloudflare-backed hostname and tested `DUD_ECH_MODE=hard`
-- `Self-hosted without Cloudflare`: most manual path, for operators managing
-  their own HTTPS and DNS stack
+### Install the client
 
-### 1. Cloudflare Worker + R2
+`dud` on the host can be either of two things, and both accept exactly the same
+commands. The published Docker image plus a thin host wrapper is the default:
+
+```sh
+docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
+docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest install \
+  | sudo tee /usr/local/bin/dud > /dev/null && sudo chmod +x /usr/local/bin/dud
+```
+
+The wrapper is what makes `dud` a command. Every invocation needs the same
+`docker run` flags — an in-memory `/tmp` so intermediate plaintext never reaches
+the overlay filesystem, the working directory at `/work`, the peer state
+directories, `--cap-drop ALL` — and the wrapper supplies them and forwards the
+exported `DUD_*` variables into the container.
+[`docs/client.md`](docs/client.md#6-shell-wrapper) covers it in full, including
+`shell-init`, which prints the same thing as a shell function for your
+`~/.profile` instead of a script in `/usr/local/bin`.
+
+A host that would rather not run Docker can use the native binary a release
+publishes for Linux and macOS on both architectures. It expects `age`,
+`age-keygen`, `git`, and `qrencode` on `PATH`, and keeps peer state in `~/.dud`
+directly:
+
+```sh
+curl -fL -o dud https://github.com/wojciechpolak/dud/releases/latest/download/dud-linux-amd64
+sudo install -m 0755 dud /usr/local/bin/dud
+```
+
+Release assets are plain HTTPS downloads, so no GitHub CLI is required.
+`/releases/latest/download/` resolves to the newest stable release; a
+pre-release tag is published as one and is never what that path returns, so name
+a version explicitly with `/releases/download/vX.Y.Z/` to pin it. The asset name
+selects the platform: `dud-linux-amd64`, `dud-linux-arm64`, `dud-darwin-amd64`,
+or `dud-darwin-arm64`. With the GitHub CLI installed, the same download is:
+
+```sh
+gh release download vX.Y.Z --pattern 'dud-linux-amd64'
+sudo install -m 0755 dud-linux-amd64 /usr/local/bin/dud
+```
+
+Verify what you install: see [Verifying a release](#verifying-a-release) below.
+Skip both and every command in this README becomes one long `docker run` line;
+[`docs/client.md`](docs/client.md#4-running-it) shows what those look like.
+
+Once a deployment exists, point the client at it and confirm the transport:
+
+```sh
+export DUD_BASE_URL=https://your-dud-host.example.com
+dud test
+```
+
+`dud test` succeeds only if the client reaches the service through its own DoH
+resolution and exactly TLS 1.3, with an accepted ECH handshake under the default
+`hard` mode. Every deployment path below finishes here.
+
+### Deploy a server
+
+Choose one:
+
+- **Cloudflare Worker + R2** — the easiest managed deployment
+- **Cloudflare Tunnel for self-hosted `dud-server`** — a private origin with a
+  public Cloudflare-backed hostname and tested `DUD_ECH_MODE=hard`
+- **Self-hosted without Cloudflare** — the most manual path, for operators
+  managing their own HTTPS and DNS stack
+
+#### 1. Cloudflare Worker + R2
 
 Who this is for: operators who want the simplest Cloudflare-backed deployment
-without running their own Node server.
-
-Minimum prerequisites:
-
-- a Cloudflare account
-- a hostname managed by Cloudflare
-- Docker for the client image
-
-Setup:
+without running their own Node server. You need a Cloudflare account, a hostname
+managed by Cloudflare, and Docker for the client image.
 
 1. Clone the repository and install dependencies:
 
@@ -88,67 +183,127 @@ npx wrangler login
 npx wrangler r2 bucket create dud-files
 ```
 
-3. Create `wrangler.toml` from the checked-in example:
+3. Create the D1 database that stores peer metadata:
+
+```sh
+npx wrangler d1 create dud-v2
+```
+
+The command prints a `database_id`. Copy it; step 5 pastes it into
+`wrangler.toml`. R2 keeps holding the opaque ciphertext bodies, while D1 holds
+only peer relationship, capability, delivery, and accounting records.
+
+4. Create `wrangler.toml` from the checked-in example:
 
 ```sh
 cp wrangler.example.toml wrangler.toml
 ```
 
-4. Edit `wrangler.toml` before the first deployment:
+5. Edit `wrangler.toml` before the first deployment:
 
 - keep `name = "dud"` unless you want a different Worker name
 - change `pattern = "dud.example.com"` if you want a different hostname
 - keep `bucket_name = "dud-files"` only if that is the bucket you created
 - keep the R2 binding name as `FILES`
+- replace `database_id = "replace-with-d1-database-id"` with the ID from step 3,
+  and keep the D1 binding name as `DB`
 - keep or adjust `APP_VERSION`
 
-5. Verify the repo and deploy:
+A v1-only deployment — one that serves dead drops and nothing else — can instead
+delete the whole `[[d1_databases]]` block. `replace-with-d1-database-id` names
+no real database, so it has to be either replaced or removed;
+`npx wrangler deploy --dry-run` does not catch it, because the ID is only
+resolved against the account at deployment time.
+
+6. Initialize the D1 schema:
+
+```sh
+npx wrangler d1 migrations apply dud-v2 --remote
+npx wrangler d1 migrations list dud-v2 --remote
+```
+
+`migrations_dir` in `wrangler.toml` points at `migrations/d1`, which holds a
+single idempotent schema file. Wrangler records what it applied, so the second
+command reports no unapplied migrations once the schema is in place. Add
+`--local` instead of `--remote` to prepare the local database that
+`npx wrangler dev` uses.
+
+7. Verify the repository and deploy:
 
 ```sh
 npm run check
 npx wrangler deploy
 ```
 
-6. Configure the shared upload secret:
+8. Configure the shared upload secret:
 
 ```sh
-npx wrangler secret put DUD_SECRET_TOKEN
+npx wrangler secret put DUD_DROP_SECRET
 ```
 
-7. Pull the client image and point it at the Worker hostname:
+9. To serve peer transfers as well, set `DUD_PEER_ENABLED = "true"` under
+   `[vars]` in `wrangler.toml` and add the peer secrets. The Worker refuses to
+   start with `/v2` enabled and no `DB` binding, so complete steps 3, 5, and 6
+   first.
+
+`DUD_PEER_DEPLOYMENT_KEY` wraps stored verifier secrets and never leaves the
+server, so nobody types it. It is 32 bytes, base64url:
 
 ```sh
-docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
-export DUD_BASE_URL=https://your-dud-host.example.com
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
+npx wrangler secret put DUD_PEER_DEPLOYMENT_KEY
 ```
 
-8. Confirm the transport path:
+`DUD_PEER_SECRET` is what lets a device create a pairing invitation. Whoever
+invites a device needs it too, which is why it is a passphrase of at least 24
+characters and not encoded bytes. Give the Worker the key that passphrase
+stretches into, not the passphrase itself: stretching costs more CPU than a
+free-tier Worker invocation is allowed, and the key is all verification
+consumes. Derive it with the client you installed above and paste the printed
+`dud2-enroll-key:…` value:
 
 ```sh
-dud test
+DUD_PEER_SECRET='squid-lantern-rotate-9-mango' dud peer enrollment-key
+npx wrangler secret put DUD_PEER_SECRET
 ```
+
+Without `DUD_PEER_SECRET` the Worker refuses to start, unless you deliberately
+set `DUD_PEER_OPEN_ENROLLMENT = "true"` to let anyone who learns the hostname
+pair through the deployment.
+
+`DUD_PEER_ADMIN_SECRET` is optional, is generated the same way as the deployment
+key and independently of it, and only enables administrative operations such as
+relationship revocation. Leaving it unset keeps that surface off and administers
+the deployment offline instead:
+
+```sh
+npx wrangler secret put DUD_PEER_ADMIN_SECRET
+```
+
+Deploy once the secrets are in place:
+
+```sh
+npx wrangler deploy
+```
+
+10. Point the client at the Worker hostname and run `dud test`, as shown under
+    [Install the client](#install-the-client).
 
 The real `wrangler.toml` is gitignored so machine-specific IDs and future local
 changes stay out of the repository.
 
-### 2. Cloudflare Tunnel for self-hosted `dud-server`
+#### 2. Cloudflare Tunnel for self-hosted `dud-server`
 
 Who this is for: private LAN hosts or NAS systems that should stay self-hosted
-while exposing a public Cloudflare-backed hostname for the Docker client.
-
-Minimum prerequisites:
-
-- a Cloudflare-managed hostname
-- a working [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/)
-  (`cloudflared`)
-- Docker for `dud-server` and the client image
-
-Setup:
+while exposing a public Cloudflare-backed hostname for the DUD client. You need
+a Cloudflare-managed hostname, a working
+[Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/) (`cloudflared`),
+and Docker.
 
 1. Create a local `.env` file or export the upload secret:
 
 ```dotenv
-DUD_SECRET_TOKEN=replace-me
+DUD_DROP_SECRET=replace-me
 ```
 
 2. Start the self-hosted server:
@@ -161,30 +316,14 @@ Docker Compose stores server data in the named volume `dud_data` by default,
 which avoids common host bind-mount permission issues.
 
 3. Publish a public subdomain through Cloudflare Tunnel to the private server
-   origin.
+   origin. Typical origins are `http://127.0.0.1:8787` when `cloudflared` runs
+   on the same host, and `http://dud-server:8787` when it shares the Docker
+   network.
 
-Typical origins are:
+4. Point the client at the tunnel hostname and run `dud test`.
 
-- `http://127.0.0.1:8787` when `cloudflared` runs on the same host
-- `http://dud-server:8787` when `cloudflared` shares the Docker network
-
-4. Pull the client image and point it at the public tunnel hostname:
-
-```sh
-docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
-export DUD_BASE_URL=https://your-dud-host.example.com
-```
-
-5. Confirm the Cloudflare-backed transport path:
-
-```sh
-dud test
-```
-
-This path has been tested successfully with `dud test`, showing TLS 1.3 and
-`ech: succeeded` against the public hostname.
-
-Expected transport details include:
+This path has been tested successfully, showing TLS 1.3 and `ech: succeeded`
+against the public hostname:
 
 - `tls: TLSv1.3 ...`
 - `ech: succeeded`
@@ -194,673 +333,221 @@ Note that ECH protects the client-to-Cloudflare hop. Your origin remains private
 behind the tunnel, but ECH itself does not apply to the Cloudflare-to-origin
 connection.
 
-### 3. Self-hosted without Cloudflare
+#### 3. Self-hosted without Cloudflare
 
 Who this is for: operators who want to run `dud-server` themselves and manage
-their own HTTPS reverse proxy or direct TLS setup.
-
-Minimum prerequisites:
-
-- a public hostname
-- an HTTPS endpoint in front of `dud-server`
-- Docker for `dud-server` and the client image
-
-Setup:
+their own HTTPS reverse proxy or direct TLS setup. You need a public hostname,
+an HTTPS endpoint in front of `dud-server`, and Docker.
 
 1. Create a local `.env` file or export the upload secret:
 
 ```dotenv
-DUD_SECRET_TOKEN=replace-me
+DUD_DROP_SECRET=replace-me
 ```
 
-2. Start the self-hosted server:
+2. Start the self-hosted server. From a clone of the repository, where
+   `docker-compose.yml` and the server build context are:
 
 ```sh
 docker compose up -d
 ```
 
-3. Publish the service through your own HTTPS stack, either with:
+Without a clone, use the same one-liner as path 2, which runs the published
+server image from the checked-in Compose file.
 
-- a reverse proxy in front of `dud-server`
-- or direct TLS via `DUD_TLS_CERT_FILE` and `DUD_TLS_KEY_FILE`
+3. Publish the service through your own HTTPS stack, either with a reverse proxy
+   in front of `dud-server` or with direct TLS via `DUD_TLS_CERT_FILE` and
+   `DUD_TLS_KEY_FILE`.
 
-4. Pull the client image and point it at the public hostname:
+4. Choose the transport mode. Use `export DUD_ECH_MODE=hard` only if your
+   hostname really supports ECH and publishes the required HTTPS DNS records;
+   otherwise use `export DUD_ECH_MODE=off`, which keeps every other check — DoH,
+   the public address-range check, exactly TLS 1.3, and redirect rejection —
+   while leaving the hostname visible in the TLS SNI.
 
-```sh
-docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
-export DUD_BASE_URL=https://your-dud-host.example.com
-```
+5. Point the client at the hostname and run `dud test`.
 
-5. Choose the transport mode:
+#### Peer transfers on a self-hosted server
 
-- use `export DUD_ECH_MODE=hard` only if your hostname really supports ECH and
-  publishes the required HTTPS DNS records
-- otherwise use `export DUD_ECH_MODE=grease`
-
-6. Confirm the endpoint:
-
-```sh
-dud test
-```
-
-This is the most manual deployment path in the README. It works well when you
-already operate your own HTTPS and DNS stack, but it requires more setup than
-the Cloudflare-backed options above.
-
-## Local testing
-
-These workflows are for local validation and development. They are not the main
-deployment paths above.
-
-### Host Caddy on localhost
-
-For local browser/manual HTTPS testing, run Caddy directly on the host:
-
-```sh
-npm run dev:caddy
-```
-
-If your system does not already trust Caddy's local CA, run:
-
-```sh
-npm run dev:caddy:trust
-```
-
-This repo's [Caddyfile](./Caddyfile) proxies:
-
-- `https://dud.localhost`
-- to the Dockerized `dud-server` at `127.0.0.1:8787`
-
-If you want to point the client at that local HTTPS endpoint:
-
-```sh
-export DUD_BASE_URL=https://dud.localhost
-export DUD_ECH_MODE=grease
-```
-
-Important:
-
-- host Caddy gives you local HTTPS, but not real ECH
-- `DUD_ECH_MODE=hard` will not work against the default local `dud.localhost`
-  setup
-- `dud-client` uses DoH by default, so `dud.localhost` is best treated as a
-  browser/manual HTTPS test target rather than a realistic end-to-end client
-  test target
-
-### Docker-only integration testing
-
-If you want to exercise `dud-client -> HTTPS proxy -> dud-server` entirely in
-Docker, start the optional integration Caddy service on the same Docker network:
-
-```sh
-docker compose --profile integration up -d
-```
-
-Then configure the client wrapper on the host so the `dud-client` container:
-
-- joins the same Docker network
-- trusts the internal Caddy local CA
-- connects to the internal Caddy service without relying on public DNS
-
-```sh
-export DUD_BASE_URL=https://dud.local.test
-export DUD_ECH_MODE=grease
-export DUD_DOCKER_NETWORK=dud_dev
-export DUD_CA_BUNDLE=/work/.dud-dev/caddy-data/pki/authorities/local/root.crt
-export DUD_CONNECT_TO=dud.local.test:443:caddy:443
-```
-
-Then:
-
-```sh
-dud test
-```
-
-This mode is useful for local Dockerized integration testing, but it is still
-not a realistic substitute for public-DNS validation or real ECH.
-
-### Real ECH notes
-
-For real ECH beyond local testing:
-
-- use a public hostname that already has an A/AAAA record pointing to your
-  server
-- use DoH or DoT on the client side
-- use a Caddy build with the right `caddy-dns` provider module
-- configure the global `dns` and `ech` options in [Caddyfile](./Caddyfile)
-
-Caddy's documentation notes that functioning ECH requires publishing HTTPS DNS
-records and therefore a Caddy build with a DNS provider module.
-
-### Repository layout
-
-- `src/`: Worker code and Cloudflare adapters.
-- `src/node-server.ts`: self-hosted Node server adapter.
-- `src/filesystem.ts`: local-disk `BlobStore` implementation.
-- `server/`: Docker packaging for the Node server image.
-- `client/`: Docker client image and Go CLI.
-- `tests/`: Worker and client tests.
-
-## DUD Client
-
-Pull the published image:
-
-```sh
-docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
-```
-
-Default environment:
-
-- `DUD_BASE_URL=https://dud.example.com`
-- `DUD_DOH_URL=https://cloudflare-dns.com/dns-query`
-- `DUD_ECH_MODE=hard`
-- `DUD_SECRET_TOKEN` when using `upload` or `flush`
-
-`DUD_ECH_MODE` accepts:
-
-- `hard`: require real ECH and fail the request if the connection cannot use it
-- `grease`: send a synthetic ECH-looking ClientHello extension to keep the
-  network path exercised and avoid ossifying around "ECH is never present", but
-  do not require the server to actually negotiate ECH
-
-The Dockerfile builds `curl` from source with ECH enabled using curl's
-experimental ECH build path instead of relying on a distro package.
-
-Examples:
-
-```sh
-docker run --rm -it -v "$PWD:/work" ghcr.io/wojciechpolak/dud/dud-client:latest test
-```
-
-The `test` command always prints a short summary including the DoH resolver, ECH
-mode, negotiated TLS details, ALPN, and the ECH result reported by `curl`,
-followed by the Worker's `/v1/test` JSON response.
-
-```sh
-docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN -v "$PWD:/work" ghcr.io/wojciechpolak/dud/dud-client:latest upload --file /work/input.bin --ttl 24h
-docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -v "$PWD:/work" ghcr.io/wojciechpolak/dud/dud-client:latest download --id YOUR_ID --out /work/output.bin
-printf '%s' 'secret message' | docker run --rm -i --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN ghcr.io/wojciechpolak/dud/dud-client:latest upload --json
-docker run --rm -i --tmpfs /tmp:rw,noexec,nosuid,size=128m ghcr.io/wojciechpolak/dud/dud-client:latest download --id YOUR_ID --stdout > output.bin
-docker run --rm -it --tmpfs /tmp:rw,noexec,nosuid,size=128m -e DUD_SECRET_TOKEN=YOUR_TOKEN ghcr.io/wojciechpolak/dud/dud-client:latest flush
-```
-
-`upload` prints a human-friendly summary, a suggested `dud receive ...` command,
-and a terminal QR code for that command by default. Add `--no-qr` to suppress
-the QR block. For scripts or other machine-readable use cases, add `--json` to
-print the raw upload response. Without `--file` or `-m`, `upload` reads
-plaintext from stdin. `download` writes to a file with `--out`, to stdout with
-`--stdout`, or extracts bundled archives with `--extract`.
-
-Use `dud --version` to print the client version.
-
-Git bundle sync commands:
-
-- `dud git push` creates a full Git bundle from local branches and tags, then
-  uploads it through the normal encrypted DUD upload path
-- `dud git fetch --id ID` downloads, decrypts, verifies, and fetches that bundle
-  into `refs/remotes/dud/*`
-- `dud git send` is an alias for `dud git push`
-- `dud git receive` is an alias for `dud git fetch`
-- add `--remote NAME` during fetch to import branches into
-  `refs/remotes/NAME/*`, for example `refs/remotes/laptop/main`
-
-`dud git fetch` intentionally does not merge, rebase, checkout, reset, or move
-local branches. After fetching, apply the imported branch explicitly with a
-normal Git command such as `git merge --ff-only laptop/main`.
-
-Encryption mode flags:
-
-- `upload` defaults to passphrase mode unless you provide `--recipient` or
-  `--recipient-file`
-- `upload --recipient AGE_RECIPIENT` or `upload -r AGE_RECIPIENT` can be
-  repeated
-- `upload --recipient-file /work/recipients.txt` or
-  `upload -R /work/recipients.txt` reads one or more age recipients from a file
-- `download --identity /work/key.txt` or `download -i /work/key.txt` decrypts
-  with an age identity file
-- `keygen` creates a standard age key pair on stdout
-- `keygen --out /work/key.txt` creates a standard age key pair in a file
-- `keygen --pq` creates a post-quantum age key pair on stdout
-- `keygen --pq --out /work/key.txt` creates a post-quantum age key pair in a
-  file
-- `keygen /work/key.txt` converts an identity file to recipient output on stdout
-- `keygen -R /work/recipient.txt /work/key.txt` writes recipient output to a
-  file
-
-When you run `dud` with no command in an interactive terminal, it opens a small
-menu for `test`, `upload`, `download`, `keygen`, `git`, and `flush`. Interactive
-upload can use a file path, a one-line message, or typed/pasted text that
-finishes on Ctrl-D, and it groups source-specific and encryption-specific
-prompts together. Interactive download groups output-specific prompts before the
-optional identity file prompt. Interactive Git mode supports bundle push and
-fetch. Interactive keygen supports both generating new identities and converting
-an existing identity into recipient output. If stdin is not a TTY, it prints
-usage information and exits instead.
-
-> **Security note**: `--tmpfs /tmp` keeps sensitive intermediate files
-> (encrypted payloads, TLS traces) in memory only — they never reach the
-> container's overlay filesystem and are gone when the container exits.
-
-### Shell wrapper
-
-To avoid repeating the full `docker run` flags, install a thin host wrapper:
-
-```sh
-# Wrapper script at /usr/local/bin/dud
-docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest install \
-  | sudo tee /usr/local/bin/dud && sudo chmod +x /usr/local/bin/dud
-```
-
-Then: dud test, dud upload ..., etc.
-
-Or print a shell function (add it to `~/.bashrc`, `~/.zshrc`, or `~/.profile`):
-
-```shell
-# 1. Review what will be added
-docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-init
-
-# 2. Append to your shell rc
-docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-init >> ~/.profile
-```
-
-Or load it only for the current shell session:
-
-```sh
-eval "$(docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-init)"
-```
-
-Both generated wrappers will automatically add `--env-file .env` when `./.env`
-exists, and they also forward exported `DUD_BASE_URL`, `DUD_DOH_URL`,
-`DUD_ECH_MODE`, and `DUD_SECRET_TOKEN` into the container. Exported shell
-variables override values from `.env`.
-
-Example `.env`:
+Both self-hosted paths above serve dead drops. Peer transfers need four more
+settings, which the checked-in `docker-compose.yml` already passes through from
+the same `.env`:
 
 ```dotenv
-DUD_SECRET_TOKEN=replace-me
-# Optional overrides:
-# DUD_BASE_URL=https://dud.example.com
-# DUD_DOH_URL=https://cloudflare-dns.com/dns-query
-# DUD_ECH_MODE=hard
+DUD_PEER_ENABLED=true
+DUD_PUBLIC_BASE_URL=https://your-dud-host.example.com
+DUD_PEER_DEPLOYMENT_KEY=<independent 32-byte base64url value>
+DUD_PEER_SECRET=squid-lantern-rotate-9-mango
 ```
 
-Set `DUD_IMAGE` before `shell-init` to change the generated fallback image, or
-set `DUD_IMAGE` later in your shell to override the image used by the generated
-`dud` function at runtime.
+`DUD_PUBLIC_BASE_URL` is required with peers enabled and must be the canonical
+HTTPS origin clients dial — scheme, host, optional port, nothing else. Every v2
+request is bound to it, so a value that disagrees with the hostname in use
+rejects every authorization. `DUD_PEER_SECRET` gates pairing enrollment and the
+server refuses to start without it unless `DUD_PEER_OPEN_ENROLLMENT=true` says
+the deployment accepts pairing from anyone who reaches the hostname. Generate
+each credential independently of the others and of `DUD_DROP_SECRET`; the
+service refuses to start if any two are equal.
+[`docs/server-v2.md`](docs/server-v2.md#5-self-hosted-deployment) covers the
+rest, including every credential in full and the data directory to back up as a
+unit.
+
+## First transfer
+
+Both modes below assume the client from
+[Install the client](#install-the-client) and a deployment to point it at.
+`/work` in these examples is the directory you run `dud` from, which the wrapper
+mounts under that name; a native binary takes ordinary host paths instead.
+
+A dead drop. The recipient generates a key pair once; after that an upload and a
+download are one command each, and only the printed object ID has to travel out
+of band:
+
+```sh
+dud keygen --pq --out /work/alice.key -R /work/alice.recipient
+dud upload --file /work/secret.pdf --ttl 48h -R /work/alice.recipient
+dud download --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe -i /work/alice.key --out /work/secret.pdf
+```
+
+Full guide: [`docs/dead-drops-v1.md`](docs/dead-drops-v1.md).
+
+A peer transfer, once both devices point at a v2-enabled deployment:
+
+```sh
+dud init --device desktop --url https://your-dud-host.example.com
+dud peer invite laptop        # prints a pairing code and a QR code, then waits
+dud send laptop --file /work/report.pdf
+```
+
+On the other device, `dud peer accept desktop` takes the code at a visible
+prompt, and `dud receive desktop` drains everything waiting. Full guide:
+[`docs/peer-setup.md`](docs/peer-setup.md).
+
+`dud init` writes the device seed and peer graph under `~/.dud`, which the
+wrapper mounts into the container; a drop command reads no configuration file
+and leaves that directory untouched. Two device identities on one machine, or a
+second deployment, need `DUD_PROFILE` — see
+[`docs/client.md`](docs/client.md#3-running-more-than-one-deployment).
+
+Running `dud` with no command in a terminal opens an interactive menu that
+covers both modes.
 
 ## DUD Server
 
-Pull the published server image:
-
 ```sh
 docker pull ghcr.io/wojciechpolak/dud/dud-server:latest
-```
-
-Run it with a persistent data volume:
-
-```sh
 docker run --rm -p 8787:8787 \
-  -e DUD_SECRET_TOKEN=replace-me \
+  -e DUD_DROP_SECRET=replace-me \
   -v "$PWD/dud-data:/data" \
   ghcr.io/wojciechpolak/dud/dud-server:latest
 ```
 
-Container defaults:
+Container defaults are `DUD_DATA_DIR=/data`, `DUD_LISTEN_HOST=0.0.0.0`, and
+`DUD_LISTEN_PORT=8787`. The image starts `node dist/src/node-server.js` under
+`tini` as the non-root `dud` user; mount `/data` to persist uploads across
+restarts. The checked-in `docker-compose.yml` already persists it in the named
+volume `dud_data`.
 
-- `DUD_DATA_DIR=/data`
-- `DUD_LISTEN_HOST=0.0.0.0`
-- `DUD_LISTEN_PORT=8787`
+`DUD_LOG_MODE` selects verbosity (`normal`, `minimal`, `silent`) and
+`DUD_LOG_FORMAT` selects the shape (`text` or `json`). Both formats redact
+object, delivery, and rendezvous identifiers, and a v2 record names a route
+class rather than the capability, slot, or peer the request touched.
 
-The image starts `node dist/src/node-server.js` under `tini` as the non-root
-`dud` user. Mount `/data` if you want uploads to persist across container
-restarts.
+TTL, upload size, cleanup, and peer quota settings are environment variables on
+this server; the Worker compiles the same defaults in and takes no override for
+them. [`docs/server-v2.md`](docs/server-v2.md#6-limits) lists every one with its
+default.
 
-If you use Docker Compose, the checked-in `docker-compose.yml` already persists
-`/data` in the named volume `dud_data`.
-
-To reduce routine logs:
-
-- `DUD_LOG_MODE=normal`: startup banner plus access logs with client IP
-- `DUD_LOG_MODE=minimal`: startup banner plus access logs without client IP
-- `DUD_LOG_MODE=silent`: suppress startup and access logs, while still keeping
-  error logging
-
-You can build images locally with the helper script:
+Build the images locally with:
 
 ```sh
 ./scripts/docker-build.sh --component client
 ./scripts/docker-build.sh --component server
 ```
 
-## Example usage
+Credentials, feature flags, limits, administration, and health checks are in
+[`docs/server-v2.md`](docs/server-v2.md).
 
-### 1. Confirm the secure transport path
+## Verifying a release
 
-Run this before trusting the endpoint:
+Every release publishes reproducible native binaries with checksums, an SPDX
+SBOM, and a Sigstore provenance attestation, alongside signed container images
+with their own SBOM attestation. Verify what you run.
 
-```sh
-dud test
-```
-
-This command succeeds only if curl can reach the service with DoH, TLS 1.3, and
-`--ech "$DUD_ECH_MODE"` using `hard` by default.
-
-`hard` is the strict privacy setting: the TLS handshake must actually use ECH,
-or the command fails.
-
-`grease` is mainly for compatibility testing. In TLS, GREASE means sending a
-deliberately unrecognized value so middleboxes and servers do not ossify around
-one exact handshake shape. For ECH, GREASE makes the ClientHello look like a
-client that might use ECH, even when no usable ECH configuration is available.
-That helps exercise the path, but it is not a privacy guarantee: the connection
-may still fall back to a normal non-ECH handshake.
-
-Use `grease` when you want to confirm that the network path tolerates ECH-shaped
-traffic or when you are testing an environment that does not yet have working
-ECH end to end. Use `hard` when you want DUD's intended transport security
-properties.
-
-If you want to try GREASE mode instead:
+Native binaries:
 
 ```sh
-docker run --rm -it \
-  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
-  -e DUD_BASE_URL=https://dud.example.com \
-  -e DUD_ECH_MODE=grease \
-  -v "$PWD:/work" \
-  ghcr.io/wojciechpolak/dud/dud-client:latest test
+gh release download vX.Y.Z --pattern 'dud-*' --pattern 'SHA256SUMS'
+sha256sum -c SHA256SUMS
+gh attestation verify dud-linux-amd64 --repo wojciechpolak/dud
 ```
 
-### 2. Upload a file, directory, or message as the sender
+`SHA256SUMS` is a release asset like the binaries, so `curl` fetches it the same
+way and `sha256sum --ignore-missing -c SHA256SUMS` checks whichever binaries you
+downloaded. Verifying the provenance attestation is the step that needs `gh`.
 
-#### Passphrase mode
-
-Suppose the sender wants to share `secret.pdf` and keep it available for 48
-hours:
+Container images:
 
 ```sh
-dud send --file /work/secret.pdf --ttl 48h
+gh attestation verify \
+  oci://ghcr.io/wojciechpolak/dud/dud-client:X.Y.Z \
+  --repo wojciechpolak/dud
 ```
 
-To suppress the terminal QR code and print only the text summary, add `--no-qr`:
+The binaries are built twice from the same source in the release workflow and
+the build fails if the two differ, so you can rebuild any published binary and
+expect the same checksum:
 
 ```sh
-dud upload --file /work/secret.pdf --ttl 48h --no-qr
+git checkout vX.Y.Z
+npm run release:binaries
+sha256sum dist/release/dud-*
 ```
 
-The client will prompt for the passphrase through `age`. Pick a passphrase and
-share it with the recipient out of band.
-
-The upload response will look like this:
-
-```text
-Upload complete
-ID: 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe
-Expires: 2026-04-20T12:00:00.000Z
-Delete after read: no
-Receive: dud receive --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https://dud.example.com
-```
-
-If you need the raw JSON instead, run the same command with `--json`.
-
-You can also upload a one-line message directly:
-
-```sh
-dud upload -m "meet at the usual place" --ttl 24h --no-qr
-```
-
-Or stream plaintext from stdin:
-
-```sh
-printf '%s' 'streamed secret' | dud upload --json
-```
-
-If stdin is a TTY and you run `dud upload` without `--file` or `-m`, the client
-accepts typed or pasted input until you press Ctrl-D, then prompts for the `age`
-passphrase and uploads the encrypted payload.
-
-To send multiple files or a directory tree, repeat `--file`. DUD creates a local
-tar archive, encrypts it, and uploads only ciphertext:
-
-```sh
-dud send --file /work/report.pdf --file /work/photos --ttl 24h
-```
-
-The suggested receive command and QR code automatically include `--extract` for
-bundle transfers.
-
-Only two things need to be shared with the recipient:
-
-- the `id`
-- the passphrase
-
-#### Public-key mode
-
-First generate a recipient key pair. For standard age keys:
-
-```sh
-dud keygen --out /work/alice.key -R /work/alice.recipient
-```
-
-For post-quantum age keys:
-
-```sh
-dud keygen --pq --out /work/alice-pq.key -R /work/alice-pq.recipient
-```
-
-Then encrypt to the recipient's public key instead of a passphrase:
-
-```sh
-dud upload \
-  --file /work/secret.pdf \
-  --ttl 48h \
-  -r "$(cat /work/alice.recipient)"
-```
-
-Or use a recipients file:
-
-```sh
-dud upload \
-  --file /work/secret.pdf \
-  --ttl 48h \
-  -R /work/alice.recipient
-```
-
-In public-key mode, only the `id` needs to be shared with the recipient.
-
-### 3. Sync a Git repository with encrypted bundles
-
-For Git repositories, use `dud git push` and `dud git fetch`. This keeps DUD as
-a discreet encrypted blob transport while Git still handles branch history and
-merge safety.
-
-On machine A, from the repository root:
-
-```sh
-dud git push \
-  -R /work/machine-b.recipient \
-  --ttl 24h \
-  --delete-after-read
-```
-
-The upload response suggests the matching fetch command:
-
-```text
-Receive: dud git fetch --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe --url https://dud.example.com
-```
-
-On machine B, from an initialized clone or repository:
-
-```sh
-dud git fetch \
-  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
-  -i /work/machine-b.key \
-  --remote machine-a
-```
-
-Branches are fetched into remote-tracking refs such as
-`refs/remotes/machine-a/main`. Local branches are not moved automatically. To
-apply the fetched branch safely:
-
-```sh
-git merge --ff-only machine-a/main
-```
-
-For repeated bidirectional sync, use a different `--remote` name for each peer,
-for example `machine-a` on machine B and `machine-b` on machine A.
-
-### 4. Download the file as the recipient
-
-On another machine, the recipient can fetch and decrypt a passphrase-encrypted
-upload like this:
-
-```sh
-dud receive \
-  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
-  --out /work/received-secret.pdf
-```
-
-The client downloads ciphertext from the Worker, prompts for the passphrase, and
-writes the decrypted file to `/work/received-secret.pdf`. It accepts the file ID
-with or without dashes.
-
-You do not run `age` separately on the host after download. The Docker client
-container performs `age --decrypt` internally and writes the plaintext output to
-the path given with `--out`.
-
-To stream the decrypted plaintext to stdout instead, use `--stdout` and redirect
-or pipe it as needed:
-
-```sh
-dud download \
-  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
-  --stdout > /work/received-secret.pdf
-```
-
-For bundled transfers, add `--extract`. If you omit `--out-dir`, DUD extracts
-into `./dud-<id>`:
-
-```sh
-dud receive \
-  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
-  --extract \
-  --out-dir /work/incoming
-```
-
-For public-key mode, pass the recipient identity file:
-
-```sh
-dud download \
-  --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe \
-  -i /work/alice.key \
-  --out /work/received-secret.pdf
-```
-
-To print the recipient form of an existing identity to stdout, use:
-
-```sh
-dud keygen /work/alice.key
-```
-
-### 5. Optional one-time retrieval
-
-If the sender wants the file to disappear after the first successful download,
-add `--delete-after-read` during upload:
-
-```sh
-dud upload \
-  --file /work/secret.pdf \
-  --ttl 24h \
-  --delete-after-read
-```
-
-After one successful retrieval, the same `id` will return `410 Gone`.
-
-### 6. Flush expired objects manually
-
-If you configured the Worker `DUD_SECRET_TOKEN` secret, you can force a cleanup
-pass whenever you want:
-
-```sh
-dud flush
-```
-
-This deletes expired and already-consumed objects from R2 immediately and
-returns a JSON response with `deletedCount`.
-
-## API
-
-### `GET /v1/test`
-
-Returns readiness JSON:
-
-```json
-{
-  "ok": true,
-  "service": "dud",
-  "host": "dud.example.com",
-  "version": "1.4.0"
-}
-```
-
-### `POST /v1/files`
-
-Uploads an encrypted payload stream.
-
-Request headers:
-
-- `x-dud-secret-token`: must match the Worker `DUD_SECRET_TOKEN` secret
-- `x-dud-ttl`: TTL such as `15m`, `24h`, `7d`. Default `24h`.
-- `x-dud-delete-after-read`: `true` or `false`. Default `false`.
-- `content-length`: optional but recommended.
-
-Response:
-
-```json
-{
-  "id": "3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe",
-  "expiresAt": "2026-04-19T12:00:00.000Z",
-  "deleteAfterRead": false
-}
-```
-
-### `GET /v1/files/:id`
-
-Streams ciphertext back when the file is still available.
-
-The download endpoint accepts the file ID either as dashed groups of four
-characters or as the original raw 32-character lowercase hex string.
-
-- `404`: unknown ID
-- `410`: expired or already consumed
-
-### `POST /v1/admin/flush`
-
-Deletes expired and already-consumed objects from R2 immediately.
-
-Request headers:
-
-- `x-dud-secret-token`: must match the Worker `DUD_SECRET_TOKEN` secret
-
-Response:
-
-```json
-{
-  "ok": true,
-  "deletedCount": 3
-}
-```
+Which upstream sources and base images a release was built from is recorded in
+[`docs/supported-versions.md`](docs/supported-versions.md) and verified offline
+by `npm run check:pins`.
+
+## Documentation
+
+[`docs/`](docs/README.md) is the index. The main entries:
+
+- [`docs/peer-setup.md`](docs/peer-setup.md) — pairing two devices, sending, and
+  receiving
+- [`docs/dead-drops-v1.md`](docs/dead-drops-v1.md) — the drop commands and the
+  `/v1` HTTP API
+- [`docs/client.md`](docs/client.md) — client environment, configuration layers,
+  profiles, and wrappers
+- [`docs/server-v2.md`](docs/server-v2.md) — deployment, credentials, limits,
+  administration, and logging
+- [`docs/migration-v1-v2.md`](docs/migration-v1-v2.md) — moving a deployment
+  from v1-only to dual-stack to v2-only
+- [`docs/recovery-v2.md`](docs/recovery-v2.md) — rollback, revocation, key
+  rotation, and failure recovery
+- [`docs/git-sync-v2.md`](docs/git-sync-v2.md) — peer Git synchronization
+- [`docs/protocol-v2.md`](docs/protocol-v2.md) — wire format and security
+  properties
+- [`docs/threat-model-v2.md`](docs/threat-model-v2.md) — adversaries and
+  boundaries
+- [`docs/supported-versions.md`](docs/supported-versions.md) — build toolchain,
+  pinned sources, and the update policy
+- [`docs/development.md`](docs/development.md) — repository layout, commands,
+  and local testing
 
 ## Notes
 
-- v1 is designed for files up to 100 MB, which keeps the transfer path
+- Both modes carry files up to 100 MB by default, which keeps the transfer path
   compatible with common Cloudflare request body limits.
-- Public-key mode is the preferred async sharing mode because it avoids relying
-  on a human-memorable passphrase for file encryption.
-- The Worker is not the trust boundary for ECH. The client verifies secure
+- Public-key mode is the preferred way to make a dead drop, because it avoids
+  relying on a human-memorable passphrase for file encryption. A peer transfer
+  always encrypts to a key.
+- The server is not the trust boundary for ECH. The client verifies secure
   transport before upload or download.
 - Cleanup is cron-free. Expired and consumed objects are removed during normal
-  traffic, and `flush` is available for an explicit cleanup pass.
+  traffic, and `dud flush` is available for an explicit cleanup pass.
+- Every peer Git push is a complete checkpoint; there are no incremental bundle
+  chains. A checkpoint the receiving client cannot apply is refused back to the
+  peer instead of blocking the transfer queue behind it.
 
 ## License
 

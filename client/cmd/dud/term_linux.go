@@ -4,4 +4,7 @@ package main
 
 import "syscall"
 
-const ioctlReadTermios = uintptr(syscall.TCGETS)
+const (
+	ioctlReadTermios  = uintptr(syscall.TCGETS)
+	ioctlWriteTermios = uintptr(syscall.TCSETS)
+)

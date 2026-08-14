@@ -5,6 +5,8 @@ declare module 'node:fs' {
 
 declare module 'node:fs/promises' {
   export const mkdir: (...args: any[]) => Promise<any>;
+  export const open: (...args: any[]) => Promise<any>;
+  export const opendir: (...args: any[]) => Promise<AsyncIterable<any>>;
   export const readdir: (...args: any[]) => Promise<any[]>;
   export const readFile: (...args: any[]) => Promise<any>;
   export const rename: (...args: any[]) => Promise<any>;
@@ -30,6 +32,19 @@ declare module 'node:stream' {
   export class Readable {
     static fromWeb(stream: ReadableStream<Uint8Array>): any;
     static toWeb(stream: any): ReadableStream<Uint8Array>;
+  }
+}
+
+declare module 'node:sqlite' {
+  export class DatabaseSync {
+    constructor(path: string);
+    exec(sql: string): void;
+    prepare(sql: string): {
+      get(...parameters: unknown[]): unknown;
+      all(...parameters: unknown[]): unknown;
+      run(...parameters: unknown[]): unknown;
+    };
+    close(): void;
   }
 }
 

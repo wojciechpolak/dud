@@ -3,7 +3,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"os/exec"
 	"regexp"
@@ -11,11 +10,12 @@ import (
 )
 
 type gitFetchOptions struct {
-	id       string
-	baseURL  string
-	identity string
-	remote   string
-	dohURL   string
+	id         string
+	baseURL    string
+	identity   string
+	remote     string
+	dohURL     string
+	outputJSON bool
 }
 
 func parseGitFetchOptions(args []string, defaultBaseURL, defaultDOHURL string) (gitFetchOptions, error) {
@@ -57,6 +57,11 @@ func parseGitFetchOptions(args []string, defaultBaseURL, defaultDOHURL string) (
 			}
 			opts.dohURL = args[1]
 			args = args[2:]
+		case "--json":
+			if err := markJSONOption(&opts.outputJSON); err != nil {
+				return opts, err
+			}
+			args = args[1:]
 		default:
 			return opts, fatalError("Unknown git fetch option: " + args[0])
 		}
@@ -80,9 +85,17 @@ func (a *app) cmdGit(args []string) error {
 	rest := args[1:]
 	switch subcommand {
 	case "push", "send":
+		if len(rest) != 0 && !strings.HasPrefix(rest[0], "-") {
+			return a.cmdV2GitPush(rest)
+		}
 		return a.cmdGitPush(rest)
 	case "fetch", "receive":
+		if len(rest) != 0 && !strings.HasPrefix(rest[0], "-") {
+			return a.cmdV2GitFetch(rest)
+		}
 		return a.cmdGitFetch(rest)
+	case "status":
+		return a.cmdV2GitStatus(rest)
 	case "help", "-h", "--help":
 		a.usage()
 		return nil
@@ -198,23 +211,38 @@ func (a *app) cmdGitFetch(args []string) error {
 		return err
 	}
 
+	// Under --json the report owns stdout, so git's own chatter moves to
+	// stderr rather than being interleaved into the document.
+	gitOut := a.out
+	if opts.outputJSON {
+		gitOut = a.errOut
+	}
 	cmd := exec.Command(a.cfg.GitBin, "bundle", "verify", bundleFile)
-	cmd.Stdout = a.out
+	cmd.Stdout = gitOut
 	cmd.Stderr = a.errOut
 	if err := cmd.Run(); err != nil {
 		return err
 	}
 	hintBranch := a.gitBundleHintBranch(bundleFile)
 	cmd = exec.Command(a.cfg.GitBin, "fetch", bundleFile, "+refs/heads/*:refs/remotes/"+opts.remote+"/*", "refs/tags/*:refs/tags/*")
-	cmd.Stdout = a.out
+	cmd.Stdout = gitOut
 	cmd.Stderr = a.errOut
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Fetched Git bundle into refs/remotes/%s/*\n", opts.remote)
-	if hintBranch != "" {
-		fmt.Fprintln(a.out, "To apply safely, run:")
-		fmt.Fprintf(a.out, "  git merge --ff-only %s/%s\n", opts.remote, hintBranch)
+	if opts.outputJSON {
+		return writeJSON(a.out, map[string]any{
+			"ok":          true,
+			"id":          opts.id,
+			"remote":      opts.remote,
+			"hint_branch": hintBranch,
+		})
 	}
-	return nil
+	report := &textReport{}
+	fetched := report.section("")
+	fetched.add("Fetched into", "refs/remotes/"+opts.remote+"/*")
+	if hintBranch != "" {
+		fetched.addf("Apply with", "git merge --ff-only %s/%s", opts.remote, hintBranch)
+	}
+	return report.write(a.out)
 }

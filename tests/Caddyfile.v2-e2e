@@ -1,0 +1,13 @@
+{
+	admin off
+}
+
+{$DUD_HOSTNAME:dud.local.test} {
+	tls internal
+	reverse_proxy {$DUD_UPSTREAM:dud-server:8787}
+}
+
+{$DUD_DOH_HOSTNAME:doh.local.test} {
+	tls internal
+	reverse_proxy {$DUD_DOH_UPSTREAM:dud-doh:8053}
+}

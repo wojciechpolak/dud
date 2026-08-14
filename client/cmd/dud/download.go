@@ -3,8 +3,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 )
@@ -18,6 +21,7 @@ type downloadOptions struct {
 	identity     string
 	extract      bool
 	dohURL       string
+	outputJSON   bool
 }
 
 func parseDownloadOptions(args []string, defaultBaseURL, defaultDOHURL string) (downloadOptions, error) {
@@ -70,6 +74,11 @@ func parseDownloadOptions(args []string, defaultBaseURL, defaultDOHURL string) (
 			}
 			opts.dohURL = args[1]
 			args = args[2:]
+		case "--json":
+			if err := markJSONOption(&opts.outputJSON); err != nil {
+				return opts, err
+			}
+			args = args[1:]
 		default:
 			return opts, fatalError("Unknown download option: " + args[0])
 		}
@@ -90,6 +99,11 @@ func validateDownloadOptions(opts downloadOptions) error {
 	}
 	if opts.out != "" && opts.outputStdout {
 		return fatalError("download accepts only one output target: --out or --stdout")
+	}
+	// The payload owns stdout under --stdout, so a JSON report would interleave
+	// with it. Refusing is clearer than quietly moving the report to stderr.
+	if opts.outputJSON && opts.outputStdout {
+		return fatalError("download does not support --json with --stdout")
 	}
 	if !opts.extract && opts.outDir != "" {
 		return fatalError("download accepts --out-dir only with --extract")
@@ -126,7 +140,7 @@ func (a *app) cmdDownload(args []string) error {
 	}
 	defer removeTempFile(plainFile)
 
-	if err := a.runSecureCurl("-o", encryptedFile, opts.baseURL+"/v1/files/"+opts.id); err != nil {
+	if err := a.getDownload(encryptedFile, opts); err != nil {
 		return err
 	}
 	if opts.identity != "" {
@@ -159,6 +173,9 @@ func (a *app) cmdDownload(args []string) error {
 		if err := cmd.Run(); err != nil {
 			return err
 		}
+		if opts.outputJSON {
+			return writeJSON(a.out, a.downloadReport(opts, opts.outDir, plainFile))
+		}
 		fmt.Fprintf(a.out, "Extracted bundle to %s\n", opts.outDir)
 		return nil
 	}
@@ -172,5 +189,54 @@ func (a *app) cmdDownload(args []string) error {
 		_, err = io.Copy(a.out, f)
 		return err
 	}
-	return copyFile(opts.out, plainFile)
+	if err := copyFile(opts.out, plainFile); err != nil {
+		return err
+	}
+	if opts.outputJSON {
+		return writeJSON(a.out, a.downloadReport(opts, opts.out, plainFile))
+	}
+	return nil
+}
+
+// downloadReport describes where the plaintext landed. The byte count comes
+// from the decrypted temp file rather than the transfer, so it measures what
+// was written rather than what was received.
+func (a *app) downloadReport(opts downloadOptions, output, plainFile string) map[string]any {
+	report := map[string]any{
+		"ok":        true,
+		"id":        opts.id,
+		"output":    output,
+		"extracted": opts.extract,
+	}
+	if info, err := os.Stat(plainFile); err == nil {
+		report["bytes"] = info.Size()
+	}
+	return report
+}
+
+// getDownload streams the ciphertext into its temp file. The body is copied
+// through to EOF rather than abandoned once the file is written, because the
+// server runs its post-read cleanup — the tombstone behind
+// `--delete-after-read` — only after it has finished sending the object.
+func (a *app) getDownload(encryptedFile string, opts downloadOptions) error {
+	response, err := a.dropRequest(
+		context.Background(),
+		opts.baseURL+"/v1/files/"+url.PathEscape(opts.id),
+		v2Request{Method: http.MethodGet, StreamResponse: true},
+	)
+	if err != nil {
+		return err
+	}
+	defer response.Stream.Close()
+
+	file, err := os.Create(encryptedFile)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(file, response.Stream)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }

@@ -15,13 +15,13 @@ import (
 
 func loadConfig() config {
 	return config{
-		BaseURL:      envDefault("DUD_BASE_URL", "https://dud.example.com"),
-		DOHURL:       envDefault("DUD_DOH_URL", "https://cloudflare-dns.com/dns-query"),
-		ECHMode:      envDefault("DUD_ECH_MODE", "hard"),
-		SecretToken:  os.Getenv("DUD_SECRET_TOKEN"),
+		BaseURL:      envDefault("DUD_BASE_URL", v2DefaultBaseURL),
+		DOHURL:       envDefault("DUD_DOH_URL", v2DefaultDOHURL),
+		ECHMode:      envDefault("DUD_ECH_MODE", v2DefaultECHMode),
+		SecretToken:  os.Getenv("DUD_DROP_SECRET"),
+		V2Secret:     os.Getenv("DUD_PEER_SECRET"),
 		CABundle:     os.Getenv("DUD_CA_BUNDLE"),
 		ConnectTo:    os.Getenv("DUD_CONNECT_TO"),
-		CurlBin:      envDefault("DUD_CURL_BIN", "curl"),
 		AgeBin:       envDefault("DUD_AGE_BIN", "age"),
 		AgeKeygenBin: envDefault("DUD_AGE_KEYGEN_BIN", "age-keygen"),
 		GitBin:       envDefault("DUD_GIT_BIN", "git"),
@@ -46,10 +46,10 @@ func needValue(args []string, name string) error {
 
 func (a *app) validateECHMode() error {
 	switch a.cfg.ECHMode {
-	case "hard", "grease":
+	case "hard", "off":
 		return nil
 	default:
-		return fatalError("DUD_ECH_MODE must be either 'hard' or 'grease'")
+		return fatalError("DUD_ECH_MODE must be either 'hard' or 'off'")
 	}
 }
 
@@ -75,36 +75,6 @@ func (a *app) runAge(args ...string) error {
 		stdin = tty
 	}
 	return a.runCommand(a.cfg.AgeBin, args, stdin, a.out, a.errOut)
-}
-
-func (a *app) runSecureCurl(args ...string) error {
-	return a.runSecureCurlWithStderr(a.errOut, args...)
-}
-
-func (a *app) runSecureCurlWithStderr(stderr io.Writer, args ...string) error {
-	if err := a.validateECHMode(); err != nil {
-		return err
-	}
-
-	curlArgs := []string{
-		"--silent",
-		"--show-error",
-		"--fail",
-		"--proto", "=https",
-		"--tlsv1.3",
-		"--tls-max", "1.3",
-		"--ech", a.cfg.ECHMode,
-		"--doh-url", a.cfg.DOHURL,
-	}
-	if a.cfg.CABundle != "" {
-		curlArgs = append([]string{"--cacert", a.cfg.CABundle}, curlArgs...)
-	}
-	if a.cfg.ConnectTo != "" {
-		curlArgs = append([]string{"--connect-to", a.cfg.ConnectTo}, curlArgs...)
-	}
-	curlArgs = append(curlArgs, args...)
-
-	return a.runCommand(a.cfg.CurlBin, curlArgs, nil, a.out, stderr)
 }
 
 // Every temp file is registered so the signal handler can remove

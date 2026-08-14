@@ -52,7 +52,7 @@ function sidecarPath(rootDir: string, key: string): string {
 }
 
 async function ensureParentDir(filePath: string): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
+  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
 }
 
 async function readSidecar(

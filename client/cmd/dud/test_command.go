@@ -3,14 +3,18 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
 	"fmt"
-	"os"
-	"regexp"
-	"strings"
+	"net/http"
 )
+
+// dropTestResponseLimit bounds the health-check body the route returns.
+const dropTestResponseLimit = 64 * 1024
 
 func (a *app) cmdTest(args []string) error {
 	targetURL := a.cfg.BaseURL + "/v1/test"
+	jsonOutput := false
 	for len(args) > 0 {
 		switch args[0] {
 		case "--url":
@@ -25,106 +29,113 @@ func (a *app) cmdTest(args []string) error {
 			}
 			a.cfg.DOHURL = args[1]
 			args = args[2:]
+		case "--json":
+			if err := markJSONOption(&jsonOutput); err != nil {
+				return err
+			}
+			args = args[1:]
 		default:
 			return fatalError("Unknown test option: " + args[0])
 		}
 	}
 
-	responseFile, err := tempFile("dud-test-response-")
+	response, err := a.dropRequest(context.Background(), targetURL, v2Request{
+		Method:           http.MethodGet,
+		MaxResponseBytes: dropTestResponseLimit,
+	})
 	if err != nil {
 		return err
 	}
-	defer removeTempFile(responseFile)
-	traceFile, err := tempFile("dud-test-trace-")
-	if err != nil {
+	// Hard mode asserts the accepted handshake rather than trusting a
+	// rejection to have failed the connection: a server that silently ignores
+	// ECH would otherwise be reported as protected.
+	if a.cfg.ECHMode == "hard" && (response.TLS == nil || !response.TLS.ECHAccepted) {
+		return fatalError("ECH hard mode requires an accepted ECH handshake, and this connection did not complete one")
+	}
+	if jsonOutput {
+		return writeJSON(a.out, a.testReport(targetURL, response))
+	}
+	if err := a.printTestDetails(targetURL, response).write(a.out); err != nil {
 		return err
 	}
-	defer removeTempFile(traceFile)
-
-	trace, err := os.Create(traceFile)
-	if err != nil {
-		return err
-	}
-	curlErr := a.runSecureCurlWithStderr(trace, "--verbose", "--output", responseFile, targetURL)
-	trace.Close()
-	if curlErr != nil {
-		traceData, _ := os.ReadFile(traceFile)
-		fmt.Fprint(a.errOut, string(traceData))
-		return curlErr
-	}
-
-	traceData, err := os.ReadFile(traceFile)
-	if err == nil {
-		a.printTestDetails(string(traceData))
-	}
-	fmt.Fprintln(a.out, "Response:")
-	data, err := os.ReadFile(responseFile)
-	if err != nil {
-		return err
-	}
-	a.out.Write(data)
+	fmt.Fprintln(a.out, "\nResponse:")
+	a.out.Write(response.Body)
 	fmt.Fprintln(a.out)
 	return nil
 }
 
-func (a *app) printTestDetails(trace string) {
-	lineValue := func(prefix string) string {
-		for _, line := range strings.Split(trace, "\n") {
-			if strings.HasPrefix(line, prefix) {
-				return strings.TrimPrefix(line, prefix)
-			}
-		}
-		return ""
+// testReport describes the transport the health check actually negotiated.
+// It reports what the connection did, not what was configured, so a server
+// that quietly ignored ECH is visible rather than assumed.
+func (a *app) testReport(targetURL string, response *v2Response) map[string]any {
+	report := map[string]any{
+		"ok":           true,
+		"url":          targetURL,
+		"doh_url":      a.cfg.DOHURL,
+		"ech_mode":     a.cfg.ECHMode,
+		"status":       response.StatusCode,
+		"response":     string(response.Body),
+		"ech":          v2TestECHState(response.TLS),
+		"tls_version":  "",
+		"cipher_suite": "",
+		"alpn":         "",
+		"inner_sni":    "",
+		"outer_sni":    "",
 	}
+	if connection := response.TLS; connection != nil {
+		report["tls_version"] = tlsVersionName(connection.Version)
+		report["cipher_suite"] = tls.CipherSuiteName(connection.CipherSuite)
+		report["alpn"] = connection.NegotiatedProtocol
+		report["inner_sni"] = connection.ServerName
+		report["outer_sni"] = connection.ECHPublicName
+	}
+	return report
+}
 
-	tlsSummary := lineValue("* SSL connection using ")
-	alpnSummary := lineValue("* ALPN: server accepted ")
-	echStatus, echInner, echOuter := parseECHTrace(trace)
-
-	fmt.Fprintln(a.out, "Transport:")
-	fmt.Fprintf(a.out, "  doh resolver: %s\n", a.cfg.DOHURL)
-	fmt.Fprintf(a.out, "  ech mode: %s\n", a.cfg.ECHMode)
-	if tlsSummary != "" {
-		fmt.Fprintf(a.out, "  tls: %s\n", tlsSummary)
-	}
-	if alpnSummary != "" {
-		fmt.Fprintf(a.out, "  alpn: %s\n", alpnSummary)
-	}
-	if echStatus != "" {
-		fmt.Fprintf(a.out, "  ech: %s\n", echStatus)
-	} else {
-		fmt.Fprintln(a.out, "  ech: unavailable")
-	}
-	if echInner != "" {
-		fmt.Fprintf(a.out, "  inner sni: %s\n", echInner)
-	}
-	if echOuter != "" {
-		fmt.Fprintf(a.out, "  outer sni: %s\n", echOuter)
+func v2TestECHState(connection *v2ConnectionInfo) string {
+	switch {
+	case connection == nil:
+		return "unavailable"
+	case connection.ECHAccepted:
+		return "succeeded"
+	default:
+		return "not attempted"
 	}
 }
 
-var (
-	echStatusRe = regexp.MustCompile(`^\* ECH: result: status is ([^,]*)`)
-	echFullRe   = regexp.MustCompile(`^\* ECH: result: status is [^,]*, inner is ([^,]*), outer is (.*)$`)
-)
-
-// parseECHTrace mirrors the shell version's three independent sed
-// passes: the status must be reported even when curl prints a
-// status-only line (grease mode, ECH failures) without the
-// "inner is ..., outer is ..." part.
-func parseECHTrace(trace string) (string, string, string) {
-	status, inner, outer := "", "", ""
-	for _, line := range strings.Split(trace, "\n") {
-		if status == "" {
-			if m := echStatusRe.FindStringSubmatch(line); m != nil {
-				status = m[1]
-			}
-		}
-		if inner == "" && outer == "" {
-			if m := echFullRe.FindStringSubmatch(line); m != nil {
-				inner, outer = m[1], m[2]
-			}
-		}
+func (a *app) printTestDetails(targetURL string, response *v2Response) *textReport {
+	out := &textReport{}
+	transport := out.section("Transport")
+	transport.add("url", targetURL)
+	transport.add("doh resolver", a.cfg.DOHURL)
+	transport.add("ech mode", a.cfg.ECHMode)
+	transport.add("ech", v2TestECHState(response.TLS))
+	connection := response.TLS
+	if connection == nil {
+		return out
 	}
-	return status, inner, outer
+	transport.addf("tls", "%s / %s", tlsVersionName(connection.Version), tls.CipherSuiteName(connection.CipherSuite))
+	if connection.NegotiatedProtocol != "" {
+		transport.add("alpn", connection.NegotiatedProtocol)
+	}
+	if connection.ServerName != "" {
+		transport.add("inner sni", connection.ServerName)
+	}
+	if connection.ECHPublicName != "" {
+		transport.add("outer sni", connection.ECHPublicName)
+	}
+	return out
+}
+
+// tlsVersionName keeps the "TLSv1.3" spelling the summary has always used;
+// tls.VersionName writes it as "TLS 1.3".
+func tlsVersionName(version uint16) string {
+	switch version {
+	case tls.VersionTLS13:
+		return "TLSv1.3"
+	case tls.VersionTLS12:
+		return "TLSv1.2"
+	default:
+		return tls.VersionName(version)
+	}
 }

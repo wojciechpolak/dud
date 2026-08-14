@@ -1,10 +1,20 @@
 name = "dud"
 main = "src/index.ts"
-compatibility_date = "2026-04-19"
+compatibility_date = "2026-05-03"
 workers_dev = false
 
 [vars]
-APP_VERSION = "1.4.0"
+APP_VERSION = "2.0.0-rc.1"
+DUD_DROP_ENABLED = "true"
+DUD_PEER_ENABLED = "false"
+
+# To serve peer transfers, change DUD_PEER_ENABLED to "true", then set the peer
+# secrets. DUD_PEER_DEPLOYMENT_KEY and the optional DUD_PEER_ADMIN_SECRET are
+# independent 32-byte base64url values; DUD_PEER_SECRET authorizes creating a
+# pairing invitation and is required unless DUD_PEER_OPEN_ENROLLMENT = "true".
+#   npx wrangler secret put DUD_PEER_DEPLOYMENT_KEY
+#   npx wrangler secret put DUD_PEER_SECRET
+#   npx wrangler secret put DUD_PEER_ADMIN_SECRET
 
 [[routes]]
 pattern = "dud.example.com"
@@ -13,3 +23,14 @@ custom_domain = true
 [[r2_buckets]]
 binding = "FILES"
 bucket_name = "dud-files"
+
+# Peer metadata. Create the database with `npx wrangler d1 create dud-v2`,
+# replace the placeholder ID below, and initialize the schema before setting
+# DUD_PEER_ENABLED to "true":
+#   npx wrangler d1 migrations apply dud-v2 --remote
+# A v1-only deployment, one that serves dead drops only, can delete this block.
+[[d1_databases]]
+binding = "DB"
+database_name = "dud-v2"
+database_id = "replace-with-d1-database-id"
+migrations_dir = "migrations/d1"

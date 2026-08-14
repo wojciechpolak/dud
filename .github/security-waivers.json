@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "waivers": [
+    {
+      "scanner": "govulncheck",
+      "id": "govulncheck:GO-2026-5932",
+      "reason": "The client imports chacha20poly1305 from golang.org/x/crypto; go mod why confirms it does not import the unmaintained openpgp package.",
+      "expires": "2026-11-14T00:00:00Z"
+    },
+    {
+      "scanner": "trivy",
+      "id": "trivy:DS-0026",
+      "reason": "The client image runs one command per container; process exit is its health signal, so a recurring Docker health check cannot represent readiness.",
+      "expires": "2026-11-14T00:00:00Z"
+    },
+    {
+      "scanner": "trivy",
+      "id": "trivy:GO-2026-5932",
+      "reason": "The client and protocol-vector modules import chacha20poly1305 from golang.org/x/crypto; go mod why confirms neither imports the unmaintained openpgp package.",
+      "expires": "2026-11-14T00:00:00Z"
+    }
+  ]
+}

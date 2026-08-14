@@ -1,0 +1,49 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: client/go.mod
+      - run: npm ci
+      - run: npm audit --json > "$RUNNER_TEMP/npm-audit.json" || true
+      - run:
+          node scripts/check-security-waivers.mjs npm
+          "$RUNNER_TEMP/npm-audit.json"
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      - run:
+          cd client && govulncheck -json ./... > "$RUNNER_TEMP/govulncheck.json"
+      - run:
+          node scripts/check-security-waivers.mjs govulncheck
+          "$RUNNER_TEMP/govulncheck.json"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          format: json
+          output: ${{ runner.temp }}/trivy.json
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          scanners: vuln,secret,misconfig
+          exit-code: '0'
+      - run:
+          node scripts/check-security-waivers.mjs trivy
+          "$RUNNER_TEMP/trivy.json"
+      - run: npm run check

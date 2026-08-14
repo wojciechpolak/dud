@@ -1,0 +1,275 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+
+jobs:
+  # Nothing is published unless this job passes. It is the single mandatory
+  # publication gate: formatting, lint, unit, race, pin, documentation,
+  # vulnerability, dependency, secret, and container checks all run here, and
+  # every waiver covering a finding must still be unexpired.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: '.node-version'
+          cache: npm
+
+      # Images are tagged from the git tag, while the client binary inside them
+      # carries the version read from package.json. When the two disagree, the
+      # registry publishes an image whose `dud --version` contradicts the tag it
+      # was published under. They are one name and must be spelled once.
+      - name: Tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "v$package_version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json $package_version" >&2
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: client/go.mod
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format, lint, pins, docs, unit, and race checks
+        run: npm run check
+
+      - name: Dependency vulnerabilities (npm)
+        run: |
+          npm audit --json > "$RUNNER_TEMP/npm-audit.json" || true
+          node scripts/check-security-waivers.mjs npm "$RUNNER_TEMP/npm-audit.json"
+
+      - name: Dependency vulnerabilities (Go)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          cd client && govulncheck -json ./... > "$RUNNER_TEMP/govulncheck.json"
+          node scripts/check-security-waivers.mjs govulncheck "$RUNNER_TEMP/govulncheck.json"
+
+      - name: Filesystem, secret, and misconfiguration scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          format: json
+          output: ${{ runner.temp }}/trivy.json
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          scanners: vuln,secret,misconfig
+          exit-code: '0'
+
+      - name: Enforce scanner waiver expiry
+        run:
+          node scripts/check-security-waivers.mjs trivy
+          "$RUNNER_TEMP/trivy.json"
+
+      - name: End-to-end v2 integration
+        run: npm run test:e2e:v2
+
+  # Native binaries: reproducible, checksummed, provenance-attested, with an
+  # SBOM, uploaded to the release the tag created.
+  binaries:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: '.node-version'
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: client/go.mod
+          cache-dependency-path: client/go.mod
+
+      # Builds every platform twice and fails if the two builds differ, so the
+      # checksums below describe bytes anyone can reproduce from the same source.
+      - name: Build reproducible native binaries
+        run: npm run release:binaries
+
+      - name: Generate binary SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dist/release
+          artifact-name: dud-binaries.spdx.json
+          output-file: dist/release/dud-binaries.spdx.json
+
+      - name: Attest binary provenance
+        uses: actions/attest-build-provenance@8beda2b7ed98355c0e97c0a63bec38ae472e66c4 # v4
+        with:
+          subject-path: dist/release/dud-*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dud-release-binaries
+          path: dist/release
+
+      # The upload below needs a release to attach to, and a tag push alone does
+      # not create one. A version with a pre-release identifier is a candidate
+      # for the release it names, not the release itself, so it is marked as
+      # such and never presented as the latest version of DUD. A release that
+      # already exists keeps whatever flags it was given.
+      - name: Ensure the release exists
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease=--prerelease ;;
+            *) prerelease= ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            ${prerelease}
+
+      - name: Attach binaries, checksums, and SBOM to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/release/dud-* \
+            dist/release/SHA256SUMS \
+            --clobber
+
+  images:
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: client
+            image_name: ${{ github.repository }}/dud-client
+            context: ./client
+            file: ./client/Dockerfile
+          - component: server
+            image_name: ${{ github.repository }}/dud-server
+            context: .
+            file: ./server/Dockerfile
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0 # Fetch all history for all branches
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: '.node-version'
+          cache: npm
+
+      - name: Read package version
+        id: package-version
+        run:
+          echo "version=$(node -p "require('./package.json').version")" >>
+          "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      # Set up BuildKit Docker container builder to be able to build
+      # multi-platform images and export cache
+      # https://github.com/docker/setup-buildx-action
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      # Login against a Docker registry except on PR
+      # https://github.com/docker/login-action
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ matrix.image_name }}
+          # `latest` names the newest full release. A tag carrying a
+          # pre-release identifier (`v2.0.0-rc.1`) publishes its exact version
+          # and nothing else, so pulling `latest` never lands on a release
+          # candidate; the `{{major}}.{{minor}}` pattern is skipped for those
+          # versions by the action itself.
+          tags: |
+            type=raw,value=latest,priority=1000,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) }}
+            type=semver,pattern={{version}},priority=950
+            type=semver,pattern={{major}}.{{minor}},priority=900
+
+      # Build and push Docker image with Buildx (don't push on PR)
+      # https://github.com/docker/build-push-action
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args:
+            ${{ matrix.component == 'client' && format('DUD_VERSION={0}',
+            steps.package-version.outputs.version) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest published Docker image
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.image_name }}
+          subject-digest: ${{ steps.build-and-push.outputs.digest }}
+
+      - name: Publish image SBOM attestation
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        env:
+          IMAGE_REF:
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}@${{
+            steps.build-and-push.outputs.digest }}
+        with:
+          image: ${{ env.IMAGE_REF }}
+          artifact-name: ${{ matrix.component }}-image.spdx.json
+          output-file: ${{ matrix.component }}-image.spdx.json

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,12 +43,25 @@ func TestValidateGitFetchOptionsRequiresID(t *testing.T) {
 	}
 }
 
+func TestParseGitFetchOptionsCoversEveryFlagAndInvalidValue(t *testing.T) {
+	opts, err := parseGitFetchOptions([]string{"--id", "abc", "--identity", "key", "--remote", "origin", "--url", "https://alt.example.com", "--doh-url", "https://dns.example.com/dns-query", "--json"}, "base", "doh")
+	if err != nil || opts.id != "abc" || opts.identity != "key" || opts.remote != "origin" || !opts.outputJSON {
+		t.Fatalf("options = %#v, %v", opts, err)
+	}
+	for _, args := range [][]string{{"--id"}, {"--identity"}, {"--remote"}, {"--url"}, {"--doh-url"}, {"--json", "--json"}, {"--wat"}} {
+		if _, err := parseGitFetchOptions(args, "base", "doh"); err == nil {
+			t.Fatalf("options accepted: %v", args)
+		}
+	}
+	if err := validateGitFetchOptions(gitFetchOptions{id: "abc", remote: "bad/name"}); err == nil {
+		t.Fatal("invalid remote accepted")
+	}
+}
+
 func TestCmdGitFetchForceUpdatesRemoteTrackingRefs(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TMPDIR", dir)
 	gitLog := filepath.Join(dir, "git.log")
 	gitMock := filepath.Join(dir, "git-mock.sh")
-	curlMock := filepath.Join(dir, "curl-mock.sh")
 	ageMock := filepath.Join(dir, "age-mock.sh")
 
 	if err := os.WriteFile(gitMock, []byte(`#!/bin/sh
@@ -72,19 +84,6 @@ exit 1
 `), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(curlMock, []byte(`#!/bin/sh
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-o" ]; then
-    output="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-printf bundle > "$output"
-`), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(ageMock, []byte(`#!/bin/sh
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
@@ -100,12 +99,12 @@ cp "$input" "$output"
 		t.Fatal(err)
 	}
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	a := newApp(strings.NewReader(""), &stdout, &stderr)
+	a, transport, stdout, stderr := newDropTestApp(t, "")
 	a.cfg.GitBin = gitMock
-	a.cfg.CurlBin = curlMock
 	a.cfg.AgeBin = ageMock
+	transport.respond = func(recordedDropRequest) (*v2Response, error) {
+		return &v2Response{StatusCode: 200, Body: []byte("bundle")}, nil
+	}
 
 	if err := a.cmdGitFetch([]string{"--id", "abc", "--remote", "peer"}); err != nil {
 		t.Fatalf("cmdGitFetch returned error: %v\nstderr: %s", err, stderr.String())

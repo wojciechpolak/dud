@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for public releases.
 
+## [Unreleased]
+
+### Added
+
+- Add peer transfers: pair devices, address them by local alias, and securely
+  send, receive, and sync files while keeping dead drops available.
+- Add peer Git synchronization with complete checkpoints, safe validation,
+  status reporting, and recovery controls.
+- Add deployment and recovery guidance, compatibility checks, diagnostics, and
+  reproducible release artifacts.
+
+### Changed
+
+- **Breaking:** rename `DUD_SECRET_TOKEN` to `DUD_DROP_SECRET`, and name every
+  environment variable after the mode it configures — `DUD_DROP_*` for dead
+  drops, `DUD_PEER_*` for peers. Rename it wherever it is configured: a
+  deployment left on the old name answers `503` on upload and flush.
+- **Breaking:** drop the `curl` subprocess. The client carries its own transport
+  in Go — DoH, exactly TLS 1.3, and ECH — so the image ships no `curl`,
+  `DUD_CURL_BIN` and `DUD_CONNECT_TO` are inert, and `DUD_ECH_MODE` takes `hard`
+  or `off` in place of `hard` or `grease`.
+- Unify peer and dead drop transfers on the built-in hardened transport, with
+  consistent protections and output, including JSON results across commands.
+- Restructure the documentation: the README now covers deployment and a first
+  transfer, while the dead drop commands and `/v1` API, the client reference,
+  and the development workflows moved into `docs/`, indexed by
+  [`docs/README.md`](docs/README.md).
+
+### Security
+
+- Protect peer transfers with mutually confirmed pairing, authenticated
+  delivery, revocation, and replay defenses; quarantine incoming Git data before
+  updating repository references.
+
 ## [1.4.0] - 2026-06-10
 
 ### Added
