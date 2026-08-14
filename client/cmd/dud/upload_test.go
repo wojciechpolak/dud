@@ -9,12 +9,10 @@ import (
 	"testing"
 )
 
-func TestLoadUploadResponse(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "response.json")
-	if err := os.WriteFile(path, []byte(`{"id":"abc","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	response, err := loadUploadResponse(path)
+func TestParseUploadResponse(t *testing.T) {
+	response, err := parseUploadResponse(
+		[]byte(`{"id":"abc","expiresAt":"2026-04-20T12:00:00.000Z","deleteAfterRead":true}`),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,12 +21,8 @@ func TestLoadUploadResponse(t *testing.T) {
 	}
 }
 
-func TestLoadUploadResponseRejectsInvalidShape(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "response.json")
-	if err := os.WriteFile(path, []byte(`{"id":"abc"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := loadUploadResponse(path)
+func TestParseUploadResponseRejectsInvalidShape(t *testing.T) {
+	_, err := parseUploadResponse([]byte(`{"id":"abc"}`))
 	if err == nil || !strings.Contains(err.Error(), "unexpected JSON response") {
 		t.Fatalf("expected unexpected JSON response error, got %v", err)
 	}
@@ -79,5 +73,30 @@ func TestValidateUploadOptionsRejectsPassphraseAndRecipients(t *testing.T) {
 	}, config{SecretToken: "top-secret"})
 	if err == nil || err.Error() != "upload accepts either --passphrase or recipient options, not both" {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUploadOptionParserAndValidationCoverRemainingModes(t *testing.T) {
+	opts, err := parseUploadOptions([]string{"-m", "hello", "--passphrase", "--delete-after-read"}, "base", "doh")
+	if err != nil || opts.message != "hello" || !opts.passphraseRequested || !opts.deleteAfterRead {
+		t.Fatalf("options = %#v, %v", opts, err)
+	}
+	for _, args := range [][]string{{"--file"}, {"-m"}, {"--ttl"}, {"--recipient"}, {"--recipient-file"}, {"--url"}, {"--doh-url"}, {"--json", "--json"}, {"--wat"}} {
+		if _, err := parseUploadOptions(args, "base", "doh"); err == nil {
+			t.Fatalf("options accepted: %v", args)
+		}
+	}
+	if err := validateUploadOptions(uploadOptions{recipientsFile: "/missing"}, config{SecretToken: "token"}); err == nil {
+		t.Fatal("missing recipient file accepted")
+	}
+	if err := validateUploadOptions(uploadOptions{}, config{}); err == nil {
+		t.Fatal("missing secret token accepted")
+	}
+	file := filepath.Join(t.TempDir(), "recipients")
+	if err := os.WriteFile(file, []byte("age1test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateUploadOptions(uploadOptions{recipientsFile: file}, config{SecretToken: "token"}); err != nil {
+		t.Fatal(err)
 	}
 }

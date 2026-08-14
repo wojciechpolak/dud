@@ -4,6 +4,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import {
+  createWorkerMaintenanceGate,
+  scheduleWorkerV2Maintenance,
+} from '../dist/src/index.js';
 import { createDudService } from '../dist/src/service.js';
 import { MemoryBlobStore, makeContext, textStream } from './helpers.mjs';
 
@@ -15,6 +19,230 @@ const ID_CANCEL = 'd'.repeat(32);
 const ID_FAIL = 'e'.repeat(32);
 const ID_NEW = 'f'.repeat(32);
 const PRETTY_ID_UPLOAD = 'aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa';
+
+/** Bounded fake D1 that records every prepared statement it is handed. */
+function fakeDatabase(statements, changes = () => 1) {
+  return {
+    prepare(query) {
+      const statement = {
+        query,
+        values: [],
+        bind(...values) {
+          this.values = values;
+          return this;
+        },
+        async run() {
+          return { meta: { changes: changes() } };
+        },
+      };
+      statements.push(statement);
+      return statement;
+    },
+    async batch() {
+      throw new Error('not used');
+    },
+  };
+}
+
+function fakeRepository(runMaintenance) {
+  return {
+    async initialize() {},
+    async registerCapability() {},
+    async replaceCapabilities() {},
+    async findCapabilityLookup() {
+      return null;
+    },
+    async findDelivery() {
+      return null;
+    },
+    async claimNonce() {
+      return false;
+    },
+    async reserveDelivery() {
+      throw new Error('not used');
+    },
+    async publishDelivery() {
+      throw new Error('not used');
+    },
+    async queryInbox() {
+      throw new Error('not used');
+    },
+    async completeDelivery() {
+      throw new Error('not used');
+    },
+    async completeDeliveryWithControl() {
+      throw new Error('not used');
+    },
+    async publishControlEvent() {
+      throw new Error('not used');
+    },
+    async consumeControlEvents() {},
+    runMaintenance,
+  };
+}
+
+function fakeBodyStore(deleted) {
+  return {
+    async stage() {
+      throw new Error('not used');
+    },
+    async promote() {
+      throw new Error('not used');
+    },
+    async put() {
+      throw new Error('not used');
+    },
+    async get() {
+      return null;
+    },
+    async head() {
+      return false;
+    },
+    async delete(key) {
+      deleted.push(key);
+    },
+  };
+}
+
+function drainedMaintenance(overrides = {}) {
+  return {
+    expiredDeliveryIds: [],
+    expiredBodyKeys: [],
+    deletedNonces: 0,
+    deletedControlEvents: 0,
+    deletedRateWindows: 0,
+    deletedInvitations: 0,
+    complete: true,
+    ...overrides,
+  };
+}
+
+test('Worker maintenance uses a five-minute D1 lease and deletes only metadata-named bodies', async () => {
+  const statements = [];
+  const promises = [];
+  const deleted = [];
+  scheduleWorkerV2Maintenance(
+    { waitUntil: (promise) => promises.push(promise) },
+    fakeDatabase(statements),
+    fakeRepository(async (now, limit) => {
+      assert.equal(now, 1_700_000_000);
+      assert.equal(limit, 128);
+      return drainedMaintenance({
+        expiredDeliveryIds: ['a'.repeat(32)],
+        expiredBodyKeys: [`deliveries/${'a'.repeat(32)}.bin`],
+        deletedNonces: 1,
+      });
+    }),
+    fakeBodyStore(deleted),
+    () => 1_700_000_000_000,
+    createWorkerMaintenanceGate(),
+  );
+  await Promise.all(promises);
+  assert.match(statements[0].query, /ON CONFLICT\(name\) DO UPDATE/);
+  assert.deepEqual(statements[0].values, [
+    'v2-maintenance',
+    1_700_000_300,
+    1_700_000_000,
+  ]);
+  assert.deepEqual(deleted, [`deliveries/${'a'.repeat(32)}.bin`]);
+});
+
+test('concurrent Worker requests skip duplicate maintenance work', async () => {
+  const statements = [];
+  const promises = [];
+  const deleted = [];
+  const gate = createWorkerMaintenanceGate();
+  let release;
+  const started = new Promise((resolve) => {
+    release = resolve;
+  });
+  let passes = 0;
+  const schedule = (seconds) =>
+    scheduleWorkerV2Maintenance(
+      { waitUntil: (promise) => promises.push(promise) },
+      fakeDatabase(statements),
+      fakeRepository(async () => {
+        passes++;
+        await started;
+        return drainedMaintenance();
+      }),
+      fakeBodyStore(deleted),
+      () => seconds * 1000,
+      gate,
+    );
+
+  // Three requests arrive while the first pass is still in flight.
+  schedule(1_700_000_000);
+  schedule(1_700_000_001);
+  schedule(1_700_000_002);
+  release();
+  await Promise.all(promises);
+  assert.equal(passes, 1);
+  assert.equal(statements.length, 1, 'only one lease statement is prepared');
+  assert.equal(promises.length, 1, 'only one pass is handed to waitUntil');
+
+  // A later request inside the same window still skips the D1 lease write.
+  schedule(1_700_000_299);
+  await Promise.all(promises);
+  assert.equal(passes, 1);
+  assert.equal(statements.length, 1);
+
+  // The next window runs one fresh pass.
+  schedule(1_700_000_300);
+  await Promise.all(promises);
+  assert.equal(passes, 2);
+  assert.equal(statements.length, 2);
+  assert.deepEqual(statements[1].values, [
+    'v2-maintenance',
+    1_700_000_600,
+    1_700_000_300,
+  ]);
+});
+
+test('a Worker request whose lease is held elsewhere runs no maintenance batch', async () => {
+  const statements = [];
+  const promises = [];
+  let passes = 0;
+  scheduleWorkerV2Maintenance(
+    { waitUntil: (promise) => promises.push(promise) },
+    fakeDatabase(statements, () => 0),
+    fakeRepository(async () => {
+      passes++;
+      return drainedMaintenance();
+    }),
+    fakeBodyStore([]),
+    () => 1_700_000_000_000,
+    createWorkerMaintenanceGate(),
+  );
+  await Promise.all(promises);
+  assert.equal(statements.length, 1);
+  assert.equal(passes, 0);
+});
+
+test('a Worker maintenance pass stops at its bounded batch budget', async () => {
+  const statements = [];
+  const promises = [];
+  const deleted = [];
+  let passes = 0;
+  scheduleWorkerV2Maintenance(
+    { waitUntil: (promise) => promises.push(promise) },
+    fakeDatabase(statements),
+    fakeRepository(async () => {
+      passes++;
+      return drainedMaintenance({
+        expiredBodyKeys: [`deliveries/${String(passes).repeat(32)}.bin`],
+        complete: false,
+      });
+    }),
+    fakeBodyStore(deleted),
+    () => 1_700_000_000_000,
+    createWorkerMaintenanceGate(),
+  );
+  await Promise.all(promises);
+  // The budget bounds one lease window; the next window resumes the backlog.
+  assert.equal(passes, 4);
+  assert.equal(deleted.length, 4);
+});
 
 test('GET /v1/test returns readiness JSON', async () => {
   const service = createDudService({
@@ -236,6 +464,7 @@ test('delete-after-read makes the second download unavailable', async () => {
   );
   assert.equal(first.status, 200);
   assert.equal(await first.text(), 'ciphertext');
+  assert.equal(blobStore.objects.has(`tombstones/${ID_ONCE}.json`), true);
   await firstCtx.flush();
 
   assert.equal(blobStore.objects.has(`files/${ID_ONCE}.age`), false);
@@ -558,8 +787,8 @@ test('flush endpoint removes expired blobs and expired tombstones', async () => 
 test('flush returns partial:true when iteration cap is reached', async () => {
   const blobStore = new MemoryBlobStore();
 
-  // Insert 3 expired files. With cleanupBatchSize=1 and flushMaxIterations=2,
-  // only 2 will be deleted and partial should be true.
+  // Three expired files, with cleanupBatchSize=1 and flushMaxIterations=2: the
+  // flush deletes 2 and reports partial.
   for (let i = 0; i < 3; i++) {
     await blobStore.put(`files/${'0'.repeat(31)}${i}.age`, textStream('x'), {
       contentType: 'application/octet-stream',
@@ -601,7 +830,7 @@ test('flush returns partial:true when iteration cap is reached', async () => {
 test('all JSON responses include defensive security headers', async () => {
   const service = createDudService({
     blobStore: new MemoryBlobStore(),
-    config: { version: '1.4.0' },
+    config: { version: '2.0.0-rc.1' },
   });
 
   const endpoints = [

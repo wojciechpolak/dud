@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
@@ -22,9 +23,9 @@ type config struct {
 	DOHURL       string
 	ECHMode      string
 	SecretToken  string
+	V2Secret     string
 	CABundle     string
 	ConnectTo    string
-	CurlBin      string
 	AgeBin       string
 	AgeKeygenBin string
 	GitBin       string
@@ -33,11 +34,12 @@ type config struct {
 }
 
 type app struct {
-	cfg    config
-	in     io.Reader
-	out    io.Writer
-	errOut io.Writer
-	exe    string
+	cfg            config
+	in             io.Reader
+	out            io.Writer
+	errOut         io.Writer
+	exe            string
+	newV2Transport func(v2TransportOptions) (v2Transport, error)
 }
 
 type fatalError string
@@ -74,6 +76,9 @@ func newApp(in io.Reader, out io.Writer, errOut io.Writer) *app {
 		out:    out,
 		errOut: errOut,
 		exe:    exe,
+		newV2Transport: func(options v2TransportOptions) (v2Transport, error) {
+			return newProductionV2Transport(options)
+		},
 	}
 }
 
@@ -89,6 +94,13 @@ func (a *app) main(args []string) int {
 			return code
 		}
 		return 1
+	}
+	// An HTTP status of 400 or more leaves the shell with exit code 22, which
+	// scripts wrapping the CLI branch on.
+	var statusErr *dropStatusError
+	if errors.As(err, &statusErr) {
+		fmt.Fprintln(a.errOut, statusErr.Error())
+		return statusErr.ExitCode()
 	}
 	if msg := err.Error(); msg != "" {
 		fmt.Fprintln(a.errOut, msg)
@@ -113,9 +125,33 @@ func (a *app) run(args []string) error {
 		fmt.Fprintln(a.out, envDefault("DUD_VERSION", version))
 	case "test":
 		return a.cmdTest(rest)
+	case "init":
+		return a.cmdInit(rest)
+	case "config":
+		return a.cmdConfig(rest)
+	case "doctor":
+		return a.cmdDoctor(rest)
+	case "capabilities":
+		return a.cmdCapabilities(rest)
+	case "migrate":
+		return a.cmdMigrate(rest)
+	case "erase":
+		return a.cmdErase(rest)
+	case "peer":
+		return a.cmdPeer(rest)
+	case "sync":
+		return a.cmdSync(rest)
+	case "inbox":
+		return a.cmdInbox(rest)
 	case "upload", "send":
+		if len(rest) != 0 && !strings.HasPrefix(rest[0], "-") {
+			return a.cmdPeerSend(rest)
+		}
 		return a.cmdUpload(rest, "dud receive")
 	case "download", "receive":
+		if len(rest) != 0 && !strings.HasPrefix(rest[0], "-") {
+			return a.cmdPeerReceive(rest)
+		}
 		return a.cmdDownload(rest)
 	case "git":
 		return a.cmdGit(rest)

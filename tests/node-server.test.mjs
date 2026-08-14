@@ -2,54 +2,217 @@
 // Copyright (C) 2026 Wojciech Polak
 
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 
-import { startNodeServer } from '../dist/src/node-server.js';
-import { TEST_CERT_PEM, TEST_KEY_PEM } from './helpers.mjs';
+import {
+  createNodeRequestHandler,
+  loadNodeServerConfig,
+  redactAccessPath,
+  runNodeV2Maintenance,
+  startNodeServer,
+} from '../dist/src/node-server.js';
+import {
+  MAINTENANCE_MAX_BATCHES,
+  runV2MaintenancePass,
+} from '../dist/src/v2-maintenance.js';
 
-const CLIENT_BIN = path.resolve('client/bin/dud');
+test('v2 access paths redact complete delivery identifiers', () => {
+  assert.equal(
+    redactAccessPath(`/v2/deliveries/${'a'.repeat(32)}`),
+    '/v2/deliveries/<redacted>',
+  );
+  assert.equal(
+    redactAccessPath(`/v2/deliveries/${'b'.repeat(32)}/complete`),
+    '/v2/deliveries/<redacted>/complete',
+  );
+  assert.equal(
+    redactAccessPath(`/v2/pairing/rendezvous/${'d'.repeat(64)}/status`),
+    '/v2/pairing/rendezvous/<redacted>/status',
+  );
+  assert.equal(
+    redactAccessPath(`/v1/files/${'c'.repeat(32)}`),
+    `/v1/files/${'c'.repeat(32)}`,
+  );
+});
 
-function runCommand(command, args, env = {}, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      command,
-      args,
-      {
-        env: {
-          ...process.env,
-          ...env,
-        },
-        maxBuffer: 10 * 1024 * 1024,
-      },
-      (error, stdout, stderr) => {
-        if (error && error.code === undefined) {
-          reject(error);
-          return;
-        }
+test('Node v2 requires a configured canonical HTTPS public origin', () => {
+  assert.throws(
+    () =>
+      createNodeRequestHandler({
+        dataDir: '/tmp/dud-unused',
+        v2Enabled: true,
+      }),
+    /DUD_PUBLIC_BASE_URL is required/,
+  );
+  assert.throws(
+    () =>
+      createNodeRequestHandler({
+        dataDir: '/tmp/dud-unused',
+        publicBaseUrl: 'http://dud.example.com',
+        v2Enabled: true,
+      }),
+    /canonical HTTPS origin/,
+  );
+});
 
-        resolve({
-          code: error?.code ?? 0,
-          stdout,
-          stderr,
-        });
-      },
-    );
+test('Node v2 configuration is explicit and validates limits', () => {
+  const defaults = loadNodeServerConfig({});
+  assert.equal(defaults.v1Enabled, true);
+  assert.equal(defaults.v2Enabled, false);
 
-    if (options.input !== undefined) {
-      child.stdin.end(options.input);
-    }
+  assert.equal(defaults.v2OpenEnrollment, false);
+
+  const enabled = loadNodeServerConfig({
+    DUD_PUBLIC_BASE_URL: 'https://dud.example.com',
+    DUD_DROP_ENABLED: 'false',
+    DUD_DROP_SECRET: 'shared',
+    DUD_PEER_ENABLED: 'true',
+    DUD_PEER_SECRET: 'squid-lantern-rotate-9-mango',
+    DUD_PEER_MAX_OBJECT_BYTES: '4096',
   });
+  assert.equal(enabled.v1Enabled, false);
+  assert.equal(enabled.secretToken, 'shared');
+  assert.equal(enabled.v2Enabled, true);
+  assert.equal(enabled.v2Secret, 'squid-lantern-rotate-9-mango');
+  assert.equal(enabled.v2Limits.maxObjectBytes, 4096);
+  assert.equal(
+    loadNodeServerConfig({ DUD_PEER_OPEN_ENROLLMENT: 'true' }).v2OpenEnrollment,
+    true,
+  );
+  assert.throws(
+    () => loadNodeServerConfig({ DUD_PEER_ENABLED: 'sometimes' }),
+    /must be true, false, 1, or 0/,
+  );
+});
+
+function maintenanceResult(overrides = {}) {
+  return {
+    expiredDeliveryIds: [],
+    expiredBodyKeys: [],
+    deletedNonces: 0,
+    deletedControlEvents: 0,
+    deletedRateWindows: 0,
+    deletedInvitations: 0,
+    complete: true,
+    ...overrides,
+  };
 }
 
-async function makeExecutable(filePath, content) {
-  await writeFile(filePath, content, 'utf8');
-  await chmod(filePath, 0o755);
-}
+test('Node granular V2 maintenance removes only bodies named by its bounded metadata pass', async () => {
+  const calls = [];
+  const repository = {
+    async runMaintenance(now, limit) {
+      calls.push(['maintenance', now, limit]);
+      return maintenanceResult({
+        expiredDeliveryIds: ['delivery'],
+        expiredBodyKeys: ['deliveries/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bin'],
+        deletedNonces: 1,
+      });
+    },
+  };
+  const bodyStore = {
+    async delete(key) {
+      calls.push(['delete', key]);
+    },
+  };
+
+  await runNodeV2Maintenance(
+    repository,
+    bodyStore,
+    () => 1_800_000_123_999,
+    64,
+  );
+  assert.deepEqual(calls, [
+    ['maintenance', 1_800_000_123, 64],
+    ['delete', 'deliveries/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bin'],
+  ]);
+});
+
+test('Node granular V2 maintenance keeps batching until the backend is drained', async () => {
+  const keys = Array.from(
+    { length: 5 },
+    (_, index) => `deliveries/${String(index).repeat(32)}.bin`,
+  );
+  const deleted = [];
+  let batches = 0;
+  const repository = {
+    async runMaintenance() {
+      const key = keys[batches++];
+      return maintenanceResult(
+        key === undefined
+          ? {}
+          : { expiredBodyKeys: [key], complete: batches === keys.length },
+      );
+    },
+  };
+
+  await runNodeV2Maintenance(
+    repository,
+    {
+      async delete(key) {
+        deleted.push(key);
+      },
+    },
+    () => 1_800_000_123_999,
+    64,
+  );
+  // The pass stops as soon as a batch reports the backend drained, and every
+  // earlier batch contributed its own bounded page of body deletions.
+  assert.equal(batches, keys.length);
+  assert.deepEqual(deleted, keys);
+});
+
+test('Node granular V2 maintenance stops at its batch budget and resumes later', async () => {
+  let batches = 0;
+  const repository = {
+    async runMaintenance() {
+      batches++;
+      return maintenanceResult({ complete: false });
+    },
+  };
+  const result = await runV2MaintenancePass(
+    repository,
+    { async delete() {} },
+    1_800_000_123,
+    64,
+  );
+  assert.equal(batches, MAINTENANCE_MAX_BATCHES);
+  assert.equal(result.batches, MAINTENANCE_MAX_BATCHES);
+  assert.equal(result.complete, false);
+});
+
+test('Node granular V2 maintenance survives a body that cannot be deleted', async () => {
+  let batches = 0;
+  const repository = {
+    async runMaintenance() {
+      batches++;
+      return maintenanceResult({
+        expiredBodyKeys: [
+          'deliveries/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bin',
+          'deliveries/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bin',
+        ],
+      });
+    },
+  };
+  const result = await runV2MaintenancePass(
+    repository,
+    {
+      async delete(key) {
+        if (key.includes('aaaa')) {
+          throw new Error('storage is unavailable');
+        }
+      },
+    },
+    1_800_000_123,
+    64,
+  );
+  assert.equal(batches, 1);
+  assert.equal(result.deletedBodies, 1);
+  assert.equal(result.complete, true);
+});
 
 async function closeServer(server) {
   await new Promise((resolve, reject) => {
@@ -160,8 +323,6 @@ test('node server enforces delete-after-read', async () => {
     const first = await fetch(`${baseUrl}/v1/files/${id}`);
     assert.equal(first.status, 200);
     assert.equal(await first.text(), 'ciphertext');
-
-    await sleep(25);
 
     const second = await fetch(`${baseUrl}/v1/files/${id}`);
     assert.equal(second.status, 410);
@@ -358,155 +519,6 @@ test('node server silent log mode suppresses startup and access logs', async () 
   try {
     await fetchTestEndpoint(baseUrl);
     assert.deepEqual(messages, []);
-  } finally {
-    await closeServer(server);
-  }
-});
-
-test('client binary can upload and download through the node server over HTTPS', async () => {
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'dud-node-client-'));
-  const certPath = path.join(tmpDir, 'cert.pem');
-  const keyPath = path.join(tmpDir, 'key.pem');
-  const inputPath = path.join(tmpDir, 'plain.bin');
-  const outputPath = path.join(tmpDir, 'out.bin');
-  const curlWrapper = path.join(tmpDir, 'curl-wrapper.mjs');
-  const ageMock = path.join(tmpDir, 'age-mock.sh');
-
-  await writeFile(certPath, TEST_CERT_PEM, 'utf8');
-  await writeFile(keyPath, TEST_KEY_PEM, 'utf8');
-  await writeFile(inputPath, 'plaintext', 'utf8');
-
-  await makeExecutable(
-    curlWrapper,
-    `#!/usr/bin/env node
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-const args = process.argv.slice(2);
-let method = 'GET';
-let output = '';
-let bodySpec = '';
-const headers = new Headers();
-let url = '';
-
-for (let i = 0; i < args.length; i += 1) {
-  const arg = args[i];
-  if (arg === '--silent' || arg === '--show-error' || arg === '--fail' || arg === '--tlsv1.3') {
-    continue;
-  }
-  if (arg === '--proto' || arg === '--tls-max' || arg === '--ech' || arg === '--doh-url') {
-    i += 1;
-    continue;
-  }
-  if (arg === '-X') {
-    method = args[++i];
-    continue;
-  }
-  if (arg === '-H') {
-    const header = args[++i];
-    const idx = header.indexOf(':');
-    headers.append(header.slice(0, idx), header.slice(idx + 1).trim());
-    continue;
-  }
-  if (arg === '--data-binary') {
-    bodySpec = args[++i];
-    continue;
-  }
-  if (arg === '--output' || arg === '-o') {
-    output = args[++i];
-    continue;
-  }
-  url = arg;
-}
-
-const body = bodySpec
-  ? await import('node:fs/promises').then(({ readFile }) =>
-      bodySpec.startsWith('@') ? readFile(bodySpec.slice(1)) : readFile(bodySpec),
-    )
-  : undefined;
-
-const response = await fetch(url, { method, headers, body });
-if (!response.ok) {
-  process.exit(22);
-}
-
-const bytes = new Uint8Array(await response.arrayBuffer());
-if (output) {
-  const { writeFile } = await import('node:fs/promises');
-  await writeFile(output, bytes);
-} else {
-  process.stdout.write(Buffer.from(bytes));
-}
-`,
-  );
-
-  await makeExecutable(
-    ageMock,
-    `#!/bin/sh
-set -eu
-input=""
-output=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o)
-      output="$2"
-      shift 2
-      ;;
-    -R|-i)
-      shift 2
-      ;;
-    --encrypt|--decrypt|--passphrase)
-      shift 1
-      ;;
-    -*)
-      shift 1
-      ;;
-    *)
-      input="$1"
-      shift 1
-      ;;
-  esac
-done
-cp "$input" "$output"
-`,
-  );
-
-  const { baseUrl, server } = await startTestServer({
-    tlsCertFile: certPath,
-    tlsKeyFile: keyPath,
-  });
-
-  try {
-    const upload = await runCommand(
-      CLIENT_BIN,
-      ['upload', '--file', inputPath, '--json', '--url', baseUrl],
-      {
-        DUD_SECRET_TOKEN: 'top-secret',
-        DUD_CURL_BIN: curlWrapper,
-        DUD_AGE_BIN: ageMock,
-      },
-    );
-
-    assert.equal(upload.code, 0);
-    const uploadBody = JSON.parse(upload.stdout);
-
-    const download = await runCommand(
-      CLIENT_BIN,
-      [
-        'download',
-        '--id',
-        uploadBody.id,
-        '--out',
-        outputPath,
-        '--url',
-        baseUrl,
-      ],
-      {
-        DUD_CURL_BIN: curlWrapper,
-        DUD_AGE_BIN: ageMock,
-      },
-    );
-
-    assert.equal(download.code, 0);
-    assert.equal(await readFile(outputPath, 'utf8'), 'plaintext');
   } finally {
     await closeServer(server);
   }

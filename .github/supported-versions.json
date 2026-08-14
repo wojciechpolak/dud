@@ -1,0 +1,29 @@
+{
+  "$comment": "Minimum supported dependency and tool versions. scripts/check-pins.mjs verifies every claim here against the file that enforces it. See docs/supported-versions.md for the policy.",
+  "node": {
+    "minimum": "24.0.0",
+    "enforcedBy": ".node-version"
+  },
+  "go": {
+    "minimum": "1.26.6",
+    "enforcedBy": "client/go.mod"
+  },
+  "tools": {
+    "docker": {
+      "minimum": "24.0.0",
+      "reason": "buildx and --tmpfs options used by the generated wrappers and the image build"
+    },
+    "git": {
+      "minimum": "2.38.0",
+      "reason": "bundle version 3 and SHA-256 repositories"
+    },
+    "sqlite": {
+      "minimum": "3.45.0",
+      "reason": "node:sqlite in the self-hosted metadata store"
+    }
+  },
+  "pinnedSources": {
+    "age": "v1.3.1"
+  },
+  "updatePolicy": "Base images and pinned sources are re-pinned by scripts/update-docker-pins.sh and reviewed like code. Security fixes are pulled in immediately; feature updates ride the next release. A minimum version is raised only in a minor or major release, never in a patch."
+}

@@ -3,11 +3,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,7 +83,9 @@ func parseUploadOptions(args []string, defaultBaseURL, defaultDOHURL string) (up
 			opts.recipientsFile = args[1]
 			args = args[2:]
 		case "--json":
-			opts.outputJSON = true
+			if err := markJSONOption(&opts.outputJSON); err != nil {
+				return opts, err
+			}
 			args = args[1:]
 		case "--no-qr":
 			opts.outputQR = false
@@ -131,7 +135,7 @@ func validateUploadOptions(opts uploadOptions, cfg config) error {
 		}
 	}
 	if cfg.SecretToken == "" {
-		return fatalError("upload requires DUD_SECRET_TOKEN")
+		return fatalError("upload requires DUD_DROP_SECRET")
 	}
 	if opts.passphraseRequested && opts.recipientMode() {
 		return fatalError("upload accepts either --passphrase or recipient options, not both")
@@ -139,12 +143,8 @@ func validateUploadOptions(opts uploadOptions, cfg config) error {
 	return nil
 }
 
-func loadUploadResponse(path string) (uploadResponse, error) {
+func parseUploadResponse(data []byte) (uploadResponse, error) {
 	var response uploadResponse
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return response, err
-	}
 	if err := json.Unmarshal(data, &response); err != nil {
 		return response, fatalError("Upload succeeded but returned an unexpected JSON response.")
 	}
@@ -162,16 +162,15 @@ func buildReceiveCommand(prefix, id, baseURL string, bundle bool) string {
 	return cmd
 }
 
-func (a *app) printUploadResponse(response uploadResponse, receiveCommand string) {
-	deleteAfterRead := "no"
-	if response.DeleteAfterRead {
-		deleteAfterRead = "yes"
-	}
+func (a *app) printUploadResponse(response uploadResponse, receiveCommand string) error {
 	fmt.Fprintln(a.out, "Upload complete")
-	fmt.Fprintf(a.out, "ID: %s\n", response.ID)
-	fmt.Fprintf(a.out, "Expires: %s\n", response.ExpiresAt)
-	fmt.Fprintf(a.out, "Delete after read: %s\n", deleteAfterRead)
-	fmt.Fprintf(a.out, "Receive: %s\n", receiveCommand)
+	report := &textReport{}
+	drop := report.section("")
+	drop.add("ID", response.ID)
+	drop.add("Expires", response.ExpiresAt)
+	drop.add("Delete after read", v2YesNo(response.DeleteAfterRead))
+	drop.add("Receive", receiveCommand)
+	return report.write(a.out)
 }
 
 func (a *app) printUploadQR(id string) error {
@@ -247,11 +246,6 @@ func (a *app) cmdUpload(args []string, receivePrefix string) error {
 		return err
 	}
 	defer removeTempFile(encryptedFile)
-	responseFile, err := tempFile("dud-upload-response-json-")
-	if err != nil {
-		return err
-	}
-	defer removeTempFile(responseFile)
 
 	bundle := false
 	if len(opts.files) > 0 {
@@ -331,40 +325,68 @@ func (a *app) cmdUpload(args []string, receivePrefix string) error {
 		}
 	}
 
-	deleteHeader := "false"
-	if opts.deleteAfterRead {
-		deleteHeader = "true"
-	}
-	if err := a.runSecureCurl(
-		"-X", "POST",
-		"-H", "content-type: application/octet-stream",
-		"-H", "x-dud-ttl: "+opts.ttl,
-		"-H", "x-dud-delete-after-read: "+deleteHeader,
-		"-H", "x-dud-secret-token: "+a.cfg.SecretToken,
-		"--data-binary", "@"+encryptedFile,
-		"--output", responseFile,
-		opts.baseURL+"/v1/files",
-	); err != nil {
+	data, err := a.postUpload(encryptedFile, opts)
+	if err != nil {
 		return err
 	}
 
 	if opts.outputJSON {
-		data, err := os.ReadFile(responseFile)
-		if err != nil {
-			return err
-		}
 		a.out.Write(data)
 		fmt.Fprintln(a.out)
 		return nil
 	}
 
-	response, err := loadUploadResponse(responseFile)
+	response, err := parseUploadResponse(data)
 	if err != nil {
 		return err
 	}
-	a.printUploadResponse(response, buildReceiveCommand(receivePrefix, response.ID, opts.baseURL, bundle))
+	if err := a.printUploadResponse(response, buildReceiveCommand(receivePrefix, response.ID, opts.baseURL, bundle)); err != nil {
+		return err
+	}
 	if opts.outputQR {
 		return a.printUploadQR(response.ID)
 	}
 	return nil
+}
+
+// dropUploadResponseLimit bounds the JSON envelope the upload route returns.
+// It is generous next to the three short fields the server actually sends, and
+// it keeps a misbehaving origin from streaming an unbounded "response" into
+// memory on a route that has no reason to produce one.
+const dropUploadResponseLimit = 64 * 1024
+
+// postUpload streams the age ciphertext straight from its temp file. The whole
+// payload is never held in memory, and the exact size is declared up front, so
+// the request is never chunked.
+func (a *app) postUpload(encryptedFile string, opts uploadOptions) ([]byte, error) {
+	file, err := os.Open(encryptedFile)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	deleteAfterRead := "false"
+	if opts.deleteAfterRead {
+		deleteAfterRead = "true"
+	}
+	headers := http.Header{}
+	headers.Set("content-type", "application/octet-stream")
+	headers.Set("x-dud-ttl", opts.ttl)
+	headers.Set("x-dud-delete-after-read", deleteAfterRead)
+	headers.Set("x-dud-secret-token", a.cfg.SecretToken)
+
+	response, err := a.dropRequest(context.Background(), opts.baseURL+"/v1/files", v2Request{
+		Method:           http.MethodPost,
+		Headers:          headers,
+		BodyStream:       file,
+		ContentLength:    info.Size(),
+		MaxResponseBytes: dropUploadResponseLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return response.Body, nil
 }
