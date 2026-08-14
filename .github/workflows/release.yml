@@ -183,7 +183,8 @@ jobs:
             context: .
             file: ./server/Dockerfile
     permissions:
-      contents: read
+      actions: read
+      contents: write
       packages: write
       attestations: write
       id-token: write
