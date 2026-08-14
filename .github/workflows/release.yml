@@ -80,6 +80,11 @@ jobs:
           node scripts/check-security-waivers.mjs trivy
           "$RUNNER_TEMP/trivy.json"
 
+      # Pairing is confirmed at a controlling TTY, which the suite drives with
+      # expect. The runner image does not carry it.
+      - name: Install expect
+        run: sudo apt-get update && sudo apt-get install --yes expect
+
       - name: End-to-end v2 integration
         run: npm run test:e2e:v2
 
