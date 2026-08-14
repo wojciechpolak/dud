@@ -62,7 +62,7 @@ jobs:
       - name: Dependency vulnerabilities (Go)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          cd client && govulncheck -json ./... > "$RUNNER_TEMP/govulncheck.json"
+          (cd client && govulncheck -json ./... > "$RUNNER_TEMP/govulncheck.json")
           node scripts/check-security-waivers.mjs govulncheck "$RUNNER_TEMP/govulncheck.json"
 
       - name: Filesystem, secret, and misconfiguration scan
