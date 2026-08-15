@@ -411,6 +411,8 @@ dud download --id 3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe -i /work/alice.key --o
 
 Full guide: [`docs/dead-drops-v1.md`](docs/dead-drops-v1.md).
 
+![A dead drop travels by opaque ID from sender to recipient.](docs/assets/dead-drop.gif)
+
 A peer transfer, once both devices point at a v2-enabled deployment:
 
 ```sh
@@ -422,6 +424,14 @@ dud send laptop --file /work/report.pdf
 On the other device, `dud peer accept desktop` takes the code at a visible
 prompt, and `dud receive desktop` drains everything waiting. Full guide:
 [`docs/peer-setup.md`](docs/peer-setup.md).
+
+![Two fresh peer devices initialize, then pair with the displayed pairing code.](docs/assets/peer-pairing.gif)
+
+![Two peer terminals: desktop sends a message and laptop receives it.](docs/assets/peer-transfer.gif)
+
+![A file sent from desktop arrives in laptop's selected output directory.](docs/assets/peer-file-transfer.gif)
+
+![A complete Git checkpoint is pushed from desktop and fetched into laptop's remote-tracking refs.](docs/assets/peer-git-sync.gif)
 
 `dud init` writes the device seed and peer graph under `~/.dud`, which the
 wrapper mounts into the container; a drop command reads no configuration file
