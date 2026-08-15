@@ -1,6 +1,6 @@
 {
   "name": "dud",
-  "version": "2.0.0-rc.1",
+  "version": "2.0.1",
   "private": true,
   "description": "Discreet upload / download with Cloudflare or self-hosted backends and a Dockerized client.",
   "type": "module",
