@@ -15,6 +15,7 @@ Pass a tape path to regenerate one of the other assets:
 ```sh
 ./scripts/record-peer-transfer-demo.sh docs/demos/peer-file-transfer.tape
 ./scripts/record-peer-transfer-demo.sh docs/demos/peer-git-sync.tape
+./scripts/record-peer-transfer-demo.sh docs/demos/peer-overview.tape
 ./scripts/record-peer-transfer-demo.sh docs/demos/peer-pairing.tape
 ./scripts/record-peer-transfer-demo.sh docs/demos/dead-drop.tape
 ```

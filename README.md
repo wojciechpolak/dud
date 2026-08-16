@@ -5,6 +5,11 @@ self-hosted Node server backed by local disk, plus a Go client — a Docker imag
 or a native binary — that carries its own HTTPS transport and uses `age` and
 `age-keygen`.
 
+![Desktop pairs with laptop, then sends it an encrypted file.](docs/assets/peer-overview.gif)
+
+Pair once, then send encrypted messages, files, and Git checkpoints by device
+name. For one-off sharing, use a dead drop addressed by an opaque ID.
+
 ## What this does
 
 - Encrypts and decrypts every payload on the client with `age`: a passphrase or

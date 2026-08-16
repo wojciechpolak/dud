@@ -187,7 +187,7 @@ run_client() {
     "$CLIENT_IMAGE" "$@"
 }
 
-if [ "$TAPE" != docs/demos/peer-pairing.tape ]; then
+prepare_peer_profiles() {
   run_client desktop init --device desktop --url "$ORIGIN" --doh-url "$DOH_URL" --ech-mode off
   run_client laptop init --device laptop --url "$ORIGIN" --doh-url "$DOH_URL" --ech-mode off
   for profile in desktop laptop; do
@@ -196,6 +196,16 @@ if [ "$TAPE" != docs/demos/peer-pairing.tape ]; then
       -v "$STATE_ROOT:/state" "$CLIENT_IMAGE" -c \
       "sed -i \"/^doh_url =/a doh_bootstrap = [\\\"$CADDY_IP\\\"]\" /state/dud/$profile/config/config.toml"
   done
+}
+
+case "$TAPE" in
+  docs/demos/peer-pairing.tape)
+    ;;
+  docs/demos/peer-overview.tape)
+    prepare_peer_profiles
+    ;;
+  *)
+  prepare_peer_profiles
 
   docker run -d -t --name "$INVITER" --network "$NETWORK" \
     --add-host "dud.local.test:$CADDY_IP" \
@@ -243,7 +253,8 @@ EXPECT_EOF
     docker logs "$INVITER" >&2 || true
     exit "$INVITER_STATUS"
   fi
-fi
+    ;;
+esac
 
 export DUD_DEMO_NETWORK="$NETWORK"
 export DUD_DEMO_CADDY_IP="$CADDY_IP"
