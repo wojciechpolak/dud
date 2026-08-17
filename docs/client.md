@@ -42,9 +42,46 @@ way and the `sha256sum -c` line above stands on its own. Every published binary
 is built twice from the same source and rebuilds to the same bytes; see
 [Verifying a release](../README.md#verifying-a-release).
 
+On macOS and Linux, Homebrew installs the same client and brings the helpers it
+calls out to along with it:
+
+```sh
+brew install wojciechpolak/homebrew-dud/dud
+```
+
+The name has to be spelled in full. Homebrew's own index already carries an
+unrelated formula named `dud` — a data versioning tool by a different author —
+and a bare `brew install dud` resolves to that one, before and after this tap is
+added. Both install a `dud` executable into the same Homebrew prefix, so only
+one of the two can be installed at a time; `brew uninstall dud` removes
+whichever is there. `upgrade`, `reinstall`, and `uninstall` need the qualified
+name too:
+
+```sh
+brew upgrade wojciechpolak/homebrew-dud/dud
+```
+
+The formula builds from the source archive of a release tag with the flags the
+release binaries are built with, so `dud --version` reports the version the
+formula installed. It declares `age`, `git`, and `qrencode` as dependencies and
+needs `go` only while building. The tap publishes no bottles, so `brew install`
+compiles the client on the machine it runs on rather than fetching a prebuilt
+one — which also means the provenance attestation above covers the published
+binaries, not a Homebrew build. The tap is
+[wojciechpolak/homebrew-dud](https://github.com/wojciechpolak/homebrew-dud), and
+each stable release regenerates its formula.
+
+A host that already runs the container through `shell-init` (§6) has `dud` as a
+shell function in its profile, and a shell function is resolved before anything
+on `PATH`. Installing the formula on that host changes nothing about what `dud`
+does until the function is removed from the profile and the shell restarted, and
+the installed binary stays reachable by its full path meanwhile. `type dud` says
+which of the two a shell will run.
+
 Running the binary directly means supplying `age`, `age-keygen`, `git`, and
-`qrencode` on `PATH` yourself and giving up what the generated wrappers harden
-(§6): the container boundary, the in-memory `/tmp`, and the pinned helper
+`qrencode` on `PATH` yourself — Homebrew's formula does that for you, an
+unpacked release asset does not — and giving up what the generated wrappers
+harden (§6): the container boundary, the in-memory `/tmp`, and the pinned helper
 lookup. `DUD_AGE_BIN`, `DUD_AGE_KEYGEN_BIN`, `DUD_GIT_BIN`, and
 `DUD_QRENCODE_BIN` name each helper for a host that keeps them somewhere other
 than `PATH`. In exchange the paths are the host's own, so `/work` in every

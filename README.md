@@ -142,6 +142,20 @@ gh release download vX.Y.Z --pattern 'dud-linux-amd64'
 sudo install -m 0755 dud-linux-amd64 /usr/local/bin/dud
 ```
 
+Homebrew installs that same client on macOS and Linux, and installs `age`,
+`git`, and `qrencode` with it instead of leaving them to you:
+
+```sh
+brew install wojciechpolak/homebrew-dud/dud
+```
+
+The qualified name is required. Homebrew's own index already carries an
+unrelated formula named `dud` — a data versioning tool by a different author —
+and a bare `brew install dud` resolves to that one whether or not this tap has
+been added. Both install a `dud` executable into the same prefix, so the two
+cannot be installed at once. [`docs/client.md`](docs/client.md) covers what the
+formula builds and how to upgrade it.
+
 Verify what you install: see [Verifying a release](#verifying-a-release) below.
 Skip both and every command in this README becomes one long `docker run` line;
 [`docs/client.md`](docs/client.md#4-running-it) shows what those look like.
