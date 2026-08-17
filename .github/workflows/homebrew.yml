@@ -1,0 +1,125 @@
+name: Homebrew tap
+
+# Publishes a released version of the client to wojciechpolak/homebrew-dud,
+# which is what `brew install wojciechpolak/homebrew-dud/dud` resolves.
+#
+# The tap formula is derived from a release, never the other way round, so this
+# runs after the release is published and is the only writer of Formula/dud.rb.
+# It measures the archive GitHub serves for the tag, renders the whole formula
+# from that one measurement, and pushes the result. A run for a version already
+# in the tap changes no bytes and commits nothing, so re-running it is safe.
+#
+# The manual trigger backfills a stable tag that was published without reaching
+# the tap. It takes the same path as the automatic one and cannot reach further:
+# the tag must already name a published, non-draft, non-pre-release release.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The published release tag to put in the tap.
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_DUD_TAP_TOKEN:
+        description:
+          Fine-grained token with contents write on wojciechpolak/homebrew-dud
+          and no access to any other repository.
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published stable tag to backfill, for example v2.0.2'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# The tap has one formula and every run rewrites it, so two releases updating it
+# at once would race on the push. They queue instead.
+concurrency:
+  group: homebrew-tap
+  cancel-in-progress: false
+
+jobs:
+  formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: '.node-version'
+
+      # A pre-release is a candidate for the version it names, and a draft is
+      # not published at all; neither is what `brew install dud` should hand
+      # anyone. The caller already skips those tags, so reaching this check
+      # means something upstream is wrong and the run fails rather than
+      # quietly publishing.
+      - name: Tag names a published stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            *-*) echo "$TAG is a pre-release tag and is never published to the tap" >&2; exit 1 ;;
+          esac
+          state="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
+          if [ "$state" != "false false" ]; then
+            echo "release $TAG is not a published stable release (draft/prerelease: $state)" >&2
+            exit 1
+          fi
+
+      # The formula builds from the archive of an immutable tag, so the checksum
+      # is measured here from the bytes GitHub actually serves rather than
+      # copied from anywhere that could disagree with them.
+      - name: Measure the release archive
+        id: archive
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          archive="$RUNNER_TEMP/source.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$TAG.tar.gz"
+          echo "sha256=$(sha256sum "$archive" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tap
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: wojciechpolak/homebrew-dud
+          token: ${{ secrets.HOMEBREW_DUD_TAP_TOKEN }}
+          path: tap
+
+      # The renderer rejects a pre-release version and anything that is not a
+      # SHA-256, so the formula cannot be written from inputs that got this far
+      # by mistake.
+      - name: Render the formula
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA256: ${{ steps.archive.outputs.sha256 }}
+        run: |
+          node scripts/render-homebrew-formula.mjs "$TAG" "$SHA256" --out tap/Formula/dud.rb
+          ruby -c tap/Formula/dud.rb
+          node scripts/render-homebrew-formula.mjs "$TAG" "$SHA256" --check tap/Formula/dud.rb
+
+      # The tap's own workflow audits the formula and installs it from source on
+      # macOS and Linux once this lands, which is where a formula that parses
+      # but does not build is caught.
+      - name: Commit the formula
+        working-directory: tap
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if git diff --quiet -- Formula/dud.rb; then
+            echo "the tap already carries $TAG"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/dud.rb
+          git commit -m "dud ${TAG#v}"
+          git push

@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for public releases.
 
+## [Unreleased]
+
+### Added
+
+- Install the client with Homebrew on macOS and Linux:
+  `brew install wojciechpolak/homebrew-dud/dud`. The formula builds from the
+  release tag with the flags release binaries use, and installs `age`, `git`,
+  and `qrencode` alongside it. The name must be qualified: Homebrew's own index
+  carries an unrelated formula named `dud`, so a bare `brew install dud`
+  resolves to that one, and the two cannot be installed at the same time.
+- Publish the tap formula from each stable release.
+  `scripts/render-homebrew-formula.mjs` renders it from the release tag and the
+  checksum of that tag's archive, and `.github/workflows/homebrew.yml` commits
+  the result to `wojciechpolak/homebrew-dud`. Pre-release tags never reach the
+  tap, and the workflow can be dispatched by hand to backfill a stable tag.
+
 ## [2.0.2] - 2026-08-15
 
 ## Fixed
