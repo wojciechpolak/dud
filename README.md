@@ -29,9 +29,11 @@ name. For one-off sharing, use a dead drop addressed by an opaque ID.
 - Verifies secure transport from the client with in-process DoH, exactly TLS
   1.3, and ECH, using `hard` by default, before either mode moves data.
 
-> **Important.** There is no web UI, and there will not be one. A browser cannot
-> enforce ECH hard mode, DoH, or exactly TLS 1.3 the way the DUD client does,
-> and those checks are what the threat model rests on.
+<!-- prettier-ignore -->
+> [!IMPORTANT]
+> There is no web UI, and there will not be one. A browser cannot enforce ECH
+> hard mode, DoH, or exactly TLS 1.3 the way the DUD client does, and those
+> checks are what the threat model rests on.
 
 Stack:
 
