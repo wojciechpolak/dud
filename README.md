@@ -1,9 +1,9 @@
 # DUD
 
 Discreet upload / download with either a Cloudflare Worker backed by R2 or a
-self-hosted Node server backed by local disk, plus a Go client — a Docker image
-or a native binary — that carries its own HTTPS transport and uses `age` and
-`age-keygen`.
+self-hosted Node server backed by local disk, plus a Go client that carries its
+own HTTPS transport and uses `age` and `age-keygen`. The client ships as a
+Docker image or as a native binary.
 
 ![Desktop pairs with laptop, then sends it an encrypted file.](docs/assets/peer-overview.gif)
 
@@ -22,8 +22,8 @@ name. For one-off sharing, use a dead drop addressed by an opaque ID.
 - Authenticates the sender of a peer transfer with its Ed25519 device identity,
   sequences deliveries against a hash chain the receiver acknowledges, and can
   revoke a relationship when a device or its state is lost.
-- Synchronizes Git repositories over the same two paths — by opaque ID as a
-  bundle in a dead drop, or to a peer as a complete authenticated checkpoint.
+- Synchronizes Git repositories over both paths: by opaque ID as a bundle in a
+  dead drop, or to a peer as a complete authenticated checkpoint.
 - Opportunistically cleans up expired or consumed objects during normal traffic,
   on both the R2 and filesystem backends.
 - Verifies secure transport from the client with in-process DoH, exactly TLS
@@ -76,10 +76,10 @@ revocable.
 Payload confidentiality is the same primitive in both modes once a drop is made
 to a post-quantum recipient: peer transfers encrypt to the hybrid
 MLKEM768-X25519 recipient that `age-keygen -pq` also produces. What peer mode
-adds sits around the cipher — sender authentication, freshness, revocation, and
-no long-lived public identifier for anyone to correlate. What it costs is reach:
-it only talks to devices you have paired with, which is why `dud send PEER`
-rejects `--recipient` and `--passphrase`.
+adds sits around the cipher: sender authentication, freshness, revocation, and
+no long-lived public identifier for anyone to correlate. What it costs is reach.
+Peer mode only talks to devices you have paired with, which is why
+`dud send PEER` rejects `--recipient` and `--passphrase`.
 
 Neither mode has post-quantum signatures or forward secrecy. `age` offers no
 post-quantum signature type, so sender authentication stays Ed25519, and peer
@@ -90,8 +90,8 @@ guarantee table and section 3.21 for the quantum reasoning.
 A dead drop reaches someone you have not paired with, and it is the only way to
 reach them. Pair when you expect to keep exchanging data with the same device.
 
-The wire protocols behind the two modes are versioned `v1` and `v2`, and those
-numbers still appear where they name something literal — the `/v1/` and `/v2/`
+The wire protocols behind the two modes are versioned `v1` and `v2`. Those
+numbers appear where they name something literal, such as the `/v1/` and `/v2/`
 routes and the file names of the protocol documents. What an operator configures
 is named by mode instead: `DUD_DROP_*` for dead drops, `DUD_PEER_*` for peers.
 In prose the modes are called drops and peers.
@@ -99,7 +99,7 @@ In prose the modes are called drops and peers.
 ## Quick start
 
 A DUD setup is a client you install once and a server you deploy. Install the
-client first: the deployment paths below end by pointing it at the hostname they
+client first. The deployment paths below end by pointing it at the hostname they
 produced, and one of them derives a credential with it.
 
 ### Install the client
@@ -114,10 +114,10 @@ docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest install \
 ```
 
 The wrapper is what makes `dud` a command. Every invocation needs the same
-`docker run` flags — an in-memory `/tmp` so intermediate plaintext never reaches
+`docker run` flags: an in-memory `/tmp` so intermediate plaintext never reaches
 the overlay filesystem, the working directory at `/work`, the peer state
-directories, `--cap-drop ALL` — and the wrapper supplies them and forwards the
-exported `DUD_*` variables into the container.
+directories, and `--cap-drop ALL`. The wrapper supplies all of them and forwards
+the exported `DUD_*` variables into the container.
 [`docs/client.md`](docs/client.md#6-shell-wrapper) covers it in full, including
 `shell-init`, which prints the same thing as a shell function for your
 `~/.profile` instead of a script in `/usr/local/bin`.
@@ -133,11 +133,11 @@ sudo install -m 0755 dud /usr/local/bin/dud
 ```
 
 Release assets are plain HTTPS downloads, so no GitHub CLI is required.
-`/releases/latest/download/` resolves to the newest stable release; a
-pre-release tag is published as one and is never what that path returns, so name
-a version explicitly with `/releases/download/vX.Y.Z/` to pin it. The asset name
-selects the platform: `dud-linux-amd64`, `dud-linux-arm64`, `dud-darwin-amd64`,
-or `dud-darwin-arm64`. With the GitHub CLI installed, the same download is:
+`/releases/latest/download/` resolves to the newest stable release and never to
+a pre-release tag, so name a version explicitly with
+`/releases/download/vX.Y.Z/` to pin one. The asset name selects the platform:
+`dud-linux-amd64`, `dud-linux-arm64`, `dud-darwin-amd64`, or `dud-darwin-arm64`.
+With the GitHub CLI installed, the same download is:
 
 ```sh
 gh release download vX.Y.Z --pattern 'dud-linux-amd64'
@@ -152,15 +152,16 @@ brew install wojciechpolak/homebrew-dud/dud
 ```
 
 The qualified name is required. Homebrew's own index already carries an
-unrelated formula named `dud` — a data versioning tool by a different author —
-and a bare `brew install dud` resolves to that one whether or not this tap has
-been added. Both install a `dud` executable into the same prefix, so the two
-cannot be installed at once. [`docs/client.md`](docs/client.md) covers what the
-formula builds and how to upgrade it.
+unrelated formula named `dud`, a data versioning tool by a different author, and
+a bare `brew install dud` resolves to that one whether or not this tap has been
+added. Both install a `dud` executable into the same prefix, so the two cannot
+be installed at once. [`docs/client.md`](docs/client.md) covers what the formula
+builds and how to upgrade it.
 
-Verify what you install: see [Verifying a release](#verifying-a-release) below.
-Skip both and every command in this README becomes one long `docker run` line;
-[`docs/client.md`](docs/client.md#4-running-it) shows what those look like.
+Verify what you install. [Verifying a release](#verifying-a-release) below shows
+how. Skip both and every command in this README becomes one long `docker run`
+line; [`docs/client.md`](docs/client.md#4-running-it) shows what those look
+like.
 
 Once a deployment exists, point the client at it and confirm the transport:
 
@@ -177,11 +178,11 @@ resolution and exactly TLS 1.3, with an accepted ECH handshake under the default
 
 Choose one:
 
-- **Cloudflare Worker + R2** — the easiest managed deployment
-- **Cloudflare Tunnel for self-hosted `dud-server`** — a private origin with a
-  public Cloudflare-backed hostname and tested `DUD_ECH_MODE=hard`
-- **Self-hosted without Cloudflare** — the most manual path, for operators
-  managing their own HTTPS and DNS stack
+- **Cloudflare Worker + R2:** the easiest managed deployment.
+- **Cloudflare Tunnel for self-hosted `dud-server`:** a private origin with a
+  public Cloudflare-backed hostname and tested `DUD_ECH_MODE=hard`.
+- **Self-hosted without Cloudflare:** the most manual path, for operators
+  managing their own HTTPS and DNS stack.
 
 #### 1. Cloudflare Worker + R2
 
@@ -230,7 +231,7 @@ cp wrangler.example.toml wrangler.toml
   and keep the D1 binding name as `DB`
 - keep or adjust `APP_VERSION`
 
-A v1-only deployment — one that serves dead drops and nothing else — can instead
+A v1-only deployment, one that serves dead drops and nothing else, can instead
 delete the whole `[[d1_databases]]` block. `replace-with-d1-database-id` names
 no real database, so it has to be either replaced or removed;
 `npx wrangler deploy --dry-run` does not catch it, because the ID is only
@@ -278,7 +279,7 @@ npx wrangler secret put DUD_PEER_DEPLOYMENT_KEY
 `DUD_PEER_SECRET` is what lets a device create a pairing invitation. Whoever
 invites a device needs it too, which is why it is a passphrase of at least 24
 characters and not encoded bytes. Give the Worker the key that passphrase
-stretches into, not the passphrase itself: stretching costs more CPU than a
+stretches into, not the passphrase itself. Stretching costs more CPU than a
 free-tier Worker invocation is allowed, and the key is all verification
 consumes. Derive it with the client you installed above and paste the printed
 `dud2-enroll-key:…` value:
@@ -294,8 +295,8 @@ pair through the deployment.
 
 `DUD_PEER_ADMIN_SECRET` is optional, is generated the same way as the deployment
 key and independently of it, and only enables administrative operations such as
-relationship revocation. Leaving it unset keeps that surface off and administers
-the deployment offline instead:
+relationship revocation. Leaving it unset keeps those routes disabled and
+administers the deployment offline instead:
 
 ```sh
 npx wrangler secret put DUD_PEER_ADMIN_SECRET
@@ -381,10 +382,10 @@ server image from the checked-in Compose file.
    `DUD_TLS_KEY_FILE`.
 
 4. Choose the transport mode. Use `export DUD_ECH_MODE=hard` only if your
-   hostname really supports ECH and publishes the required HTTPS DNS records;
-   otherwise use `export DUD_ECH_MODE=off`, which keeps every other check — DoH,
-   the public address-range check, exactly TLS 1.3, and redirect rejection —
-   while leaving the hostname visible in the TLS SNI.
+   hostname really supports ECH and publishes the required HTTPS DNS records.
+   Otherwise use `export DUD_ECH_MODE=off`. That leaves the hostname visible in
+   the TLS SNI and keeps every other check: DoH, the public address-range check,
+   exactly TLS 1.3, and redirect rejection.
 
 5. Point the client at the hostname and run `dud test`.
 
@@ -402,13 +403,13 @@ DUD_PEER_SECRET=squid-lantern-rotate-9-mango
 ```
 
 `DUD_PUBLIC_BASE_URL` is required with peers enabled and must be the canonical
-HTTPS origin clients dial — scheme, host, optional port, nothing else. Every v2
-request is bound to it, so a value that disagrees with the hostname in use
-rejects every authorization. `DUD_PEER_SECRET` gates pairing enrollment and the
-server refuses to start without it unless `DUD_PEER_OPEN_ENROLLMENT=true` says
-the deployment accepts pairing from anyone who reaches the hostname. Generate
-each credential independently of the others and of `DUD_DROP_SECRET`; the
-service refuses to start if any two are equal.
+HTTPS origin clients dial: scheme, host, optional port, nothing else. Every v2
+request is bound to it, so a value that disagrees with the hostname in use makes
+the server reject every authorization. `DUD_PEER_SECRET` gates pairing
+enrollment and the server refuses to start without it unless
+`DUD_PEER_OPEN_ENROLLMENT=true` says the deployment accepts pairing from anyone
+who reaches the hostname. Generate each credential independently of the others
+and of `DUD_DROP_SECRET`; the service refuses to start if any two are equal.
 [`docs/server-v2.md`](docs/server-v2.md#5-self-hosted-deployment) covers the
 rest, including every credential in full and the data directory to back up as a
 unit.
@@ -457,13 +458,13 @@ prompt, and `dud receive desktop` drains everything waiting. Full guide:
 `dud init` writes the device seed and peer graph under `~/.dud`, which the
 wrapper mounts into the container; a drop command reads no configuration file
 and leaves that directory untouched. Two device identities on one machine, or a
-second deployment, need `DUD_PROFILE` — see
+second deployment, need `DUD_PROFILE`. See
 [`docs/client.md`](docs/client.md#3-running-more-than-one-deployment).
 
 Running `dud` with no command in a terminal opens an interactive menu that
 covers both modes.
 
-## DUD Server
+## DUD server
 
 ```sh
 docker pull ghcr.io/wojciechpolak/dud/dud-server:latest
@@ -543,27 +544,27 @@ by `npm run check:pins`.
 
 [`docs/`](docs/README.md) is the index. The main entries:
 
-- [`docs/peer-setup.md`](docs/peer-setup.md) — pairing two devices, sending, and
+- [`docs/peer-setup.md`](docs/peer-setup.md): pairing two devices, sending, and
   receiving
-- [`docs/dead-drops-v1.md`](docs/dead-drops-v1.md) — the drop commands and the
+- [`docs/dead-drops-v1.md`](docs/dead-drops-v1.md): the drop commands and the
   `/v1` HTTP API
-- [`docs/client.md`](docs/client.md) — client environment, configuration layers,
+- [`docs/client.md`](docs/client.md): client environment, configuration layers,
   profiles, and wrappers
-- [`docs/server-v2.md`](docs/server-v2.md) — deployment, credentials, limits,
+- [`docs/server-v2.md`](docs/server-v2.md): deployment, credentials, limits,
   administration, and logging
-- [`docs/migration-v1-v2.md`](docs/migration-v1-v2.md) — moving a deployment
-  from v1-only to dual-stack to v2-only
-- [`docs/recovery-v2.md`](docs/recovery-v2.md) — rollback, revocation, key
+- [`docs/migration-v1-v2.md`](docs/migration-v1-v2.md): moving a deployment from
+  v1-only to dual-stack to v2-only
+- [`docs/recovery-v2.md`](docs/recovery-v2.md): rollback, revocation, key
   rotation, and failure recovery
-- [`docs/git-sync-v2.md`](docs/git-sync-v2.md) — peer Git synchronization
-- [`docs/protocol-v2.md`](docs/protocol-v2.md) — wire format and security
+- [`docs/git-sync-v2.md`](docs/git-sync-v2.md): peer Git synchronization
+- [`docs/protocol-v2.md`](docs/protocol-v2.md): wire format and security
   properties
-- [`docs/threat-model-v2.md`](docs/threat-model-v2.md) — adversaries and
+- [`docs/threat-model-v2.md`](docs/threat-model-v2.md): adversaries and
   boundaries
-- [`docs/supported-versions.md`](docs/supported-versions.md) — build toolchain,
+- [`docs/supported-versions.md`](docs/supported-versions.md): build toolchain,
   pinned sources, and the update policy
-- [`docs/development.md`](docs/development.md) — repository layout, commands,
-  and local testing
+- [`docs/development.md`](docs/development.md): repository layout, commands, and
+  local testing
 
 ## Notes
 
@@ -582,5 +583,5 @@ by `npm run check:pins`.
 
 ## License
 
-- **Repository default:** [MIT License](./LICENSE) unless a more specific
-  component license applies
+The repository default is the [MIT License](./LICENSE), unless a more specific
+component license applies.

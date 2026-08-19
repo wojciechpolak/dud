@@ -118,17 +118,17 @@ Explicitly in scope. Sender signatures establish identity, not trustworthiness.
 **Can:** send hostile archives, hostile Git bundles, malformed descriptors, and
 resource-amplifying payloads; observe when their deliveries are collected.
 
-**Cannot:** escape the extraction sandbox — hard links, symlinks, special files,
+**Cannot:** escape the extraction sandbox (hard links, symlinks, special files,
 absolute paths, traversal, setuid/setgid, and case-folding or normalization
 collisions are all rejected, and extraction is staged with no-follow resolution
-and an atomic rename into a non-existing destination; contaminate the Git object
-database, because bundles are unbundled and validated in a scratch repository
-and promoted by an explicit refspec; move a local branch or the working tree;
-rewrite a peer remote-tracking ref without confirmation.
+and an atomic rename into a non-existing destination); contaminate the Git
+object database, because bundles are unbundled and validated in a scratch
+repository and promoted by an explicit refspec; move a local branch or the
+working tree; rewrite a peer remote-tracking ref without confirmation.
 
 **Residual:** a peer can correlate nothing about the device's other
-relationships, because identities are per-relationship (`DUD-V2-DEC-005`) — but
-a peer necessarily learns what that peer is sent.
+relationships, because identities are per-relationship (`DUD-V2-DEC-005`), but a
+peer necessarily learns what that peer is sent.
 
 ### 3.8 Unknown Sender
 
@@ -156,7 +156,7 @@ but metadata is not.
 **Exposed:** the peer communication graph. `config.toml`, delivery history,
 transfer state, and `.git/dud/peers/*` record peer aliases, pseudonymous device
 IDs, sequences, timestamps, and acknowledged ref tips. This reconstructs who a
-device communicates with, how often, and when — precisely the correlation the
+device communicates with, how often, and when: precisely the correlation the
 slot design hides from the operator. Pairing state also contains the two
 directional relationship secrets, because the contributory HPKE result cannot be
 reconstructed from the seed and transcript alone.
@@ -333,7 +333,7 @@ their own devices and use the deployment as a relay. The existing limits do not
 contain that: quota is keyed by relationship, so the per-relationship byte
 budget bounds each stranger separately and leaves the deployment as a whole
 unbounded. Only the global creation window and the live-record cap are
-deployment-wide, and both expire with the rendezvous — neither says anything
+deployment-wide, and both expire with the rendezvous; neither says anything
 about the relationship it produced. `/v2/capabilities/reissue` then lets that
 relationship renew itself with no operator involvement.
 
@@ -386,7 +386,7 @@ everywhere, it is refused unless the deployment sets
 under one. The count lives inside the secret so that it reaches every device the
 secret does. A work factor configured per device could disagree between the two
 sides, and that disagreement would surface only as the enrollment refusal that
-also means "wrong secret" — the same reason a deployment-specific salt was
+also means "wrong secret", the same reason a deployment-specific salt was
 rejected above.
 
 Online guessing is bounded separately, at 10 enrollment attempts per source per

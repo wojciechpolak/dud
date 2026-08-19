@@ -40,9 +40,9 @@ reserved for actual server administration such as relationship revocation.
 A pairing code names a rendezvous, not a server: each side reaches the origin
 its own invocation resolves, so both must resolve the same one. Nothing is
 pinned before the relationship exists, which is why `DUD_BASE_URL` still selects
-the origin here — the origin the pairing used then becomes the peer profile's
-pin and outranks that variable from then on. To keep a whole separate identity
-for another deployment, use `DUD_PROFILE` (see
+the origin here; the origin the pairing used then becomes the peer profile's pin
+and outranks that variable from then on. To keep a whole separate identity for
+another deployment, use `DUD_PROFILE` (see
 [`client.md`](client.md#3-running-more-than-one-deployment)) rather than
 repointing the configuration this device already paired with.
 
@@ -61,7 +61,7 @@ is published through a public hostname, for example a Cloudflare Tunnel.
 
 `hard` additionally requires a valid ECH configuration in the hostname's HTTPS
 DNS record. Explicit `off` drops that ECH requirement for development, but it
-relaxes nothing else — public DNS, address-range, TLS 1.3, and redirect checks
+relaxes nothing else: public DNS, address-range, TLS 1.3, and redirect checks
 all still apply.
 
 ## 2. Two devices, two profiles
@@ -81,7 +81,7 @@ state, so initialize each with its own device name and move on to §3.
 
 Two device identities on **one** machine need two separate configuration worlds,
 or both terminals would operate as the same device. That is what `DUD_PROFILE`
-is for — it moves the whole world to `~/.dud/NAME` and the wrapper mounts that
+is for: it moves the whole world to `~/.dud/NAME` and the wrapper mounts that
 one directory into the container:
 
 ```sh
@@ -152,7 +152,7 @@ at least 24 characters, not encoded bytes, because it is the one credential that
 also has to reach every device that may invite. A server can hold the derived
 key instead, which is what a deployment too small to run the key derivation
 wants; see [`server-v2.md`](server-v2.md#31-enrollment-is-closed-by-default).
-`DUD_PEER_ADMIN_SECRET` is not needed for pairing — configure it only if this
+`DUD_PEER_ADMIN_SECRET` is not needed for pairing; configure it only if this
 deployment will expose administrative operations such as relationship
 revocation.
 
@@ -265,7 +265,7 @@ the peer for the delivery again. That copy is removed as soon as the output
 holds the same bytes: an ordinary receive leaves the file you asked for and
 nothing else, and `--id` recovery reads that file back rather than a duplicate.
 
-DUD's copy survives the run only where it is the sole one — an output that was
+DUD's copy survives the run only where it is the sole one: an output that was
 skipped, a message that went to stdout, and the archive behind an extracted
 collection. The receive report names it whenever that happens, and it is pruned
 once the delivery's transport lifetime ends (`--ttl` on the sending side, seven
@@ -296,7 +296,7 @@ dud git status desktop
 
 `sync`, `doctor`, `peer show`, and `git status` always end with the same status
 block, and `send`, `receive`, and the Git commands print it when `-v` is given
-or when something needs attention — anything queued, undrained, quarantined,
+or when something needs attention: anything queued, undrained, quarantined,
 halted, or still waiting in the inbox. A routine transfer therefore reports what
 it did in one line, and a stalled relationship speaks up without being asked.
 Whenever the block is printed, every counter appears, including the zeros, so a
@@ -354,10 +354,10 @@ Then revoke explicitly:
 dud peer revoke laptop --yes
 ```
 
-Revocation is a genuine administration operation and therefore requires the
-private server administration capability. A rollback alert, key replacement,
-lost seed, or lost relationship state requires a fresh pairing code and a new
-relationship ID.
+Revocation is an administration operation and therefore requires the private
+server administration capability. A rollback alert, key replacement, lost seed,
+or lost relationship state requires a fresh pairing code and a new relationship
+ID.
 
 Three commands sound similar and do quite different things. `dud peer revoke` is
 an online protocol operation that preserves local recovery evidence,

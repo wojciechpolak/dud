@@ -24,7 +24,7 @@ See [`server-v2.md`](server-v2.md) for the operational reference and
 
 Capabilities replace the shared secret for transfer, not for admission. A v2
 deployment still holds one deployment-wide credential, `DUD_PEER_SECRET`, and it
-authorizes creating a pairing invitation — nothing else. Once a pair is
+authorizes creating a pairing invitation and nothing else. Once a pair is
 established, every transfer between those two devices is authorized by their own
 capabilities, and the enrollment secret has no further part in it. See
 [`server-v2.md`](server-v2.md#31-enrollment-is-closed-by-default).
@@ -57,7 +57,7 @@ state; run it as long as any v1 client matters to you.
 
 ## 3. Moving to dual-stack
 
-1. Provision the v2 metadata store — D1 on Cloudflare, SQLite in the data
+1. Provision the v2 metadata store: D1 on Cloudflare, SQLite in the data
    directory when self-hosted. On Cloudflare, apply the migration before
    enabling the flag; the Worker refuses to start with v2 enabled and no `DB`
    binding.
@@ -95,7 +95,7 @@ dud doctor
 
 Pairing is a mutually confirmed exchange over a short-lived rendezvous; the
 procedure and its confirmation step are in [`peer-setup.md`](peer-setup.md).
-Pair every pair of devices that needs to exchange data — the peer graph is not
+Pair every pair of devices that needs to exchange data; the peer graph is not
 transitive, and there is no directory.
 
 Once paired, the peer equivalents of the dead drop workflows are:
@@ -138,7 +138,7 @@ The first must print `404`; discovery must advertise protocols `[2]`.
    authorized a v2 route.
 
 Disabling v1 does not delete dropped objects. They stay in the blob store until
-they expire or you remove them, and re-enabling v1 makes them reachable again —
+they expire or you remove them, and re-enabling v1 makes them reachable again,
 which is what makes step 3 reversible.
 
 ## 6. Rolling back
@@ -149,7 +149,7 @@ Every step above is reversible, and rolling back does not corrupt state:
   objects uploaded before the cutover.
 - Setting `DUD_PEER_ENABLED=false` makes `/v2/` unreachable while leaving all v2
   metadata and bodies untouched at rest, so re-enabling restores the exact prior
-  state — including replay protection, which does not reset.
+  state, including replay protection, which does not reset.
 - A device that downgrades to a v1-only client leaves its peer configuration,
   seed, and peer graph untouched, so upgrading again finds the same identity.
 

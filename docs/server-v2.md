@@ -127,7 +127,7 @@ Worker invocation is allowed, and it would otherwise be paid on the first gated
 invitation after a cold start. **On a free-tier Worker, use this form.**
 
 It gives up nothing. The work factor exists to price an attacker's guesses, and
-an attacker guesses passphrases, not keys — so moving the derivation off the
+an attacker guesses passphrases, not keys, so moving the derivation off the
 server leaves each guess exactly as expensive as before. Clients are unchanged:
 they still hold the passphrase, still stretch it, and neither know nor care
 which form the deployment holds.
@@ -156,7 +156,7 @@ DUD_PEER_SECRET='dud2-enroll-kdf:60000:squid-lantern-rotate-9-mango'
 ```
 
 The count travels with the secret to every device that holds it, so the two
-sides cannot drift apart — a work factor configured separately could, and
+sides cannot drift apart; a work factor configured separately could, and
 enrollment refusals are deliberately indistinguishable, so that drift would be
 unreadable. Accepted counts run from 10,000 to 10,000,000.
 
@@ -199,10 +199,10 @@ Use `--local` to prepare the database that `npx wrangler dev` uses.
 ### Recreating the database
 
 The schema is one file that is edited in place, so a schema change does not
-migrate a database that already applied it — recreate each one. Wrangler
-recorded the file in `d1_migrations` and skips it on the next apply, and every
-statement in it is `IF NOT EXISTS`, so a database left alone keeps its old
-columns and fails the affected routes with `D1_ERROR: … SQLITE_ERROR` while
+migrate a database that already applied it; recreate each one. Wrangler recorded
+the file in `d1_migrations` and skips it on the next apply, and every statement
+in it is `IF NOT EXISTS`, so a database left alone keeps its old columns and
+fails the affected routes with `D1_ERROR: … SQLITE_ERROR` while
 `migrations list` still reports nothing pending.
 
 Recreating drops every relationship, so each paired device has to pair again.
@@ -213,7 +213,7 @@ npx wrangler d1 migrations apply dud-v2 --remote
 ```
 
 Delivery bodies in R2 outlive the reset. The metadata that named them is gone,
-so they become orphans under `deliveries/` and `staging/` — inert, since request
+so they become orphans under `deliveries/` and `staging/`, inert since request
 handling never lists the bucket, but still billed. Delete those prefixes with
 `wrangler r2` when the deployment had completed deliveries.
 
@@ -241,8 +241,8 @@ directory, or the reverse, produces a deployment whose metadata and bodies
 disagree; §7 explains how to reconcile that.
 
 `DUD_PUBLIC_BASE_URL` is required when v2 is enabled and must be a canonical
-HTTPS origin — scheme, host, optional port, and nothing else. Every v2 request
-is bound to that origin, so a mismatch between it and the hostname clients dial
+HTTPS origin: scheme, host, optional port, and nothing else. Every v2 request is
+bound to that origin, so a mismatch between it and the hostname clients dial
 rejects every authorization.
 
 Put HTTPS in front of the server, either with a reverse proxy or with

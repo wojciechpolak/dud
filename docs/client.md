@@ -66,7 +66,7 @@ release binaries are built with, so `dud --version` reports the version the
 formula installed. It declares `age`, `git`, and `qrencode` as dependencies and
 needs `go` only while building. The tap publishes no bottles, so `brew install`
 compiles the client on the machine it runs on rather than fetching a prebuilt
-one — which also means the provenance attestation above covers the published
+one, which also means the provenance attestation above covers the published
 binaries, not a Homebrew build. The tap is
 [wojciechpolak/homebrew-dud](https://github.com/wojciechpolak/homebrew-dud), and
 each stable release regenerates its formula.
@@ -142,7 +142,7 @@ that sets each one:
 
 The peer profile sits above the environment on purpose. A paired relationship
 pins its own canonical origin, which is bound into every signed descriptor,
-while the `DUD_*` variables are ambient — they are also the only way to point
+while the `DUD_*` variables are ambient; they are also the only way to point
 dead drop commands at a deployment, since those commands read no configuration
 file. A shell that exports `DUD_BASE_URL` for drops therefore keeps working for
 drops without retargeting any paired peer.
@@ -163,9 +163,9 @@ The origin that invitation used becomes the profile's pin.
 A world directory is one world: one device identity, one seed, one optional
 `v2-admin-capability`, and one peer graph. The peers inside it may each be
 pinned to a different origin, so several servers need no extra setup for
-transfers — but pairing starts from the origin the world itself resolves, and
-the device identity is shared by everything in it. Testing a second deployment
-is therefore a second world, not a second peer.
+transfers, but pairing starts from the origin the world itself resolves, and the
+device identity is shared by everything in it. Testing a second deployment is
+therefore a second world, not a second peer.
 
 `DUD_PROFILE` selects one. It names a directory under the DUD root —
 `~/.dud/NAME` — and the wrapper mounts that one directory into the container:
@@ -198,7 +198,7 @@ under one root that no convention asks anyone to synchronize. `~/.config` in
 particular is a path dotfile managers routinely commit to a repository, and a
 device seed must never travel that way.
 
-`DUD_HOME` moves the root. Leave it unset for normal use — the wrapper creates
+`DUD_HOME` moves the root. Leave it unset for normal use; the wrapper creates
 the private directories and maps them itself. Each machine gets its own seed and
 state, so two real devices need no variables at all; use `DUD_PROFILE` rather
 than `DUD_HOME` when one machine needs a second world.
@@ -206,7 +206,7 @@ than `DUD_HOME` when one machine needs a second world.
 Removing `~/.dud` removes every world, but it is not a complete erasure: peer
 state inside a Git repository lives in that repository's own `.git/dud`, and the
 client image stays in the local Docker store. `dud erase` is the command that
-accounts for this — it reports what it removed, what it retained, and what it
+accounts for this: it reports what it removed, what it retained, and what it
 cannot reach at all, including copies already held by a peer or the server. See
 `recovery-v2.md` §7.
 
@@ -227,7 +227,7 @@ printf '%s' 'secret message' | docker run --rm -i --tmpfs /tmp:rw,noexec,nosuid,
 ```
 
 > **Security note**: `--tmpfs /tmp` keeps sensitive intermediate files
-> (encrypted payloads, TLS traces) in memory only — they never reach the
+> (encrypted payloads, TLS traces) in memory only; they never reach the
 > container's overlay filesystem and are gone when the container exits.
 
 Repeating those flags by hand is what the shell wrapper in §6 exists to avoid.

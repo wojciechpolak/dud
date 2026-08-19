@@ -72,7 +72,7 @@ perform deliberately:
 git merge --ff-only laptop/main
 ```
 
-For bidirectional sync, give each side the other's alias — `laptop` on the
+For bidirectional sync, give each side the other's alias: `laptop` on the
 desktop and `desktop` on the laptop.
 
 ## 4. History rewrites
@@ -86,7 +86,7 @@ rewrite. It is refused by default:
 
 Re-run with `--allow-rewrite` only when you know the sender rewrote history on
 purpose. Because a checkpoint is complete, approving a rewrite also removes
-remote-tracking refs for branches the sender deleted — that is the point of a
+remote-tracking refs for branches the sender deleted; that is the point of a
 checkpoint, and the reason the approval is explicit.
 
 ## 5. What the receiver enforces
@@ -101,7 +101,7 @@ repository and leaves your refs and objects untouched.
 - free space is at least three times the bundle size
 - the bundle header's version, refs, and prerequisites match the signed
   encrypted metadata exactly
-- there are no prerequisites at all — a complete checkpoint has none
+- there are no prerequisites at all; a complete checkpoint has none
 
 **While unpacking**, Git runs with hooks disabled, all protocols denied except
 the local file access it needs, `fsck` enabled on both transfer and fetch, one
@@ -111,7 +111,7 @@ packing thread, bounded pack memory, and on Linux an address-space `ulimit`.
 
 - `git fsck --strict --full --no-reflogs` passes
 - the pack contains no more than the object-count limit, counting objects that
-  no advertised ref reaches — `fsck` accepts dangling objects, so a hostile
+  no advertised ref reaches; `fsck` accepts dangling objects, so a hostile
   sender can pad a pack past them
 - no delta chain is deeper than the delta-depth limit
 - the expanded object store is within the disk budget
@@ -200,8 +200,8 @@ yours the peer refused.
 ## 8. What the server learns
 
 A checkpoint is an opaque delivery body. The server learns its size, its timing,
-its TTL, and that it belongs to a relationship — the same metadata every other
-v2 delivery exposes, enumerated in
+its TTL, and that it belongs to a relationship: the same metadata every other v2
+delivery exposes, enumerated in
 [`threat-model-v2.md`](threat-model-v2.md#4-known-metadata-leakage). It does not
 learn that the payload is a Git bundle, which branches it carries, or anything
 about the commits.

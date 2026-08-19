@@ -170,9 +170,9 @@ moves a local branch, so apply the imported branch deliberately:
 git merge --ff-only machine-a/main
 ```
 
-For repeated bidirectional sync, give each side the other's name — `machine-a`
-on machine B and `machine-b` on machine A. The paired equivalent, which adds
-sender authentication and ordering, is in [`git-sync-v2.md`](git-sync-v2.md).
+For repeated bidirectional sync, give each side the other's name: `machine-a` on
+machine B and `machine-b` on machine A. The paired equivalent, which adds sender
+authentication and ordering, is in [`git-sync-v2.md`](git-sync-v2.md).
 
 ## 6. Flush expired objects
 

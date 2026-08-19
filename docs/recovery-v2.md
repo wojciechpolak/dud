@@ -103,14 +103,14 @@ any.
 `dud receive PEER` drains every waiting delivery in one run, so a run that ends
 with work still queued says why in its `Stopped` block:
 
-- **Git checkpoint.** Applying one needs a repository this command does not
+- **Git checkpoint:** applying one needs a repository this command does not
   have. Everything ahead of it is already committed; run the
   `dud git fetch PEER` the report names, then receive again.
 - **Conflict**, under `--on-conflict refuse`. The named output already exists
   with different contents. Move it aside, or rerun with the default
   `--on-conflict skip`, which commits and acknowledges the delivery without
   writing the file.
-- **Already applied.** The oldest delivery is one this device has committed and
+- **Already applied:** the oldest delivery is one this device has committed and
   the server has not yet retired. The completion is queued; `dud sync PEER`
   retries it.
 
@@ -129,7 +129,7 @@ editing local state by hand.
 Symptom: a peer operation fails because the capability is no longer active.
 
 Capabilities expire on their own schedule and the client reissues them through
-`/v2/capabilities/reissue` as part of normal peer work — proving possession of
+`/v2/capabilities/reissue` as part of normal peer work, proving possession of
 the relationship secret, not presenting an administrative credential. In the
 usual case a plain `dud sync` restores service, and `dud peer show PEER --json`
 reports the reissue count.
@@ -175,7 +175,7 @@ anything.
 
 ## 7. Corrupted or partially restored server state
 
-Symptom: metadata and bodies disagree — usually after restoring `v2.sqlite`
+Symptom: metadata and bodies disagree, usually after restoring `v2.sqlite`
 without the body directory, or the reverse.
 
 Both directions are detectable and neither is silently ignored: a delivery whose
@@ -199,8 +199,8 @@ npm run v2:admin -- reconcile --data-dir ./dud-data --apply --min-age 3600
 exists so a body staged by an in-flight upload is never mistaken for an orphan;
 do not lower it below the time a large upload takes on your deployment.
 
-Metadata rows whose body is gone are not repairable — the ciphertext is the
-data. The sender still holds the plaintext, so the recovery is to send again.
+Metadata rows whose body is gone are not repairable; the ciphertext is the data.
+The sender still holds the plaintext, so the recovery is to send again.
 
 Prevention: back up the data directory as one unit. On Cloudflare, D1 and R2
 have independent backup schedules, so expect to reconcile after any restore that
@@ -216,7 +216,7 @@ DUD_PEER_DEPLOYMENT_KEY=<old> DUD_PEER_NEW_DEPLOYMENT_KEY=<new> \
 ```
 
 Neither key is accepted on the command line. Deploy the new key only after the
-rewrap reports success, and keep the old key until then — a deployment running
+rewrap reports success, and keep the old key until then; a deployment running
 the new key against un-rewrapped records cannot decrypt any verifier secret.
 
 If the old key is lost outright, every relationship must re-pair. Nothing else
@@ -232,10 +232,10 @@ configuration.
 the schema version, and peer counts, and lists each problem under `issues` in
 its `Local state` section. Two cases have specific fixes:
 
-- **Group- or world-accessible files or directories.** The client fails closed
+- **Group- or world-accessible files or directories:** the client fails closed
   rather than reading a configuration or seed that is not mode `0600`. Restore
   the permissions; do not work around it.
-- **An unsupported schema version.** Local v2 state cannot be migrated across a
+- **An unsupported schema version:** local v2 state cannot be migrated across a
   schema version change. Erase local v2 state, initialize again, and re-pair:
 
 ```sh
@@ -308,7 +308,7 @@ next delivery accepted on that chain, so a later gap stops the chain again and
 is not waved through on the strength of the earlier approval.
 
 Ordering still holds from the delivery that resumes the chain onward. It does
-not cover what was skipped, and the skipped payloads are not recoverable — ask
+not cover what was skipped, and the skipped payloads are not recoverable; ask
 the sender to send them again.
 
 ## 12. Related documents

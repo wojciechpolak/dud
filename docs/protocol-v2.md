@@ -364,7 +364,7 @@ signature  = Ed25519(message_signing_key, sig_input)
 
 `message_name` is exactly `acceptance`, `key-confirmation`, or
 `pairing-complete`. The signature is carried alongside the map and is never a
-member of the map it signs. “Pairing signing key” means the epoch-0 Ed25519
+member of the map it signs. "Pairing signing key" means the epoch-0 Ed25519
 relationship signing key whose public key is in the transcript, not
 `*_pairing_id`. Acceptance is signed by the invitee's key, key confirmation by
 the inviter's key, and each completion by the corresponding role's key.
@@ -821,7 +821,7 @@ delivery is also not consumable by any other command, one such delivery would
 silence the whole relationship rather than one transfer.
 
 A refusal is permitted only when the cause is a deterministic function of signed
-content or of a durable local limit — metadata the release cannot implement, a
+content or of a durable local limit: metadata the release cannot implement, a
 payload contradicting its own signed metadata, or a bounded resource limit the
 receiver enforces by policy. It `MUST NOT` be issued for an environment-
 dependent failure such as exhausted disk space, an exceeded time budget, or a
@@ -1077,7 +1077,7 @@ resolver it does not control:
 
 The production helper rejects `DUD_CONNECT_TO`; only the test transport can
 inject addresses. DoH bodies, headers, and redirect count all have explicit
-bounds, as do bounded response bodies — which is every v2 control message.
+bounds, as do bounded response bodies, which is every v2 control message.
 
 Time is bounded per phase rather than by one whole-request deadline, because a
 100 MB dead drop transfer is legitimately longer than any control-plane budget.
@@ -1239,7 +1239,7 @@ Enforcement IDs:
 
 Enforcement ID 3 reports whether `POST /v2/pairing/rendezvous` requires the
 proof of [§11.3](#113-pairing). It is orthogonal to feature ID 3: a gated
-deployment still advertises pairing, because pairing works — it needs a
+deployment still advertises pairing, because pairing works; it needs a
 credential. A client that does not read this entry ignores it under the
 unknown-value rule below and learns the same thing from the refusal.
 
