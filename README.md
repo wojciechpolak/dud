@@ -35,6 +35,11 @@ name. For one-off sharing, use a dead drop addressed by an opaque ID.
 > hard mode, DoH, or exactly TLS 1.3 the way the DUD client does, and those
 > checks are what the threat model rests on.
 
+<!-- prettier-ignore -->
+> [!TIP]
+> Looking for discreet HTTPS and WebSocket proxy instead? Check out
+> [dproxy](https://github.com/wojciechpolak/dproxy).
+
 Stack:
 
 - [Cloudflare Worker](https://workers.cloudflare.com/)
