@@ -46,7 +46,7 @@ On macOS and Linux, Homebrew installs the same client and brings the helpers it
 calls out to along with it:
 
 ```sh
-brew install wojciechpolak/homebrew-dud/dud
+brew install wojciechpolak/dud/dud
 ```
 
 The name has to be spelled in full. Homebrew's own index already carries an
@@ -58,7 +58,7 @@ whichever is there. `upgrade`, `reinstall`, and `uninstall` need the qualified
 name too:
 
 ```sh
-brew upgrade wojciechpolak/homebrew-dud/dud
+brew upgrade wojciechpolak/dud/dud
 ```
 
 The formula builds from the source archive of a release tag with the flags the

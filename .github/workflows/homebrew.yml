@@ -1,7 +1,7 @@
 name: Homebrew tap
 
 # Publishes a released version of the client to wojciechpolak/homebrew-dud,
-# which is what `brew install wojciechpolak/homebrew-dud/dud` resolves.
+# which is what `brew install wojciechpolak/dud/dud` resolves.
 #
 # The tap formula is derived from a release, never the other way round, so this
 # runs after the release is published and is the only writer of Formula/dud.rb.

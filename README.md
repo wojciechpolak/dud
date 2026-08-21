@@ -153,7 +153,7 @@ Homebrew installs that same client on macOS and Linux, and installs `age`,
 `git`, and `qrencode` with it instead of leaving them to you:
 
 ```sh
-brew install wojciechpolak/homebrew-dud/dud
+brew install wojciechpolak/dud/dud
 ```
 
 The qualified name is required. Homebrew's own index already carries an

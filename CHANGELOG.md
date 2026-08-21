@@ -11,11 +11,11 @@ and this project follows
 ### Added
 
 - Install the client with Homebrew on macOS and Linux:
-  `brew install wojciechpolak/homebrew-dud/dud`. The formula builds from the
-  release tag with the flags release binaries use, and installs `age`, `git`,
-  and `qrencode` alongside it. The name must be qualified: Homebrew's own index
-  carries an unrelated formula named `dud`, so a bare `brew install dud`
-  resolves to that one, and the two cannot be installed at the same time.
+  `brew install wojciechpolak/dud/dud`. The formula builds from the release tag
+  with the flags release binaries use, and installs `age`, `git`, and `qrencode`
+  alongside it. The name must be qualified: Homebrew's own index carries an
+  unrelated formula named `dud`, so a bare `brew install dud` resolves to that
+  one, and the two cannot be installed at the same time.
 - Publish the tap formula from each stable release.
   `scripts/render-homebrew-formula.mjs` renders it from the release tag and the
   checksum of that tag's archive, and `.github/workflows/homebrew.yml` commits
