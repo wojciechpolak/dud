@@ -2,10 +2,9 @@
 // Copyright (C) 2026 Wojciech Polak
 
 import { bytesEqual } from './cbor.js';
+import { runMemoryV2Maintenance } from './v2-memory-maintenance.js';
 import { V2OperationConflictError } from './v2-repository.js';
-import { sha256 } from './sha256.js';
 import type {
-  V2BodyStore,
   V2CapabilityRegistration,
   V2DeliveryReservation,
   V2Repository,
@@ -15,71 +14,7 @@ import type {
   V2ReconciliationRepository,
 } from './v2-repository.js';
 
-/** In-memory opaque body store for shared repository and handler tests. */
-export class MemoryV2BodyStore implements V2BodyStore {
-  private readonly bodies = new Map<string, Uint8Array>();
-
-  async stage(
-    body: ReadableStream<Uint8Array>,
-    length: number,
-    digest: Uint8Array,
-  ): Promise<string> {
-    const key = `staging/${crypto.randomUUID().replaceAll('-', '')}.bin`;
-    await this.put(key, body, length, digest);
-    return key;
-  }
-
-  async promote(stagedKey: string, key: string): Promise<void> {
-    const staged = this.bodies.get(stagedKey);
-    if (!staged) {
-      throw new Error('Staged delivery body is unavailable.');
-    }
-    const existing = this.bodies.get(key);
-    if (existing && !bytesEqual(existing, staged)) {
-      throw new Error('Delivery body conflicts with an existing payload.');
-    }
-    if (!existing) {
-      this.bodies.set(key, staged);
-    }
-    this.bodies.delete(stagedKey);
-  }
-
-  async put(
-    key: string,
-    body: ReadableStream<Uint8Array>,
-    length: number,
-    digest: Uint8Array,
-  ): Promise<void> {
-    const bytes = new Uint8Array(await new Response(body).arrayBuffer());
-    if (bytes.byteLength !== length || !bytesEqual(sha256(bytes), digest)) {
-      throw new Error('Delivery body does not match its declared digest.');
-    }
-    this.bodies.set(key, bytes);
-  }
-
-  async get(key: string) {
-    const bytes = this.bodies.get(key);
-    if (!bytes) {
-      return null;
-    }
-    return {
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(Uint8Array.from(bytes));
-          controller.close();
-        },
-      }),
-      size: bytes.byteLength,
-    };
-  }
-
-  async head(key: string): Promise<boolean> {
-    return this.bodies.has(key);
-  }
-  async delete(key: string): Promise<void> {
-    this.bodies.delete(key);
-  }
-}
+export { MemoryV2BodyStore } from './v2-memory-body-store.js';
 
 function hex(value: Uint8Array): string {
   return Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join(
@@ -96,6 +31,16 @@ function operationKey(operationId: Uint8Array): string {
     throw new Error('Operation ID is invalid.');
   }
   return hex(operationId);
+}
+
+type ReserveDeliveryInput = Parameters<V2Repository['reserveDelivery']>[0];
+type ReserveDeliveryResult =
+  | V2DeliveryReservation
+  | { existing: V2RepositoryDelivery };
+
+interface DeliveryAuthorizationClaims {
+  nonceKeys: string[];
+  rateCounts: Map<string, number>;
 }
 
 /** Reference repository used by conformance tests and local handler tests. */
@@ -289,125 +234,158 @@ export class MemoryV2Repository
     this.stagedBodies.delete(id);
   }
 
-  async reserveDelivery(
-    input: Parameters<V2Repository['reserveDelivery']>[0],
-  ): Promise<V2DeliveryReservation | { existing: V2RepositoryDelivery }> {
-    const capability = this.capabilities.get(input.capabilityId);
+  private activeDeliveryCapability(
+    capabilityId: string,
+    now: number,
+  ): V2RepositoryCapability {
+    const capability = this.capabilities.get(capabilityId);
     if (
       !capability ||
       capability.revokedAt !== undefined ||
-      capability.expiresAt <= input.now
+      capability.expiresAt <= now
     ) {
       throw new Error('Delivery capability is not active.');
     }
-    const authorization = input.authorization;
-    let nonceKeys: string[] = [];
-    let rateCounts = new Map<string, number>();
-    if (authorization) {
-      nonceKeys = authorization.claims.map(
+    return capability;
+  }
+
+  private validateDeliveryAuthorization(
+    authorization: ReserveDeliveryInput['authorization'],
+    now: number,
+  ): DeliveryAuthorizationClaims {
+    const nonceKeys =
+      authorization?.claims.map(
         (claim) => `${claim.capabilityId}|${hex(claim.nonce)}`,
+      ) ?? [];
+    const rateCounts = new Map<string, number>();
+    if (!authorization) {
+      return { nonceKeys, rateCounts };
+    }
+    for (const claim of authorization.claims) {
+      const authorized = this.capabilities.get(claim.capabilityId);
+      if (
+        !authorized ||
+        authorized.revokedAt !== undefined ||
+        authorized.expiresAt <= now
+      ) {
+        throw new Error('Request capability is not active.');
+      }
+      rateCounts.set(
+        claim.capabilityId,
+        (rateCounts.get(claim.capabilityId) ?? 0) + 1,
       );
-      const minute = Math.floor(input.now / 60);
-      for (const claim of authorization.claims) {
-        const authorized = this.capabilities.get(claim.capabilityId);
-        if (
-          !authorized ||
-          authorized.revokedAt !== undefined ||
-          authorized.expiresAt <= input.now
-        ) {
-          throw new Error('Request capability is not active.');
-        }
-        rateCounts.set(
-          claim.capabilityId,
-          (rateCounts.get(claim.capabilityId) ?? 0) + 1,
-        );
-      }
-      if (
-        new Set(nonceKeys).size !== nonceKeys.length ||
-        nonceKeys.some((key) => (this.nonces.get(key) ?? -1) >= input.now) ||
-        Array.from(rateCounts).some(([capabilityId, count]) => {
-          const window = this.rateWindows.get(capabilityId);
-          return (
-            (window?.minute === minute ? window.count : 0) + count >
-            authorization.maximumRequestsPerMinute
-          );
-        })
-      ) {
-        throw new Error('Request authorization is unavailable.');
-      }
     }
-    const key = operationKey(input.operationId);
-    const existing = this.operations.get(key);
-    if (existing) {
-      if (!bytesEqual(existing.digest, input.operationDigest)) {
-        throw new V2OperationConflictError(
-          'Operation ID conflicts with different bytes.',
+    const minute = Math.floor(now / 60);
+    const unavailable =
+      new Set(nonceKeys).size !== nonceKeys.length ||
+      nonceKeys.some((key) => (this.nonces.get(key) ?? -1) >= now) ||
+      Array.from(rateCounts).some(([capabilityId, count]) => {
+        const window = this.rateWindows.get(capabilityId);
+        return (
+          (window?.minute === minute ? window.count : 0) + count >
+          authorization.maximumRequestsPerMinute
         );
-      }
-      this.commitDeliveryAuthorization(
-        authorization,
-        nonceKeys,
-        rateCounts,
-        input.now,
+      });
+    if (unavailable) {
+      throw new Error('Request authorization is unavailable.');
+    }
+    return { nonceKeys, rateCounts };
+  }
+
+  private resolveExistingReservation(
+    input: ReserveDeliveryInput,
+    operation: string,
+    claims: DeliveryAuthorizationClaims,
+  ): ReserveDeliveryResult | null {
+    const existing = this.operations.get(operation);
+    if (!existing) {
+      return null;
+    }
+    if (!bytesEqual(existing.digest, input.operationDigest)) {
+      throw new V2OperationConflictError(
+        'Operation ID conflicts with different bytes.',
       );
-      this.markControlEventsConsumed(input.consumeControlEvents);
-      const delivery = this.deliveries.get(existing.deliveryId);
-      if (delivery) {
-        return { existing: clone(delivery) };
-      }
-      const reservation = this.reservations.get(existing.deliveryId);
-      if (!reservation) {
-        throw new Error('Operation reservation is incomplete.');
-      }
-      return clone(reservation);
-    }
-    if (input.maximumPendingDeliveries !== undefined) {
-      const pending =
-        Array.from(this.deliveries.values()).filter(
-          (delivery) =>
-            delivery.state === 'published' &&
-            delivery.expiresAt > input.now &&
-            delivery.relationshipId === capability.relationshipId &&
-            delivery.direction === capability.direction,
-        ).length +
-        Array.from(this.reservations).filter(
-          ([id, reservation]) =>
-            reservation.expiresAt > input.now &&
-            this.reservationRelationships.get(id) ===
-              capability.relationshipId &&
-            this.reservationDirections.get(id) === capability.direction,
-        ).length;
-      if (pending >= input.maximumPendingDeliveries) {
-        throw new Error('Relationship pending delivery limit is reached.');
-      }
-    }
-    if (
-      input.maximumTotalBytes !== undefined ||
-      input.maximumObjectsPerCapability !== undefined
-    ) {
-      const account = this.quotaAccounts.get(capability.relationshipId) ?? {
-        committedBytes: 0,
-        reservedBytes: 0,
-        objectCount: 0,
-      };
-      if (
-        input.maximumTotalBytes !== undefined &&
-        account.committedBytes + account.reservedBytes + input.payloadLength >
-          input.maximumTotalBytes
-      ) {
-        throw new Error('Relationship delivery quota is exhausted.');
-      }
-      if (
-        input.maximumObjectsPerCapability !== undefined &&
-        account.objectCount >= input.maximumObjectsPerCapability
-      ) {
-        throw new Error('Relationship delivery object quota is exhausted.');
-      }
     }
     this.commitDeliveryAuthorization(
-      authorization,
-      nonceKeys,
-      rateCounts,
+      input.authorization,
+      claims.nonceKeys,
+      claims.rateCounts,
+      input.now,
+    );
+    this.markControlEventsConsumed(input.consumeControlEvents);
+    const delivery = this.deliveries.get(existing.deliveryId);
+    if (delivery) {
+      return { existing: clone(delivery) };
+    }
+    const reservation = this.reservations.get(existing.deliveryId);
+    if (!reservation) {
+      throw new Error('Operation reservation is incomplete.');
+    }
+    return clone(reservation);
+  }
+
+  private assertPendingDeliveryLimit(
+    input: ReserveDeliveryInput,
+    capability: V2RepositoryCapability,
+  ): void {
+    if (input.maximumPendingDeliveries === undefined) {
+      return;
+    }
+    const pendingDeliveries = Array.from(this.deliveries.values()).filter(
+      (delivery) =>
+        delivery.state === 'published' &&
+        delivery.expiresAt > input.now &&
+        delivery.relationshipId === capability.relationshipId &&
+        delivery.direction === capability.direction,
+    ).length;
+    const pendingReservations = Array.from(this.reservations).filter(
+      ([id, reservation]) =>
+        reservation.expiresAt > input.now &&
+        this.reservationRelationships.get(id) === capability.relationshipId &&
+        this.reservationDirections.get(id) === capability.direction,
+    ).length;
+    if (
+      pendingDeliveries + pendingReservations >=
+      input.maximumPendingDeliveries
+    ) {
+      throw new Error('Relationship pending delivery limit is reached.');
+    }
+  }
+
+  private assertDeliveryQuota(
+    input: ReserveDeliveryInput,
+    relationshipId: string,
+  ): void {
+    const account = this.quotaAccounts.get(relationshipId) ?? {
+      committedBytes: 0,
+      reservedBytes: 0,
+      objectCount: 0,
+    };
+    if (
+      input.maximumTotalBytes !== undefined &&
+      account.committedBytes + account.reservedBytes + input.payloadLength >
+        input.maximumTotalBytes
+    ) {
+      throw new Error('Relationship delivery quota is exhausted.');
+    }
+    if (
+      input.maximumObjectsPerCapability !== undefined &&
+      account.objectCount >= input.maximumObjectsPerCapability
+    ) {
+      throw new Error('Relationship delivery object quota is exhausted.');
+    }
+  }
+
+  private createDeliveryReservation(
+    input: ReserveDeliveryInput,
+    capability: V2RepositoryCapability,
+    operation: string,
+    claims: DeliveryAuthorizationClaims,
+  ): V2DeliveryReservation {
+    this.commitDeliveryAuthorization(
+      input.authorization,
+      claims.nonceKeys,
+      claims.rateCounts,
       input.now,
     );
     const deliveryId = crypto.randomUUID().replaceAll('-', '');
@@ -419,31 +397,61 @@ export class MemoryV2Repository
     this.reservations.set(deliveryId, reservation);
     this.reservationRelationships.set(deliveryId, capability.relationshipId);
     this.reservationDirections.set(deliveryId, capability.direction);
-    if (
-      input.maximumTotalBytes !== undefined ||
-      input.maximumObjectsPerCapability !== undefined
-    ) {
-      const account = this.quotaAccounts.get(capability.relationshipId) ?? {
-        committedBytes: 0,
-        reservedBytes: 0,
-        objectCount: 0,
-      };
-      if (input.maximumTotalBytes !== undefined) {
-        account.reservedBytes += input.payloadLength;
-        this.reservationBytes.set(deliveryId, input.payloadLength);
-      }
-      if (input.maximumObjectsPerCapability !== undefined) {
-        account.objectCount++;
-        this.reservationObjects.add(deliveryId);
-      }
-      this.quotaAccounts.set(capability.relationshipId, account);
-    }
-    this.operations.set(key, {
+    this.reserveDeliveryQuota(input, capability.relationshipId, deliveryId);
+    this.operations.set(operation, {
       digest: Uint8Array.from(input.operationDigest),
       deliveryId,
     });
     this.markControlEventsConsumed(input.consumeControlEvents);
     return clone(reservation);
+  }
+
+  private reserveDeliveryQuota(
+    input: ReserveDeliveryInput,
+    relationshipId: string,
+    deliveryId: string,
+  ): void {
+    if (
+      input.maximumTotalBytes === undefined &&
+      input.maximumObjectsPerCapability === undefined
+    ) {
+      return;
+    }
+    const account = this.quotaAccounts.get(relationshipId) ?? {
+      committedBytes: 0,
+      reservedBytes: 0,
+      objectCount: 0,
+    };
+    if (input.maximumTotalBytes !== undefined) {
+      account.reservedBytes += input.payloadLength;
+      this.reservationBytes.set(deliveryId, input.payloadLength);
+    }
+    if (input.maximumObjectsPerCapability !== undefined) {
+      account.objectCount++;
+      this.reservationObjects.add(deliveryId);
+    }
+    this.quotaAccounts.set(relationshipId, account);
+  }
+
+  async reserveDelivery(
+    input: ReserveDeliveryInput,
+  ): Promise<ReserveDeliveryResult> {
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    const claims = this.validateDeliveryAuthorization(
+      input.authorization,
+      input.now,
+    );
+    const operation = operationKey(input.operationId);
+    const existing = this.resolveExistingReservation(input, operation, claims);
+    if (existing) {
+      return existing;
+    }
+    this.assertPendingDeliveryLimit(input, capability);
+    this.assertDeliveryQuota(input, capability.relationshipId);
+    return this.createDeliveryReservation(input, capability, operation, claims);
   }
 
   async publishDelivery(
@@ -891,110 +899,26 @@ export class MemoryV2Repository
     }
   }
   async runMaintenance(now: number, limit: number) {
-    const expiredDeliveryIds: string[] = [];
-    const expiredBodyKeys: string[] = [];
-    let deletedNonces = 0;
-    let deletedControlEvents = 0;
-    for (const [id, delivery] of this.deliveries) {
-      if (expiredDeliveryIds.length >= limit) {
-        break;
-      }
-      if (delivery.expiresAt <= now) {
-        this.deliveries.delete(id);
-        const account = this.quotaAccounts.get(delivery.relationshipId);
-        if (account) {
-          account.committedBytes -= delivery.payloadLength;
-          if (this.deliveryObjects.delete(id)) {
-            account.objectCount--;
-          }
-        }
-        this.deleteOperationForDelivery(id);
-        expiredDeliveryIds.push(id);
-        expiredBodyKeys.push(delivery.payloadKey);
-      }
-    }
-    for (const [id, reservation] of this.reservations) {
-      if (expiredBodyKeys.length >= limit) {
-        break;
-      }
-      if (reservation.expiresAt <= now) {
-        this.reservations.delete(id);
-        const reservedBytes = this.reservationBytes.get(id);
-        if (reservedBytes !== undefined) {
-          const relationshipId = this.reservationRelationships.get(id);
-          const account = relationshipId
-            ? this.quotaAccounts.get(relationshipId)
-            : undefined;
-          if (account) {
-            account.reservedBytes -= reservedBytes;
-          }
-          this.reservationBytes.delete(id);
-        }
-        if (this.reservationObjects.delete(id)) {
-          const relationshipId = this.reservationRelationships.get(id);
-          const account = relationshipId
-            ? this.quotaAccounts.get(relationshipId)
-            : undefined;
-          if (account) {
-            account.objectCount--;
-          }
-        }
-        this.reservationRelationships.delete(id);
-        this.reservationDirections.delete(id);
-        this.deleteOperationForDelivery(id);
-        expiredBodyKeys.push(reservation.payloadKey);
-      }
-    }
-    for (const [id, staged] of this.stagedBodies) {
-      if (staged.expiresAt <= now) {
-        this.stagedBodies.delete(id);
-        expiredBodyKeys.push(`staging/${id}.bin`);
-      }
-    }
-    for (const [key, expiresAt] of this.nonces) {
-      if (deletedNonces >= limit) {
-        break;
-      }
-      if (expiresAt < now) {
-        this.nonces.delete(key);
-        deletedNonces++;
-      }
-    }
-    for (const [id, event] of this.controlEvents) {
-      if (deletedControlEvents >= limit) {
-        break;
-      }
-      if (event.expiresAt <= now) {
-        this.controlEvents.delete(id);
-        this.controlOperations.delete(operationKey(event.operationId));
-        deletedControlEvents++;
-      }
-    }
-    const minute = Math.floor(now / 60);
-    let deletedRateWindows = 0;
-    for (const [capabilityId, window] of this.rateWindows) {
-      if (deletedRateWindows >= limit) {
-        break;
-      }
-      if (window.minute < minute) {
-        this.rateWindows.delete(capabilityId);
-        deletedRateWindows++;
-      }
-    }
-    return {
-      expiredDeliveryIds,
-      expiredBodyKeys,
-      deletedNonces,
-      deletedControlEvents,
-      deletedRateWindows,
-      deletedInvitations: 0,
-      complete:
-        expiredDeliveryIds.length < limit &&
-        expiredBodyKeys.length < limit &&
-        deletedNonces < limit &&
-        deletedControlEvents < limit &&
-        deletedRateWindows < limit,
-    };
+    return runMemoryV2Maintenance(
+      {
+        deliveries: this.deliveries,
+        reservations: this.reservations,
+        stagedBodies: this.stagedBodies,
+        reservationBytes: this.reservationBytes,
+        reservationObjects: this.reservationObjects,
+        deliveryObjects: this.deliveryObjects,
+        reservationRelationships: this.reservationRelationships,
+        reservationDirections: this.reservationDirections,
+        quotaAccounts: this.quotaAccounts,
+        operations: this.operations,
+        nonces: this.nonces,
+        controlEvents: this.controlEvents,
+        controlOperations: this.controlOperations,
+        rateWindows: this.rateWindows,
+      },
+      now,
+      limit,
+    );
   }
 
   /** Reconciliation-only bounded lookups; no request path calls these. */
@@ -1025,14 +949,6 @@ export class MemoryV2Repository
       ...Array.from(this.deliveries.values(), (value) => value.payloadKey),
       ...Array.from(this.reservations.values(), (value) => value.payloadKey),
     ];
-  }
-
-  private deleteOperationForDelivery(deliveryId: string): void {
-    for (const [operation, value] of this.operations) {
-      if (value.deliveryId === deliveryId) {
-        this.operations.delete(operation);
-      }
-    }
   }
 
   private commitDeliveryAuthorization(
