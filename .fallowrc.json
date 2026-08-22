@@ -1,10 +1,163 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
-  "entry": ["src/index.ts", "src/node-server.ts"],
+  "entry": [
+    "src/index.ts",
+    "src/node-server.ts",
+    "src/v2-admin.ts",
+    "src/v2-d1-auth-repository.ts",
+    "src/v2-memory-repository.ts",
+    "src/v2-memory.ts",
+    "tests/v2-doh-server.mjs"
+  ],
+  "ignoreExports": [
+    {
+      "file": "src/log.ts",
+      "exports": ["redactLogText"]
+    },
+    {
+      "file": "src/v2-auth.ts",
+      "exports": [
+        "buildV2DeliveryProof",
+        "encryptV2TokenSecret",
+        "V2_ENROLLMENT_KDF_ITERATIONS"
+      ]
+    },
+    {
+      "file": "src/v2-contract.ts",
+      "exports": [
+        "V2_REQUIRED_PEER_FEATURES",
+        "V2_REQUIRED_GIT_FEATURES",
+        "V2_ENDPOINT",
+        "v2CompletionEndpoint",
+        "V2_ERROR",
+        "hasRequiredV2Features"
+      ]
+    },
+    {
+      "file": "src/v2-delivery-frame.ts",
+      "exports": [
+        "V2_MAX_BATCHED_SLOT_PROOFS",
+        "encodeV2DeliveryFrame",
+        "decodeV2DeliveryRequestFrame",
+        "v2DeliveryFrameAuthorizationDigest",
+        "decodeV2InboxResponseFrame"
+      ]
+    },
+    {
+      "file": "src/v2-http.ts",
+      "exports": ["V2_CBOR_CONTENT_TYPE", "V2_CONTENT_SHA256_HEADER"]
+    },
+    {
+      "file": "src/v2-maintenance.ts",
+      "exports": ["MAINTENANCE_MAX_BATCHES"]
+    },
+    {
+      "file": "src/v2-pairing.ts",
+      "exports": ["registerActivationCapabilities"]
+    },
+    {
+      "file": "src/v2-r2.ts",
+      "exports": ["R2V2Store"]
+    },
+    {
+      "file": "src/v2-sqlite-schema.ts",
+      "exports": ["V2_SQLITE_MIGRATIONS"]
+    },
+    {
+      "file": "src/v2-timing.ts",
+      "exports": ["V2_TIMED_OPERATIONS"]
+    }
+  ],
   "usedClassMembers": [
     {
       "implements": "BlobStore",
       "members": ["put", "get", "head", "list", "delete"]
+    },
+    {
+      "implements": "V2Store",
+      "members": [
+        "quotaEnforcement",
+        "wholeState",
+        "initialize",
+        "readState",
+        "transaction",
+        "claimNonce",
+        "deleteExpiredNonces"
+      ]
+    },
+    {
+      "implements": "V2BodyStore",
+      "members": ["stage", "promote", "put", "get", "head", "delete"]
+    },
+    {
+      "implements": "V2BodyInventory",
+      "members": ["listBodies"]
+    },
+    {
+      "implements": "V2ReconciliationRepository",
+      "members": ["filterKnownBodyKeys", "listBodyKeys"]
+    },
+    {
+      "implements": "V2PairingRepository",
+      "members": [
+        "find",
+        "create",
+        "commit",
+        "compareAndSwap",
+        "countActive",
+        "claimRateWindow",
+        "admit",
+        "activate"
+      ]
+    },
+    {
+      "implements": "V2AdministrativeRepository",
+      "members": [
+        "claimRequestWindow",
+        "revokeRelationship",
+        "rotateCapability",
+        "relationshipStatus"
+      ]
+    },
+    {
+      "implements": "V2RelationshipRepository",
+      "members": [
+        "createRelationship",
+        "findRelationship",
+        "commitCapabilityReissue"
+      ]
+    },
+    {
+      "implements": "V2Repository",
+      "members": [
+        "initialize",
+        "registerCapability",
+        "replaceCapabilities",
+        "findCapabilityLookup",
+        "findDelivery",
+        "claimNonce",
+        "claimNonces",
+        "reserveStagedBody",
+        "releaseStagedBody",
+        "reserveDelivery",
+        "publishDelivery",
+        "queryInbox",
+        "completeDelivery",
+        "completeDeliveryWithControl",
+        "publishControlEvent",
+        "consumeControlEvents",
+        "describeDurability",
+        "runMaintenance"
+      ]
+    },
+    "isV2OperationConflict"
+  ],
+  "overrides": [
+    {
+      "files": ["tests/**/*.mjs"],
+      "rules": {
+        "unused-class-members": "off"
+      }
     }
   ],
   "duplicates": {
