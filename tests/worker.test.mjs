@@ -436,6 +436,63 @@ test('expired files return 410 and are replaced by tombstones', async () => {
   assert.equal(second.status, 410);
 });
 
+test('expired-file cleanup preserves its tombstone after an eager store write', async () => {
+  class EagerTombstoneStore extends MemoryBlobStore {
+    async put(key, body, metadata) {
+      if (key.startsWith('tombstones/')) {
+        this.objects.set(key, {
+          bytes: new Uint8Array(),
+          contentType: metadata.contentType,
+          customMetadata: { ...(metadata.customMetadata ?? {}) },
+        });
+        return;
+      }
+
+      return super.put(key, body, metadata);
+    }
+  }
+
+  const blobStore = new EagerTombstoneStore();
+  const service = createDudService({
+    blobStore,
+    now: () => 1_700_000_000_000,
+    createId: () => ID_EXPIRE,
+    config: { secretToken: 'top-secret' },
+  });
+
+  await service.fetch(
+    new Request('https://dud.example.com/v1/files', {
+      method: 'POST',
+      headers: {
+        'x-dud-secret-token': 'top-secret',
+        'x-dud-ttl': '1s',
+      },
+      body: textStream('ciphertext'),
+      duplex: 'half',
+    }),
+    makeContext(),
+  );
+
+  const expiredService = createDudService({
+    blobStore,
+    now: () => 1_700_000_002_000,
+  });
+  const ctx = makeContext();
+  const response = await expiredService.fetch(
+    new Request(`https://dud.example.com/v1/files/${ID_EXPIRE}`),
+    ctx,
+  );
+
+  assert.equal(response.status, 410);
+  await ctx.flush();
+
+  const second = await expiredService.fetch(
+    new Request(`https://dud.example.com/v1/files/${ID_EXPIRE}`),
+    makeContext(),
+  );
+  assert.equal(second.status, 410);
+});
+
 test('delete-after-read makes the second download unavailable', async () => {
   const blobStore = new MemoryBlobStore();
   const service = createDudService({

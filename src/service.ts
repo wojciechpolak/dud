@@ -818,12 +818,22 @@ function queueExpiredDownloadCleanup(
   expiresAt: number,
 ): void {
   ctx.waitUntil(
-    Promise.all([
-      service.blobStore.delete(fileKey(id)).catch(() => undefined),
-      writeTombstone(service, id, 'expired', expiresAt).catch(() => undefined),
-      removeLegacyObjectAccounting(service, id).catch(() => undefined),
-      cleanup(service),
-    ]),
+    (async () => {
+      try {
+        await Promise.all([
+          service.blobStore.delete(fileKey(id)).catch(() => undefined),
+          removeLegacyObjectAccounting(service, id).catch(() => undefined),
+          cleanup(service),
+        ]);
+      } finally {
+        // Tombstones record a file's original expiry, which is already in the
+        // past here. Writing one after cleanup keeps this cleanup pass from
+        // deleting the marker before a subsequent download can observe it.
+        await writeTombstone(service, id, 'expired', expiresAt).catch(
+          () => undefined,
+        );
+      }
+    })(),
   );
 }
 
