@@ -15,10 +15,9 @@ import (
 const hostileV2PeerText = "\x1b]0;pwned\aok\rDUD: nothing to report\ninjected"
 
 // assertNoTerminalControl fails when peer-controlled text reached a terminal
-// with its power intact. Escaped text may still read as the attacker's words —
-// that is unavoidable, and a quoted line is legible as quoted — but it must not
-// carry control bytes, and it must not have escaped its own line: forging a line
-// of DUD output is what the newline in the payload is for.
+// with its power intact. Escaped text may still contain the attacker's words,
+// and quoted text stays legible as quoted. It must not carry control bytes or
+// escape its own line. A payload newline must not forge a line of DUD output.
 func assertNoTerminalControl(t *testing.T, label, rendered string) {
 	t.Helper()
 	if index := strings.IndexAny(rendered, "\x00\x07\x1b\r"); index >= 0 {
@@ -52,8 +51,8 @@ func TestV2ReceiveReportContainsHostilePeerText(t *testing.T) {
 
 // TestV2ReceiveStopContainsHostileConflictPath covers the conflict stop, which
 // names a path whose last component is the peer's display name. The stop is
-// rendered twice — as the report's reason row when earlier deliveries committed,
-// and as the run's error when none did — so both are checked.
+// rendered twice. It appears in the report's reason row after earlier deliveries
+// commit and as the run's error when none do, so both are checked.
 func TestV2ReceiveStopContainsHostileConflictPath(t *testing.T) {
 	stop := &v2ReceiveStop{Reason: "conflict", Sequence: 3, Detail: "/tmp/" + hostileV2PeerText}
 	assertNoTerminalControl(t, "receive stop error", stop.Error())

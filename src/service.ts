@@ -269,8 +269,8 @@ export interface DudDependencies {
   /** Receives one redacted phase-timing record per v2 request. */
   observeV2Timing?: V2TimingObserver;
   /**
-   * Reports the reason a v2 request was refused. The wire response stays
-   * uniform; only the operator sees this.
+   * Reports why a v2 request was refused. The wire response stays uniform, and
+   * only the operator sees this reason.
    */
   observeV2Rejection?: V2RejectionObserver;
   monotonicMs?: () => number;
@@ -283,11 +283,10 @@ interface DudServiceContext {
   createId: () => string;
   v2?: ReturnType<typeof createV2Service>;
   /**
-   * The whole-state ledger dead drop rate metering and the storage quota drops
-   * share with peer transfers are charged to. It is set only where the store
-   * keeps whole state; a deployment holding every peer record in a granular
-   * repository has no such ledger, so its dead drop routes meter and account
-   * exactly as they do with peer mode disabled.
+   * The whole-state ledger receives dead drop rate charges and the storage quota
+   * shared with peer transfers. Only stores with whole state set it. A granular
+   * peer repository has no ledger, so dead drop routes meter and account as they
+   * do when peers are disabled.
    */
   legacyAccounting?: V2Store;
   v2Initialized?: Promise<void>;
@@ -549,10 +548,9 @@ async function cleanup(
   let remaining = limit;
   let deletedCount = 0;
 
-  // The V2 whole-state store holds shared quota accounting, so its bounded
-  // prune rides along with V1 cleanup rather than with any V2 request. It
-  // starts here and is awaited only on the way out, so it neither delays nor
-  // reorders the V1 blob passes.
+  // The V2 whole-state store holds shared quota accounting. Its bounded prune
+  // runs with V1 cleanup, not a V2 request. It starts here and is awaited on
+  // exit, so it does not delay or reorder V1 blob passes.
   const legacyPrune = service.v2?.cleanup().catch(() => undefined);
 
   try {
@@ -1134,11 +1132,10 @@ export function createDudService(dependencies: DudDependencies) {
       config.v2Secret,
       config.v2AcceptWeakEnrollmentKdf,
     );
-    // The 32-byte credentials are compared decoded, which catches two spellings
-    // of one key — including an enrollment secret that carries a derived key,
-    // whose prefix would otherwise make a reused deployment key look distinct.
-    // The v1 secret and an enrollment passphrase are opaque strings, so they can
-    // only be compared textually.
+    // Compare 32-byte credentials after decoding to catch two encodings of one
+    // key. This includes an enrollment secret carrying a derived key, whose
+    // prefix can make a reused deployment key look distinct. The v1 secret and
+    // enrollment passphrase are opaque strings, so compare them as text.
     const textCredentials = [
       config.secretToken,
       config.v2DeploymentKey,
@@ -1187,18 +1184,17 @@ export function createDudService(dependencies: DudDependencies) {
       observeRejection: dependencies.observeV2Rejection,
       monotonicMs: dependencies.monotonicMs,
     });
-    // The same readiness the v2 routes await. Initializing the store a second
-    // time here would run a concurrent duplicate of that work and leave it in
-    // flight, because only a v1 request that meters against v2 accounting ever
-    // awaits this one — on a v2-only deployment, nothing would.
+    // V2 routes await this readiness promise. A second initialization would run
+    // concurrently. Only V1 requests that meter against V2 accounting await it
+    // here. V2-only deployments do not.
     service.v2Initialized = service.v2.initialized;
   }
 
   return {
     /**
-     * `observeV2Timing` reports the phase timings of this one request, which is
-     * how a caller correlates them with its own access log entry. It takes
-     * precedence over the observer the service was constructed with.
+     * `observeV2Timing` reports phase timings for this request. A caller can
+     * correlate them with its access-log entry. It overrides the observer passed
+     * when constructing the service.
      */
     fetch(
       request: Request,

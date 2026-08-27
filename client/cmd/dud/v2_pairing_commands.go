@@ -155,10 +155,8 @@ func (a *app) cmdPeerInvite(args []string) error {
 }
 
 // ensureV2InviterPendingProfile records the profile of a peer whose pairing is
-// in flight. It pins the transport the invitation actually used — the resolved
-// ECH mode next to the origin the rendezvous was created on — rather than a copy
-// of the configuration, so a later run reproduces this pairing instead of
-// whatever the configuration says by then.
+// in flight. It stores the resolved ECH mode and the rendezvous origin. A later
+// run uses the transport for this pairing, not a changed configuration.
 func ensureV2InviterPendingProfile(alias string, pending *v2PendingPairing, echMode string) error {
 	_, err := updateV2Config(func(current *v2LocalConfig) error {
 		value, exists := current.Peers[alias]

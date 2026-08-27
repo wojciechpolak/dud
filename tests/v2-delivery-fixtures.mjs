@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
-// Shared scaffolding for the granular delivery handler: capability
+// Shared helpers for the granular delivery handler: capability
 // registration, the four authenticated request builders, and a repository
 // fixture that runs the same scenario against Memory, SQLite and D1.
 
@@ -97,7 +97,7 @@ export function requestedPolicy(expiresAt = V2_NOW + 60) {
 /**
  * SHA-256 of the deterministic descriptor map a real receiver decrypts, which
  * is what protocol §7.2 calls the descriptor digest. The server only ever sees
- * the ciphertext, so this value is deliberately unrelated to it.
+ * the ciphertext, so this value is unrelated to it.
  */
 export const V2_SIGNED_DESCRIPTOR_DIGEST = sha256(
   encodeCbor(
@@ -530,7 +530,7 @@ export async function registerCapability(
 /**
  * Backend factories. Each returns a repository and, where the backend has
  * durable storage, a `reopen` that returns a fresh instance over the same
- * files — which is how a restart is simulated.
+ * files. This simulates a restart.
  */
 export const V2_REPOSITORY_BACKENDS = [
   ['memory', async () => new MemoryV2Repository()],

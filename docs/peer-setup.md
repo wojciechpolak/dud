@@ -1,9 +1,9 @@
-# Peer Setup
+# Peer setup
 
 A peer transfer is addressed by the local alias of a device you have paired
-with. Pair once, and `dud send laptop` works from then on. Everything that
-crosses the relationship is signed by the sender, sequenced, acknowledged, and
-revocable. For the other mode, a dead drop addressed by an opaque ID, see
+with. After pairing, `dud send laptop` works. Everything that crosses the
+relationship is signed by the sender, sequenced, acknowledged, and revocable.
+For dead drops addressed by an opaque ID, see
 [`dead-drops-v1.md`](dead-drops-v1.md).
 
 DUD pairs two devices through one short-lived 128-bit code. The inviter displays
@@ -37,32 +37,30 @@ Pairing carries no device identity to the server and does not use the server
 administration capability. `DUD_PEER_ADMIN_SECRET` and `v2-admin-capability` are
 reserved for actual server administration such as relationship revocation.
 
-A pairing code names a rendezvous, not a server: each side reaches the origin
-its own invocation resolves, so both must resolve the same one. Nothing is
-pinned before the relationship exists, which is why `DUD_BASE_URL` still selects
-the origin here; the origin the pairing used then becomes the peer profile's pin
-and outranks that variable from then on. To keep a whole separate identity for
-another deployment, use `DUD_PROFILE` (see
+A pairing code names a rendezvous, not a server. Each side reaches the origin
+its invocation resolves, so both must resolve the same one. `DUD_BASE_URL`
+selects the origin before the relationship exists. The origin used for pairing
+becomes the peer profile's pin and outranks that variable. To keep a separate
+identity for another deployment, use `DUD_PROFILE` (see
 [`client.md`](client.md#3-running-more-than-one-deployment)) rather than
 repointing the configuration this device already paired with.
 
 ### Peer transfers need a public transport path
 
-Every network command in either mode — `dud test`, `upload`, `download`,
-`flush`, `doctor`, `capabilities`, pairing, delivery, sync, and Git — rejects
-`DUD_CONNECT_TO` and any origin that resolves to a loopback, private,
-link-local, or otherwise reserved address. This is what stops a production
-request from bypassing its authenticated DoH resolution and destination checks,
-so a local Caddy on `dud.localhost` cannot serve peer transfers.
+Every network command in either mode, including `dud test`, `upload`,
+`download`, `flush`, `doctor`, `capabilities`, pairing, delivery, sync, and Git,
+rejects `DUD_CONNECT_TO` and any origin that resolves to a loopback, private,
+link-local, or otherwise reserved address. This prevents a production request
+from bypassing authenticated DoH resolution and destination checks, so a local
+Caddy on `dud.localhost` cannot serve peer transfers.
 
 Give both devices a real HTTPS origin whose hostname resolves through DoH to
 public addresses. A self-hosted server may stay on a laptop or LAN as long as it
 is published through a public hostname, for example a Cloudflare Tunnel.
 
-`hard` additionally requires a valid ECH configuration in the hostname's HTTPS
-DNS record. Explicit `off` drops that ECH requirement for development, but it
-relaxes nothing else: public DNS, address-range, TLS 1.3, and redirect checks
-all still apply.
+`hard` requires a valid ECH configuration in the hostname's HTTPS DNS record.
+Explicit `off` drops that ECH requirement for development. Public DNS,
+address-range, TLS 1.3, and redirect checks still apply.
 
 ## 2. Two devices, two profiles
 
@@ -76,13 +74,13 @@ device, so the aliases are viewed from opposite directions:
 | Sends to           | `laptop`              | `desktop`             |
 | Receives from      | `laptop`              | `desktop`             |
 
-On two real machines nothing special is needed: each one has its own seed and
-state, so initialize each with its own device name and move on to §3.
+On two real machines, each device has its own seed and state. Initialize each
+with its own device name, then move on to §3.
 
 Two device identities on **one** machine need two separate configuration worlds,
-or both terminals would operate as the same device. That is what `DUD_PROFILE`
-is for: it moves the whole world to `~/.dud/NAME` and the wrapper mounts that
-one directory into the container:
+or both terminals would operate as the same device. `DUD_PROFILE` moves the
+whole world to `~/.dud/NAME`, and the wrapper mounts that one directory into the
+container:
 
 ```sh
 # Terminal 1 / desktop
@@ -106,7 +104,7 @@ dud doctor
 dud capabilities
 ```
 
-Do not run either terminal from a directory holding a server `.env`: the wrapper
+Do not run either terminal from a directory holding a server `.env`. The wrapper
 forwards a current-directory `.env` into the client container, and deployment
 and administrative secrets do not belong there. Work in a clean directory
 instead.
@@ -120,7 +118,7 @@ is enough for a development-only test and prints a random
 `https://...trycloudflare.com` URL:
 
 ```sh
-# Terminal 0 — keep this process running
+# Terminal 0: keep this process running
 cloudflared tunnel --url http://127.0.0.1:8787
 ```
 
@@ -190,12 +188,12 @@ characters are rejected. It never accepts the code through arguments,
 environment variables, files, or standard input.
 
 The QR code encodes exactly the displayed 39-character pairing code and nothing
-else. The invitation itself — including the complete hybrid recipient — travels
-through the server rendezvous as an encrypted envelope, so the scanned payload
-stays the same size no matter how large the invitation is. The largest
-invitation a deployment can produce, one with a 253-character origin and its
-maximum port, is about 1.7 KiB and stays inside the 4 KiB envelope limit both
-the client and the server enforce.
+else. The complete hybrid recipient travels through the server rendezvous in an
+encrypted invitation envelope, so the scanned payload stays the same size no
+matter how large the invitation is. The largest invitation a deployment can
+produce, one with a 253-character origin and its maximum port, is about 1.7 KiB
+and stays inside the 4 KiB envelope limit both the client and the server
+enforce.
 
 No confirmation command follows. Each device verifies the encrypted invitation,
 role-separated binder, peer signature, contributory hybrid HPKE result, and full
@@ -262,18 +260,17 @@ different contents:
 A receive stages the decrypted payload in the world's own transfer store before
 it writes anything, so that a run interrupted partway can resume without asking
 the peer for the delivery again. That copy is removed as soon as the output
-holds the same bytes: an ordinary receive leaves the file you asked for and
+holds the same bytes. An ordinary receive leaves the file you asked for and
 nothing else, and `--id` recovery reads that file back rather than a duplicate.
 
-DUD's copy survives the run only where it is the sole one: an output that was
-skipped, a message that went to stdout, and the archive behind an extracted
-collection. The receive report names it whenever that happens, and it is pruned
-once the delivery's transport lifetime ends (`--ttl` on the sending side, seven
-days by default). `dud erase` removes the store outright.
+DUD retains a copy for a skipped output, a message sent to stdout, or the
+archive behind an extracted collection. The receive report names the copy, and
+the client prunes it when the delivery's transport lifetime ends (`--ttl` on the
+sending side, seven days by default). `dud erase` removes the store outright.
 
 A Git checkpoint sits in the same queue as files, and applying it needs a
-repository that `receive` does not have, so it stops the drain: everything ahead
-of it is committed, and the report names `dud git fetch PEER`.
+repository that `receive` does not have. It stops the drain after committing
+everything ahead of it, and the report names `dud git fetch PEER`.
 
 `dud inbox [PEER]` reports what is waiting without committing anything. The
 server answers an inbox read with the oldest pending delivery and nothing else,
@@ -296,11 +293,11 @@ dud git status desktop
 
 `sync`, `doctor`, `peer show`, and `git status` always end with the same status
 block, and `send`, `receive`, and the Git commands print it when `-v` is given
-or when something needs attention: anything queued, undrained, quarantined,
-halted, or still waiting in the inbox. A routine transfer therefore reports what
-it did in one line, and a stalled relationship speaks up without being asked.
-Whenever the block is printed, every counter appears, including the zeros, so a
-healthy relationship and a stalled one read the same way:
+or when something needs attention, such as queued, undrained, quarantined, or
+halted work. A routine transfer reports what it did in one line, and DUD reports
+a stalled relationship. Whenever the block is printed, every counter appears,
+including the zeros, so a healthy relationship and a stalled one use the same
+layout:
 
 ```text
 Status
@@ -314,17 +311,16 @@ Status
   halted                     no
 ```
 
-The three queue counters describe work this device still owes the server: they
+The three queue counters describe work this device still owes the server. They
 are non-zero only when a publication failed and will be retried, so a successful
-`send` leaves them at zero. Whether the peer actually collected a delivery is a
-separate fact, reported as `unacknowledged deliveries`, which drops only once
-the peer receives the delivery and its signed acknowledgement is drained back
-here. No command waits for that: `send` publishes the delivery and returns, the
-peer signs the acknowledgement when it runs `receive`, and a later `sync`,
-`receive`, `inbox`, or Git command on this device collects it.
-`undrained control`, `quarantined chains`, and `halted` report a stalled control
-channel, chains holding unpromoted input, and a relationship that refuses
-further traffic.
+`send` leaves them at zero. Whether the peer collected a delivery is reported as
+`unacknowledged deliveries`, which drops only after the peer receives the
+delivery and this device collects its signed acknowledgement. No command waits
+for that. `send` publishes the delivery and returns. The peer signs the
+acknowledgement when it runs `receive`, and a later `sync`, `receive`, `inbox`,
+or Git command on this device collects it. `undrained control`,
+`quarantined chains`, and `halted` report a stalled control channel, chains
+holding unpromoted input, and a relationship that refuses further traffic.
 
 `inbound waiting` reports whether the last inbox read left deliveries behind.
 Only a command that reads the inbox refreshes it, so after a `send` that row
@@ -369,7 +365,6 @@ relationships, quarantined chains, and corrupted local state.
 ## 7. Local disk protection
 
 DUD keeps the seed, pending code, and peer state in private mode-`0600` files
-under `~/.dud`. All of it is secret, which is why it sits in one root of its own
-rather than under a path convention asks anyone to synchronize. Full-disk
-encryption is the expected baseline. Endpoint compromise remains outside DUD's
-threat model.
+under `~/.dud`. All of it is secret, so DUD keeps it outside directories that
+sync conventions copy. Full-disk encryption is the expected baseline. Endpoint
+compromise remains outside DUD's threat model.

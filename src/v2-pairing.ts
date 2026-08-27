@@ -681,9 +681,9 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
 
   /**
    * The enrollment secret is a passphrase, so the HMAC key is stretched rather
-   * than configured. Derive it once: the result is reused for the life of the
-   * isolate, so the deliberately expensive KDF is paid on the first gated
-   * invitation after a cold start and never by a request that will be refused.
+   * than configured. Derive it once. The result is reused for the life of the
+   * isolate, so the expensive KDF runs for the first gated invitation after a
+   * cold start and never for a request that will be refused.
    */
   let enrollmentKey: Promise<Uint8Array> | undefined;
   function enrollmentKeyOnce(secret: string): Promise<Uint8Array> {
@@ -729,12 +729,12 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
    * failure is the same refusal, so a caller learns only that it does not hold
    * the enrollment secret.
    *
-   * A wrong proof is throttled per source. Rejections deliberately do not
+   * A wrong proof is throttled per source. Rejections do not
    * consume the deployment-wide creation window, so that an unauthenticated
    * caller cannot deny pairing to everyone else; without this second counter
    * that same property would leave a typeable passphrase open to online
    * guessing at network speed. Offline guessing against a captured proof is
-   * bounded by the KDF work factor instead — see `deriveV2EnrollmentKey`.
+   * bounded by the KDF work factor instead. See `deriveV2EnrollmentKey`.
    */
   async function requireEnrollment(
     request: Request,

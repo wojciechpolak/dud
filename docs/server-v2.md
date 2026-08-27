@@ -1,8 +1,7 @@
-# Running a DUD v2 Server
+# Running a DUD v2 server
 
-This document is the operator's reference for a v2 deployment: what the server
-stores, how to bring it up on Cloudflare or on your own host, which knobs exist,
-and what routine operation looks like.
+This guide covers server storage, deployment on Cloudflare or a self-hosted
+host, configuration, and routine operations.
 
 For the wire format see [`protocol-v2.md`](protocol-v2.md); for what the server
 is and is not trusted with see [`threat-model-v2.md`](threat-model-v2.md). The
@@ -13,12 +12,12 @@ step-by-step first deployment lives in the repository
 
 A v2 server is a blind relay with an accounting ledger. It holds:
 
-- **Metadata** — relationships, capability lookup records, delivery and control
+- **Metadata.** Relationships, capability lookup records, delivery and control
   event rows, staged reservations, nonce claims, and quota counters. On
   Cloudflare this is D1; self-hosted it is SQLite.
-- **Bodies** — opaque ciphertext. On Cloudflare this is R2; self-hosted it is
-  the filesystem under the data directory.
-- **Whole-state records** — revocations, encrypted verifier secrets, and pairing
+- **Bodies.** Opaque ciphertext. On Cloudflare this is R2; self-hosted it is the
+  filesystem under the data directory.
+- **Whole-state records.** Revocations, encrypted verifier secrets, and pairing
   rendezvous records.
 
 It never holds plaintext, a passphrase, an age identity, a device seed, or a
@@ -89,30 +88,29 @@ anyone who can reach the hostname. There is no default. Omitting both is a
 startup error, never a silently open deployment.
 
 Give `DUD_PEER_SECRET` to whoever may invite a device. It is the one v2
-credential that has to exist on a client as well as on the server — it gets
-carried to another machine, often by being typed — which is why it is a
-passphrase and not 32 encoded bytes. Choose four or five random words; the floor
-is 24 characters:
+credential that must exist on a client and the server. It is often typed on
+another machine, so it is a passphrase rather than 32 encoded bytes. Choose four
+or five random words. The minimum is 24 characters:
 
 ```sh
 DUD_PEER_SECRET='squid-lantern-rotate-9-mango'
 ```
 
-The passphrase itself never reaches the wire: the inviter sends
-`Authorization: DUD2-Enroll <proof>`, where the proof is an HMAC — under a key
-derived from the passphrase — bound to the rendezvous being created, so a proof
-recovered from a request log authorizes nothing else. An invitee needs only the
-pairing code, so pairing with someone else's device does not mean handing them a
-deployment credential.
+The passphrase never reaches the wire. The inviter sends
+`Authorization: DUD2-Enroll <proof>`. The proof is an HMAC under a key derived
+from the passphrase and bound to the rendezvous. A proof recovered from a
+request log authorizes no other rendezvous. An invitee needs only the pairing
+code, so pairing with someone else's device does not give them a deployment
+credential.
 
 A captured proof is still something an attacker can test guesses against
 offline, without the server. What makes that impractical is the derivation:
 PBKDF2-HMAC-SHA256 at 600,000 iterations, so each guess costs a few hundred
-milliseconds instead of a microsecond. Online guessing has its own bound, at 10
-enrollment attempts per source per minute — fixed, not configurable — and a
-refused request never spends the deployment-wide creation window.
+milliseconds instead of a microsecond. Online guessing has its own bound of 10
+enrollment attempts per source per minute. This limit is fixed. A refused
+request never spends the deployment-wide creation window.
 
-#### The derived-key form, and why a Worker wants it
+#### The derived-key form and why a Worker wants it
 
 The server never needs the passphrase. It needs the 32-byte key the passphrase
 stretches into, and `DUD_PEER_SECRET` accepts that key directly:
@@ -121,16 +119,15 @@ stretches into, and `DUD_PEER_SECRET` accepts that key directly:
 DUD_PEER_SECRET='dud2-enroll-key:_3iJ1c59CVqmBr68qGBeriqPHt5kLWa5j19Ql0PO31E'
 ```
 
-Configured this way the deployment runs no key derivation at all. That matters
-because the derivation does not fit in the 10 ms of CPU a Cloudflare free-tier
-Worker invocation is allowed, and it would otherwise be paid on the first gated
-invitation after a cold start. **On a free-tier Worker, use this form.**
+Configured this way, the deployment runs no key derivation. A Cloudflare
+free-tier Worker allows 10 ms of CPU per invocation, which does not cover the
+derivation. **Use this form on a free-tier Worker.**
 
 It gives up nothing. The work factor exists to price an attacker's guesses, and
 an attacker guesses passphrases, not keys, so moving the derivation off the
-server leaves each guess exactly as expensive as before. Clients are unchanged:
-they still hold the passphrase, still stretch it, and neither know nor care
-which form the deployment holds.
+server leaves each guess exactly as expensive as before. Clients still hold and
+stretch the passphrase. They do not need to know which form the deployment
+holds.
 
 Derive the key from the passphrase with either the client or the offline admin
 CLI, whichever you have. Both read `DUD_PEER_SECRET` from the environment and
@@ -156,9 +153,9 @@ DUD_PEER_SECRET='dud2-enroll-kdf:60000:squid-lantern-rotate-9-mango'
 ```
 
 The count travels with the secret to every device that holds it, so the two
-sides cannot drift apart; a work factor configured separately could, and
-enrollment refusals are deliberately indistinguishable, so that drift would be
-unreadable. Accepted counts run from 10,000 to 10,000,000.
+sides cannot drift apart. A work factor configured separately could differ, and
+the uniform enrollment refusal would hide that mismatch. Accepted counts run
+from 10,000 to 10,000,000.
 
 Below the 600,000 default this is a real reduction: at 60,000 an attacker
 guesses ten times faster for the same money. The deployment therefore refuses to
@@ -169,9 +166,9 @@ just as little and asks for no such trade, so prefer it.
 
 An open deployment derives no key and none of this applies to it.
 
-Capability discovery reports the state as enforcement ID 3 — `0` open, `1`
-secret required — and `dud capabilities` prints it as `enrollment`. A gated
-deployment still advertises pairing (feature 3): pairing works, it just needs a
+Capability discovery reports enforcement ID 3. `0` means open and `1` means a
+secret is required. `dud capabilities` prints this as `enrollment`. A gated
+deployment still advertises pairing as feature 3 because pairing requires a
 credential.
 
 Losing `DUD_PEER_DEPLOYMENT_KEY` makes every stored verifier secret
@@ -184,8 +181,8 @@ editing secrets.
 The Worker needs both bindings when v2 is enabled and refuses to start without
 them:
 
-- `FILES` — the R2 bucket, holding v1 objects and v2 delivery bodies
-- `DB` — the D1 database, holding all v2 metadata
+- `FILES` is the R2 bucket holding v1 objects and v2 delivery bodies.
+- `DB` is the D1 database holding all v2 metadata.
 
 Schema management is a single idempotent migration:
 
@@ -254,15 +251,14 @@ and rejects redirects.
 Clients run in one of two transport modes, and the terminology is fixed
 throughout DUD:
 
-- **`hard`** (the default) — Encrypted Client Hello is mandatory. The client
+- **`hard`** is the default. Encrypted Client Hello is mandatory. The client
   refuses to transfer anything if ECH does not succeed.
-- **`off`** — ECH is not attempted. The target hostname is visible in the TLS
-  SNI. Everything else in the required transport profile still applies: HTTPS
-  DoH, address-range checks, exactly TLS 1.3, and redirect rejection.
+- **`off`** does not attempt ECH. The target hostname is visible in the TLS SNI.
+  HTTPS DoH, address-range checks, TLS 1.3, and redirect rejection still apply.
 
 There is no intermediate or best-effort mode. Choose `hard` only if the hostname
-really supports ECH and publishes the required HTTPS DNS records; otherwise
-choose `off` deliberately and accept the documented SNI exposure.
+really supports ECH and publishes the required HTTPS DNS records. Otherwise,
+choose `off` and accept the documented SNI exposure.
 
 ## 6. Limits
 
@@ -329,8 +325,8 @@ The published server image sets `DUD_DATA_DIR=/data` and
 Online administration needs `DUD_PEER_ADMIN_SECRET` and covers relationship
 revocation, capability rotation, and relationship status.
 
-Offline administration needs only filesystem access to the data directory and is
-the recommended path for a self-hosted deployment:
+Offline administration needs only filesystem access to the data directory. It is
+the recommended path for a self-hosted deployment.
 
 ```sh
 npm run v2:admin -- revoke --data-dir ./dud-data --relationship HEX \
@@ -349,8 +345,8 @@ npm run v2:admin -- enrollment-key
   rewrap succeeds.
 - **`reconcile`** walks one bounded page of the body namespace against the
   metadata that names it, in both directions, and prints a resume cursor when
-  more pages remain. It reports only; `--apply` additionally deletes orphan
-  bodies older than `--min-age`. Run it after restoring a partial backup.
+  more pages remain. It reports only; `--apply` also deletes orphan bodies older
+  than `--min-age`. Run it after restoring a partial backup.
 - **`enrollment-key`** stretches the passphrase in `DUD_PEER_SECRET` and prints
   the derived key, in the form `DUD_PEER_SECRET` itself accepts. It needs no
   data directory, and the passphrase is not accepted on the command line. See
@@ -360,12 +356,13 @@ npm run v2:admin -- enrollment-key
 
 `DUD_LOG_MODE` selects verbosity and `DUD_LOG_FORMAT` selects the shape:
 
-- `DUD_LOG_MODE=normal` — startup banner plus access logs with the client
-  address
-- `DUD_LOG_MODE=minimal` — the same without the client address
-- `DUD_LOG_MODE=silent` — no startup or access logs; errors are still reported
-- `DUD_LOG_FORMAT=text` (default) — the single-line access log
-- `DUD_LOG_FORMAT=json` — one JSON object per line
+- `DUD_LOG_MODE=normal` writes a startup banner and access logs with the client
+  address.
+- `DUD_LOG_MODE=minimal` omits the client address.
+- `DUD_LOG_MODE=silent` writes no startup or access logs. Errors are still
+  reported.
+- `DUD_LOG_FORMAT=text` is the default single-line access log.
+- `DUD_LOG_FORMAT=json` writes one JSON object per line.
 
 Both formats are redacted identically. Delivery and rendezvous identifiers
 become `<redacted>` in paths, and anything identifier-shaped is stripped from
@@ -467,7 +464,7 @@ Origin: peer desktop
 
 ## 10. Related documents
 
-- [`migration-v1-v2.md`](migration-v1-v2.md) — moving a deployment to v2
-- [`recovery-v2.md`](recovery-v2.md) — rollback and failure recovery
-- [`git-sync-v2.md`](git-sync-v2.md) — peer Git synchronization
-- [`peer-setup.md`](peer-setup.md) — pairing two devices
+- [`migration-v1-v2.md`](migration-v1-v2.md) explains deployment migration.
+- [`recovery-v2.md`](recovery-v2.md) covers rollback and failure recovery.
+- [`git-sync-v2.md`](git-sync-v2.md) covers peer Git synchronization.
+- [`peer-setup.md`](peer-setup.md) explains pairing two devices.

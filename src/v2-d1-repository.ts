@@ -695,8 +695,8 @@ export class D1V2Repository
       );
     }
 
-    // A D1 batch commits only if every statement succeeds. This deliberately
-    // raises a bounded NOT NULL violation when the preceding conditional
+    // A D1 batch commits only if every statement succeeds. This raises a
+    // bounded NOT NULL violation when the preceding conditional
     // mutation did not admit either a new reservation or an exact retry, so
     // failed authorization/rate/quota checks cannot leave nonce or rate rows.
     statements.push(

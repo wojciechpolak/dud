@@ -210,8 +210,8 @@ function deliveryCapabilityContext(
 }
 
 /**
- * Derives the proof MAC for framed delivery endpoints. It deliberately binds
- * a complete request digest and its index so batch entries cannot be spliced,
+ * Derives the proof MAC for framed delivery endpoints. It binds a complete
+ * request digest and its index so batch entries cannot be spliced,
  * reordered, or replayed as a differently scoped operation.
  */
 export async function deriveV2DeliveryAuthorizationMac(
@@ -551,9 +551,9 @@ export function parseV2BearerHeader(value: string | null): Uint8Array {
 /**
  * Decodes one 32-byte deployment credential, naming the variable and the form
  * it wants. `decodeBase64Url` alone reports neither, so an operator holding
- * three interchangeable-looking values learns only that one of them is wrong —
- * and a hex value is the common case, because it passes the character check and
- * fails only on length.
+ * three interchangeable-looking values learns only that one is wrong. Hex is
+ * the common case because it passes the character check and fails only on
+ * length.
  */
 export function parseV2Credential(name: string, value: string): Uint8Array {
   try {
@@ -643,17 +643,16 @@ function parseV2EnrollmentPassphrase(
  * Reads the three accepted forms of `DUD_PEER_SECRET` into one key derivation.
  *
  * A bare passphrase is stretched at the default work factor, and is what most
- * deployments configure. `dud2-enroll-key:` carries the derived key directly, so
- * a server verifying proofs does no key-derivation work at all — the cost the
- * KDF exists to impose falls on whoever guesses the passphrase, not on whoever
- * checks the result, so moving the derivation off the server costs an attacker
- * nothing they were not already paying. `dud2-enroll-kdf:` states a work factor
- * ahead of the passphrase.
+ * deployments configure. `dud2-enroll-key:` carries the derived key directly.
+ * A server verifying proofs does no key-derivation work. The KDF cost falls on
+ * anyone guessing the passphrase, not on the verifier, so moving derivation off
+ * the server does not reduce an attacker's cost. `dud2-enroll-kdf:` states a
+ * work factor ahead of the passphrase.
  *
  * The parameters live inside the value rather than beside it so that they travel
  * with the secret to every device that holds it. A work factor configured
  * separately on each side could disagree, and that disagreement would surface
- * only as the deliberately indistinguishable enrollment refusal.
+ * only as the uniform enrollment refusal.
  */
 export function parseV2EnrollmentCredential(
   value: string,

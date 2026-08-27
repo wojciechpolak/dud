@@ -54,7 +54,7 @@ export const V2_SQLITE_MIGRATIONS = [
   -- direction, the same one \`control_events\` carries. The inbox hands back the
   -- oldest pending delivery, and \`created_at\` is whole seconds while \`id\` is
   -- random, so two sends inside one second could otherwise be returned in
-  -- either order — which a receiver reads as a chain gap and quarantines.
+  -- either order. A receiver reads that as a chain gap and quarantines it.
   CREATE TABLE IF NOT EXISTS deliveries (
     id TEXT PRIMARY KEY, relationship_id TEXT NOT NULL, direction INTEGER NOT NULL CHECK(direction IN (0,1)),
     slot BLOB NOT NULL, epoch INTEGER NOT NULL, encrypted_descriptor BLOB NOT NULL, requested_policy BLOB NOT NULL,

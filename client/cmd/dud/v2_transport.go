@@ -94,8 +94,8 @@ type v2Transport interface {
 	Do(context.Context, v2Request) (*v2Response, error)
 }
 
-// v2ResolutionRetirer is deliberately optional: test transports do not need
-// to model DNS or connection pools.  The operation layer calls it only before
+// v2ResolutionRetirer is optional. Test transports do not need to model DNS or
+// connection pools. The operation layer calls it only before
 // rebuilding an idempotent request with fresh authorization nonces.
 type v2ResolutionRetirer interface {
 	retireV2Resolution(origin string)

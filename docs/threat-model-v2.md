@@ -1,9 +1,9 @@
-# DUD v2 Threat Model
+# DUD v2 threat model
 
-What DUD v2 defends against, and what it does not. Every control described here
-is implemented and released in DUD 2.0.0. This is the companion to
-[`protocol-v2.md`](protocol-v2.md): where this document claims a property, that
-one specifies the mechanism behind it.
+This document states DUD v2's protections and limits. Every control described
+here is implemented and released in DUD 2.0.0.
+[`protocol-v2.md`](protocol-v2.md) specifies the mechanism behind each property
+claimed here.
 
 Read the limits as carefully as the guarantees. A tool whose value is discretion
 is damaged more by one overstated promise than by any number of admitted gaps.
@@ -64,7 +64,7 @@ is visible in the TLS SNI. This is a documented, user-selected trade-off
 (`DUD-V2-DEC-001`) that exists so a self-hosted origin without an ECH-capable
 front end can use v2 at all.
 
-A self-hosted DoH resolver **inverts** the protection: a distinctive resolver
+A self-hosted DoH resolver can expose more than it hides. A distinctive resolver
 hostname in a system DNS query is more identifying than the DUD origin it hides.
 `dud doctor` reports this; pinned bootstrap addresses remove it.
 
@@ -248,10 +248,9 @@ accept a replayed delivery in the meantime, subject to the ref-rewrite
 confirmation. Catching it earlier would take an OS-keystore or TPM monotonic
 counter, and the containerized client cannot count on either.
 
-One thing that looks like a rollback hazard is not one. Seed derivation is
-deterministic, so a restored seed regenerates identical relationship keys; that
-is intended. The hazard lives in the sequence watermarks, which are durable
-separately from the seed.
+Seed derivation is not a rollback hazard. It is deterministic, so a restored
+seed regenerates identical relationship keys. The sequence watermarks are the
+hazard because they are durable separately from the seed.
 
 ### 3.17 SSRF and DNS Rebinding via Peer-Provided Origins
 
@@ -294,11 +293,10 @@ because the wrapper's 128 MB tmpfs cannot hold a 100 MB bundle plus a scratch
 repository plus the promoted copy.
 
 A checkpoint this device cannot apply is refused outright, per `protocol-v2.md`
-§7.6. The refusal advances the data-chain watermark, and the attack it
-forecloses is a denial of service: a peer or operator able to plant one
-unprocessable checkpoint at the head of the chain would otherwise silence the
-relationship in both directions, since no other command consumes a `git-bundle`
-delivery either.
+§7.6. The refusal advances the data-chain watermark and prevents a denial of
+service. A peer or operator able to plant one unprocessable checkpoint at the
+head of the chain could otherwise silence the relationship in both directions,
+since no other command consumes a `git-bundle` delivery.
 
 Advancing a watermark past a delivery that was never applied is only safe under
 a closed list of causes, so the causes are enumerated and never inferred from
@@ -352,31 +350,29 @@ floor, and the HMAC key is stretched from it instead of being configured as raw
 bytes.
 
 That choice has a real cost, and the mitigation is specific to it. A proof is a
-deterministic MAC over public values, so anyone who captures one — from a
-request log, an observation point, an intermediary — can test passphrase guesses
-against it offline, at their own pace, without the server and without spending
-the per-source throttle. No arrangement of the protocol prevents that; short of
-a PAKE, what bounds it is the cost of a single guess. The key is therefore
-derived with PBKDF2-HMAC-SHA256 at 600,000 iterations, which puts each guess in
-the hundreds of milliseconds instead of under a microsecond, turning an
-exhaustive sweep of a four-or-five-word passphrase from hours into an
-impractical amount of compute. The salt is a fixed domain string. Nothing
-deployment-specific goes into it: one deployment holds a single secret, not a
-database of them, so a per-deployment salt would add little on top of the work
-factor while binding enrollment to a hostname operators do change. An operator
-who would rather have entropy than stretching can use 32 random bytes as the
-passphrase.
+deterministic MAC over public values, so anyone who captures one from a request
+log, observation point, or intermediary can test passphrase guesses against it
+offline, at their own pace, without the server and without spending the
+per-source throttle. No arrangement of the protocol prevents that; short of a
+PAKE, what bounds it is the cost of a single guess. The key is therefore derived
+with PBKDF2-HMAC-SHA256 at 600,000 iterations, which puts each guess in the
+hundreds of milliseconds instead of under a microsecond, turning an exhaustive
+sweep of a four-or-five-word passphrase from hours into an impractical amount of
+compute. The salt is a fixed domain string. Nothing deployment-specific goes
+into it: one deployment holds a single secret, not a database of them, so a
+per-deployment salt would add little on top of the work factor while binding
+enrollment to a hostname operators do change. An operator who would rather have
+entropy than stretching can use 32 random bytes as the passphrase.
 
 **Who pays the work factor.** The cost is meant to fall on an attacker, and an
 attacker guesses passphrases. The server's own derivation is incidental: it
 stretches the same passphrase only because that is what it was configured with.
 So `DUD_PEER_SECRET` also accepts the derived key itself, under a
 `dud2-enroll-key:` prefix, and a deployment configured that way verifies proofs
-without deriving anything. That is not a weaker setting — the attacker's cost
-per guess is unchanged, because the devices that hold the passphrase still
-stretch it — and it is what makes a gated deployment affordable where a single
-derivation exceeds the CPU one request is allowed. `server-v2.md` §3.1 has the
-operator's side of it.
+without deriving anything. This leaves the attacker's cost per guess unchanged
+because the devices that hold the passphrase still stretch it. It also lets a
+gated deployment run where one derivation exceeds the CPU budget of one request.
+`server-v2.md` §3.1 covers the operator's side of it.
 
 The third form, `dud2-enroll-kdf:<iterations>:<passphrase>`, does lower the
 attacker's cost, proportionally: at 60,000 iterations a guess is ten times

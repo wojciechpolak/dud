@@ -13,20 +13,17 @@ import (
 	"testing"
 )
 
-// TestMain drops the ambient DUD_* configuration before any test runs, the same
-// way tests/clean-env.mjs does for the Node suites. These variables reach peer
-// commands as well as dead drops, so a developer shell that exports
-// DUD_BASE_URL could otherwise send a test at the wrong origin — and a command
-// that then loses its stubbed state can fall through to an interactive prompt,
-// which blocks on /dev/tty instead of failing.
+// TestMain removes ambient DUD_* configuration before tests run. Peer and dead
+// drop commands read these variables. A developer shell that exports
+// DUD_BASE_URL could send a test to the wrong origin. A command that bypasses
+// its stubbed state can then fall through to an interactive prompt and block
+// on /dev/tty instead of failing.
 func TestMain(m *testing.M) {
 	for _, entry := range os.Environ() {
 		name, _, ok := strings.Cut(entry, "=")
-		// DUD_UPDATE_VECTORS and the DUD_TEST_* variables switch the harness
-		// rather than configure a client. Scrubbing them would silently ignore
-		// the documented way to regenerate the frozen wire corpus, and would
-		// turn a fixture the Node suite passes in here into a skip that still
-		// reports success.
+		// DUD_UPDATE_VECTORS and DUD_TEST_* control the test harness, not the
+		// client. Removing them could skip a supplied fixture or prevent wire
+		// vector regeneration while still reporting success.
 		if ok && strings.HasPrefix(name, "DUD_") &&
 			name != "DUD_UPDATE_VECTORS" && !strings.HasPrefix(name, "DUD_TEST_") {
 			os.Unsetenv(name)
@@ -86,8 +83,7 @@ func TestAppMainPropagatesSubprocessExitCode(t *testing.T) {
 	}
 }
 
-// On the dead drop routes any HTTP status of 400 or more reaches the shell as
-// exit 22.
+// Dead drop route failures with an HTTP status of 400 or more exit with 22.
 func TestAppMainMapsHTTPFailureStatusesToExitCode22(t *testing.T) {
 	for _, status := range []int{400, 401, 404, 429, 500} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -213,8 +209,8 @@ func runAliasInvocation(args []string) (int, string, string) {
 	a := newApp(strings.NewReader(""), &stdout, &stderr)
 	a.cfg.SecretToken = ""
 	a.cfg.GitBin = "/bin/false"
-	// An alias pair must fail identically, so the transport has to fail
-	// identically too — and never reach a real resolver from a unit test.
+	// An alias pair must produce identical failures. Unit tests must not reach a
+	// real resolver.
 	a.newV2Transport = func(v2TransportOptions) (v2Transport, error) {
 		return nil, errors.New("transport unavailable")
 	}

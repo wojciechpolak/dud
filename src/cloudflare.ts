@@ -13,7 +13,7 @@ import type {
   R2ObjectLike,
 } from './types.js';
 
-// Cloudflare Workers global — not in standard TypeScript libs
+// Cloudflare Workers global, not in standard TypeScript libs
 declare class FixedLengthStream extends TransformStream<
   Uint8Array,
   Uint8Array

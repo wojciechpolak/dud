@@ -101,9 +101,9 @@ func (status v2DeliveryStatus) merge(target map[string]any) map[string]any {
 
 // needsAttention reports whether anything is queued, undrained, quarantined,
 // or halted, which is what decides whether an action command volunteers its
-// status block. Unacknowledged deliveries are deliberately excluded: every
-// successful send is unacknowledged until the peer receives it, so counting
-// them here would raise the block on ordinary progress.
+// status block. Unacknowledged deliveries are excluded. Every successful send
+// remains unacknowledged until the peer receives it, so counting them would
+// raise the block during ordinary progress.
 func (status v2DeliveryStatus) needsAttention() bool {
 	return status.PendingDeliveries != 0 ||
 		status.PendingCompletions != 0 ||

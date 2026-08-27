@@ -1275,9 +1275,8 @@ func descriptorPolicy(desc map[int]any) (map[int]any, error) {
 
 // v2ExistingOutputMatches reports whether the file already at target holds
 // exactly the payload about to be written there, which makes the write a
-// no-op. Anything it cannot read — a directory, a broken symlink, a file it
-// has no permission for — is not a match, so the caller still refuses rather
-// than clobbering something it could not inspect.
+// no-op. A directory, broken symlink, or unreadable file is not a match. The
+// caller refuses rather than overwriting something it could not inspect.
 func v2ExistingOutputMatches(target string, payloadDigest []byte) bool {
 	existing, err := os.ReadFile(target)
 	if err != nil {
@@ -1341,10 +1340,9 @@ func (runtime *v2PeerRuntime) validateNextDescriptor(chain *v2ChainState, envelo
 	return true, nil
 }
 
-// applyV2GranularDataDelivery commits one delivery and reports what it did. It
-// deliberately renders nothing itself apart from a message payload, which owns
-// stdout at the moment it arrives: a run drains as many deliveries as it can
-// reach, so the report belongs to the run rather than to any one delivery.
+// applyV2GranularDataDelivery commits one delivery and reports its result. It
+// renders only a message payload, which owns stdout. A run drains every
+// reachable delivery, so the report belongs to the run rather than one delivery.
 func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a *app, opts v2PeerReceiveOptions, delivery *v2GranularInboxDelivery, sourceSlotEpoch uint64) (*v2ReceivedItem, error) {
 	descriptorCiphertext := delivery.EncryptedDescriptor
 	expectation, err := runtime.descriptorExpectation()
@@ -1548,10 +1546,9 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		if _, statErr := os.Lstat(target); statErr == nil {
 			// Writing a file whose contents already hash to this payload is a
 			// no-op, so there is nothing to protect. Deciding that on the
-			// first attempt matters: the durable transfer record is written
-			// just above, so a second identical run would otherwise take the
-			// resume path and succeed where the first one refused — one
-			// delivery, two invocations, for no reason the operator could see.
+			// first attempt matters. The durable transfer record already exists,
+			// so a second identical run could take the resume path and succeed
+			// after the first refused. One delivery must not get two outcomes.
 			switch {
 			case v2ExistingOutputMatches(target, plainDigest[:]):
 				committedOutput = target
@@ -1677,18 +1674,18 @@ func (runtime *v2PeerRuntime) acknowledgementMetadata(ackedSequence uint64, acke
 	if resultMetadata != nil {
 		metadata[9] = resultMetadata
 	}
-	// Extension key 128 is optional by protocol-v2.md §2, so a peer that does
-	// not know it ignores it. It is how a later release learns, without a
-	// separate handshake, whether this peer implements a payload-type feature.
+	// Protocol-v2.md §2 makes extension key 128 optional, so peers that do not
+	// know it ignore it. The key advertises payload-type features without a
+	// separate handshake.
 	metadata[kPeerFeatures] = v2LocalPeerFeatureList()
 	return metadata
 }
 
-// queueV2GranularRejection acknowledges a delivery this device will never be
-// able to commit. The chain watermark advances on a rejection exactly as it
-// does on a commit, so one unprocessable delivery cannot wedge the chain; the
-// caller is responsible for advancing it. Only the causes enumerated in
-// permanentV2GitRejection may reach here — see docs/threat-model-v2.md §3.19.
+// queueV2GranularRejection acknowledges a delivery this device cannot commit.
+// The chain watermark advances on rejection and commit, so an unprocessable
+// delivery cannot block the chain. The caller advances the watermark. Only
+// permanentV2GitRejection causes reach this function. See
+// docs/threat-model-v2.md §3.19.
 func (runtime *v2PeerRuntime) queueV2GranularRejection(dataEnvelope *validatedV2Envelope, deliveryID, dataSlot []byte, dataSlotEpoch uint64, policyDigest []byte) error {
 	return runtime.queueV2GranularAcknowledgement(dataEnvelope, deliveryID, dataSlot, dataSlotEpoch, policyDigest, make([]byte, 32), 1, nil)
 }

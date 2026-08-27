@@ -202,9 +202,9 @@ function applyRateLimit(
 
 /**
  * `enrollmentGated` reports whether rendezvous creation requires the deployment
- * enrollment secret. A gated deployment still advertises feature 3, because
- * pairing works — it just needs a credential — so enforcement ID 3 carries the
- * gate instead, and a client that does not know that entry ignores it.
+ * enrollment secret. A gated deployment still advertises feature 3 because
+ * pairing requires a credential. Enforcement ID 3 carries the gate, and a
+ * client that does not know that entry ignores it.
  */
 function v2Capabilities(
   store: V2Store,

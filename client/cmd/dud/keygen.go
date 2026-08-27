@@ -70,9 +70,8 @@ func validateKeygenOptions(opts keygenOptions) error {
 	if opts.recipientOut != "" && opts.out == "" {
 		return fatalError("keygen requires --out when generating a new identity with -R")
 	}
-	// Without --out the new identity — the private key — is written to stdout.
-	// A JSON report must never share that stream, so the key has to go to a
-	// file before machine-readable output is available.
+	// Without --out, age-keygen writes the new private identity to stdout. A JSON
+	// report cannot share that stream, so --json requires an output file.
 	if opts.outputJSON && opts.out == "" {
 		return fatalError("keygen requires --out when generating a new identity with --json")
 	}
@@ -101,8 +100,8 @@ func (a *app) cmdKeygen(args []string) error {
 		if !opts.outputJSON {
 			return a.runCommand(a.cfg.AgeKeygenBin, keygenArgs, a.in, a.out, a.errOut)
 		}
-		// A recipient is public, so capturing it for the report is safe; the
-		// identity it was derived from is never read back into this process.
+		// Recipients are public, so the report may include them. This process does
+		// not read the source identity again.
 		var recipients bytes.Buffer
 		if err := a.runCommand(a.cfg.AgeKeygenBin, keygenArgs, a.in, &recipients, a.errOut); err != nil {
 			return err
@@ -154,8 +153,8 @@ func (a *app) cmdKeygen(args []string) error {
 		}
 	}
 	if opts.outputJSON {
-		// Only the recipient and the paths appear here. The identity stays in
-		// the file age-keygen wrote and is never echoed back.
+		// The report contains recipients and paths only. The identity remains in
+		// the file written by age-keygen and is never echoed.
 		report := map[string]any{
 			"ok":            true,
 			"recipient":     recipient,
@@ -170,8 +169,8 @@ func (a *app) cmdKeygen(args []string) error {
 	return nil
 }
 
-// Help text is inspected regardless of the exit status: some CLIs exit
-// non-zero for --help, and the shell version only grepped the output.
+// ageKeygenSupportsPQ reads help text even when the command exits non-zero.
+// Some CLIs return a non-zero status for --help.
 func (a *app) ageKeygenSupportsPQ() (bool, error) {
 	cmd := exec.Command(a.cfg.AgeKeygenBin, "--help")
 	output, err := cmd.CombinedOutput()

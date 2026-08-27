@@ -4,17 +4,14 @@
 //
 // Renders `Formula/dud.rb` for the wojciechpolak/homebrew-dud tap.
 //
-// The tap formula is a derived file: everything in it except the release
-// coordinates is fixed here, so a release changes exactly three things — the
-// tag in the source URL, the version that URL implies, and the SHA-256 of the
-// tarball at that tag. Rendering the whole file from one function rather than
-// rewriting three lines in place means a hand edit to the tap cannot survive
-// unnoticed, and two runs on the same release produce identical bytes.
+// The tap formula is derived. A release supplies the source tag, its version,
+// and the tarball SHA-256. This renderer writes the whole file, so a manual tap
+// edit cannot survive unnoticed. Two runs for the same release produce the
+// same bytes.
 //
 // It reads its inputs from the command line and writes one file. Nothing here
-// resolves a tag, contacts GitHub, or hashes a download; the caller supplies
-// the checksum it measured, so this runs identically in CI and in an offline
-// review.
+// resolves a tag, contacts GitHub, or hashes a download. The caller supplies
+// the checksum, so the script behaves the same in CI and offline.
 //
 // Usage:
 //   node scripts/render-homebrew-formula.mjs <version> <sha256> --out <file>
@@ -22,8 +19,8 @@
 //   node scripts/render-homebrew-formula.mjs <version> <sha256>
 //
 // With neither --out nor --check the formula is written to stdout. --check
-// exits non-zero when the file on disk differs from what would be rendered,
-// which is what lets the release job skip a commit that would change nothing.
+// exits non-zero when the file on disk differs from the rendered formula. The
+// release job then skips an empty commit.
 
 import fs from 'node:fs';
 
@@ -31,18 +28,17 @@ const REPOSITORY = 'https://github.com/wojciechpolak/dud';
 
 /**
  * A tap formula may only be built from an immutable source. A published tag's
- * archive is that: the tag names one commit forever, and the SHA-256 below
- * pins the bytes, so a moved tag fails the download instead of silently
- * shipping different code under the same version.
+ * archive meets that requirement. The tag names one commit, and the SHA-256
+ * pins the bytes. A moved tag fails the download instead of shipping different
+ * code under the same version.
  */
 const ARCHIVE = (version) =>
   `${REPOSITORY}/archive/refs/tags/v${version}.tar.gz`;
 
 /**
- * Only a full release goes to the tap. A pre-release tag is a candidate for
- * the version it names and never the version itself, so `2.0.0-rc.1` is
- * rejected here rather than being allowed to become what `brew install` hands
- * a user. A leading `v` is accepted because the caller's input is a git tag.
+ * Only full releases go to the tap. `2.0.0-rc.1` is rejected because it is a
+ * release candidate, not a version that `brew install` should distribute. A
+ * leading `v` is accepted because callers provide a Git tag.
  */
 const STABLE_VERSION = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
@@ -52,9 +48,9 @@ const SHA256 = /^[a-f0-9]{64}$/;
 /**
  * `brew search` and `brew info` show this line and nothing else, and it is the
  * only chance to distinguish this formula from the unrelated one that holds the
- * name `dud` in Homebrew's own index. It spells out what the name stands for —
- * discreet upload / download — and then names the two transfer modes, so the
- * one-line answer to "which dud is this" is in the line itself.
+ * name `dud` in Homebrew's own index. It expands the name to discreet upload /
+ * download and names the two transfer modes, so the description identifies the
+ * formula on its own.
  *
  * Homebrew requires a description that starts with a capital, is not the
  * formula name, carries no trailing full stop, and stays under 80 characters.
@@ -63,9 +59,8 @@ const DESCRIPTION =
   'Discreet upload / download over dead drops and paired peers';
 
 /**
- * The tap formula is generated, so the two supported ways to change it are
- * cutting a release and editing this renderer. Saying so in the file itself is
- * the only warning a reader of the tap gets before their edit is overwritten.
+ * The tap formula is generated. Change it by cutting a release or editing this
+ * renderer. The header warns tap readers before a release overwrites an edit.
  */
 const HEADER = [
   '# SPDX-License-Identifier: MIT',
@@ -109,15 +104,14 @@ export function releaseChecksum(value) {
 /**
  * Builds the tap formula.
  *
- * The build reproduces the flags `scripts/build-release-binaries.sh` uses, so a
- * Homebrew source build and a published release binary of the same version are
- * the same program built the same way: no cgo, no build paths, no build ID,
- * and the version compiled in rather than read at runtime. `std_go_args`
- * contributes `-trimpath` and `-s -w`.
+ * The build uses the flags from `scripts/build-release-binaries.sh`. A Homebrew
+ * source build and a release binary of the same version have no cgo, build
+ * paths, or build ID, and compile the version into the binary. `std_go_args`
+ * adds `-trimpath` and `-s -w`.
  *
  * `age`, `git`, and `qrencode` are runtime dependencies because the binary
- * shells out to them — encryption and decryption, `dud git *`, and the QR
- * codes printed by `upload` and `peer invite` respectively.
+ * shells out to them for encryption and decryption, `dud git *`, and QR codes
+ * printed by `upload` and `peer invite`.
  *
  * Homebrew evaluates a formula with its own Ruby, but the release workflow
  * syntax-checks the rendered file with whatever `ruby` the runner has. Writing

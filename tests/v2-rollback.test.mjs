@@ -128,7 +128,7 @@ async function legacyDownload(service, id) {
 
 /**
  * Discovery can schedule a background maintenance pass, so the context is
- * flushed before the caller inspects — or removes — the data directory.
+ * flushed before the caller inspects or removes the data directory.
  */
 async function discover(service) {
   const ctx = makeContext();

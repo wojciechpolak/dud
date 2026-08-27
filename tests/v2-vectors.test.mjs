@@ -221,10 +221,9 @@ test('frozen enrollment proofs reproduce on the server', async () => {
       `enrollment proof for ${vector.locator} at ${vector.expiresAt}`,
     );
   }
-  // Keyed by everything a proof covers. Two secrets that name the same key are
-  // meant to collide here — that is what lets a server configured with the
-  // derived key verify a client that still holds the passphrase — so the
-  // property is that nothing else does.
+  // Key the map by every field a proof covers. Two secrets that derive the same
+  // key must collide. That lets a server holding the derived key verify a client
+  // that holds the passphrase. No other proof may collide.
   const proofs = new Map(
     corpus.enrollmentProofs.map((vector) => [
       `${vector.key}|${vector.locator}|${vector.expiresAt}`,

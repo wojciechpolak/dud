@@ -446,8 +446,8 @@ func TestV2ReceiveDiscardsItsOwnCopyOnceTheOutputHoldsThePayload(t *testing.T) {
 }
 
 // Discarding the copy must not cost the documented recovery command, so it
-// reads the committed output instead — the same bytes, at the path the operator
-// chose, rather than a duplicate held on disk in case this command is run.
+// reads the committed output instead. It uses the same bytes at the operator's
+// chosen path, rather than keeping a duplicate on disk.
 func TestV2ReceiveByDigestFallsBackToTheCommittedOutput(t *testing.T) {
 	paths, state := newPairedV2TestPeer(t, "laptop")
 	if err := writeV2PeerDeliveryState(paths, state); err != nil {

@@ -207,14 +207,14 @@ test('a v2 deployment reads every accepted form of the enrollment secret', async
         ...config,
       },
     });
-  // The derived key needs no stretching at startup, which is the whole point of
-  // the form: a Worker invocation has too little CPU to finish the derivation.
+  // The derived key needs no stretching at startup. A Worker invocation has too
+  // little CPU to finish the derivation.
   const derived = formatV2EnrollmentKey(
     await deriveV2EnrollmentKey(V2_ENROLLMENT_SECRET),
   );
   assert.doesNotThrow(() => start({ v2Secret: derived }));
   // A truncated or mistyped key is refused here rather than at the first
-  // invitation, where every enrollment failure is deliberately the same refusal.
+  // invitation, where every enrollment failure has the same response.
   assert.throws(
     () => start({ v2Secret: `${derived.slice(0, -1)}` }),
     /dud2-enroll-key:/,

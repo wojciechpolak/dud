@@ -253,8 +253,8 @@ func TestPeerInviteCreatesPendingProfileAndRendezvous(t *testing.T) {
 }
 
 // Only the inviter needs the enrollment secret, and it reaches the wire as a
-// proof bound to the one rendezvous it creates — never as the secret itself,
-// and never persisted next to the pending pairing.
+// proof bound to the rendezvous it creates. The secret itself never reaches the
+// wire or the pending pairing state.
 func TestPeerInviteProvesEnrollmentWithoutStoringTheProof(t *testing.T) {
 	setTestV2Homes(t)
 	if _, _, err := initializeV2Config("desktop", "https://dud.example.com", "https://dns.google/dns-query", "hard"); err != nil {

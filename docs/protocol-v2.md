@@ -1,4 +1,4 @@
-# DUD v2 Protocol
+# DUD v2 protocol
 
 Normative specification of the v2 wire protocol as released in DUD 2.0.0. It
 describes what two implementations have to agree on, not how either is built.
@@ -20,8 +20,8 @@ Every field length in this document is a hard limit, not a guideline. A receiver
 
 ## 2. Versioning and Algorithm Agility
 
-Every algorithm-selecting root structure — invitation, acceptance, and
-descriptor — carries:
+Every algorithm-selecting root structure, including invitations, acceptances,
+and descriptors, carries:
 
 | Field     | Type | Meaning                                   |
 | --------- | ---- | ----------------------------------------- |
@@ -591,9 +591,9 @@ delivery for a slot, and "oldest" means the earliest publication, not the
 smallest wall-clock stamp: publication times are whole seconds and delivery IDs
 are opaque, so neither can order two publications inside one second. A server
 therefore keeps its own per-relationship, per-direction insertion counter and
-orders by it. The server cannot read `seq` — it is inside the encrypted
-descriptor — so this ordering is what makes the receiver's gap rule detect a
-withheld or reordered delivery rather than fire on a healthy relationship.
+orders by it. The server cannot read `seq` because it is inside the encrypted
+descriptor. This ordering lets the receiver's gap rule detect a withheld or
+reordered delivery without firing on a healthy relationship.
 
 The local durable receive state machine is:
 
@@ -616,10 +616,10 @@ sig_input         = "dud/v2/descriptor" || 0x00 || descriptor_digest
 signature         = Ed25519(signing_key, sig_input)
 ```
 
-There is no concatenation format. Every value that must be bound — relationship,
-direction, chain, key epoch, sequence, predecessor, sender, recipient, origin,
-payload hash, transport policy — is a **field of the map**, so the signature
-covers them by covering the encoding.
+There is no concatenation format. Every value that must be bound is a **field of
+the map**. These values include the relationship, direction, chain, key epoch,
+sequence, predecessor, sender, recipient, origin, payload hash, and transport
+policy. The signature covers them by covering the encoding.
 
 This is deliberate. An ad-hoc concatenation is where length-extension and field
 confusion bugs live, and it requires every implementation to agree on a
@@ -787,11 +787,10 @@ A 2.0.0 `git-bundle` descriptor has no `incremental_base` core field, and its
 `prerequisites` array is empty. The two are enforced at different layers, and
 deliberately so. `incremental_base` is a core descriptor key, so its presence is
 rejected during validation by the rule in [§7.3](#73-rejection-rules). A
-non-empty `prerequisites` array is _structurally valid_ — it is the shape an
-incremental sender legitimately produces — so it parses, and the Git handler
-then refuses the delivery under [§7.6](#76-refusing-a-delivery). Nothing reaches
-Git unvalidated either way; the difference is that the second case can be
-answered.
+non-empty `prerequisites` array is _structurally valid_. An incremental sender
+legitimately produces this form, so it parses and the Git handler then refuses
+the delivery under [§7.6](#76-refusing-a-delivery). Nothing reaches Git
+unvalidated either way. The second case can be answered.
 
 Incremental Git is therefore signalled by `prerequisites` alone. Key 26 stays
 reserved and stays rejected on presence: it duplicates what the signed
@@ -1288,10 +1287,10 @@ implementation `MUST` read it in one of three forms:
 A passphrase is at least 24 characters and carries no leading or trailing
 whitespace, in either form that contains one; a stated iteration count is a
 decimal integer from 10000 to 10000000. Both sides `MUST` use exactly the salt
-above and the work factor the secret names — a proof produced under a different
-one is simply a wrong proof — and both `SHOULD` derive the key once per process
-rather than per request. The parameters are carried inside the secret precisely
-so that the two sides cannot be configured with different ones.
+above and the work factor the secret names. A proof produced under a different
+work factor is wrong. Both sides `SHOULD` derive the key once per process rather
+than per request. The parameters are carried inside the secret so that the two
+sides cannot be configured with different ones.
 
 The three forms exist because only the passphrase needs stretching: the key is
 what verification consumes, so a deployment holding the key alone verifies
@@ -1523,7 +1522,7 @@ hybrid recipients.
 
 ### 12.3 Final Combine
 
-Given fixed export outputs, so the vector is reproducible:
+Given fixed export outputs, the vector is reproducible:
 
 ```text
 ss_A                 = 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20

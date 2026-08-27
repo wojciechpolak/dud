@@ -1,8 +1,8 @@
-# DUD v2 Recovery
+# DUD v2 recovery
 
-What to do when something goes wrong: a bad deploy, a lost device, a corrupted
-local state directory, a stuck peer relationship, or a partial backup. Each
-section states the symptom, what is safe, and the procedure.
+Recovery procedures for a bad deploy, lost device, corrupted local state
+directory, stuck peer relationship, or partial backup. Each section states the
+symptom, what is safe, and the procedure.
 
 Operational background is in [`server-v2.md`](server-v2.md); the adversary model
 behind these rules is in [`threat-model-v2.md`](threat-model-v2.md).
@@ -12,8 +12,8 @@ behind these rules is in [`threat-model-v2.md`](threat-model-v2.md).
 - **Rolling a flag back never destroys state.** Disabling v2 leaves its metadata
   and bodies untouched; disabling v1 leaves its objects in place.
 - **Replay protection does not reset.** A nonce claimed before a rollback is
-  still claimed after it. This is deliberate: an operator must not be able to
-  reopen a replay window by restarting.
+  still claimed after it. An operator must not be able to reopen a replay window
+  by restarting.
 - **Revocation is durable.** It survives restart, rollback, and restore from a
   backup taken after the revocation.
 - **Local erasure is local.** No client command deletes server data, a peer's
@@ -57,8 +57,8 @@ Nothing to do. The dead drop commands do not read or write the DUD root, so
 `dud flush` leave the device seed and peer graph byte-identical. Upgrading again
 finds the same device identity.
 
-The reverse direction — a v2 client against a v1-only server — refuses with a
-message naming the dead drop alternative rather than silently downgrading:
+A v2 client against a v1-only server refuses with a message naming the dead drop
+alternative rather than silently downgrading:
 
 ```
 server does not offer protocol v2; use an explicit dead-drop command
@@ -90,10 +90,9 @@ any.
   drains every active peer.
 - **Unacknowledged deliveries** are not a fault. Every send is unacknowledged
   until the peer actually receives it.
-- **Inbound waiting** reports what the last inbox read saw. Only a command that
-  reads the inbox — `receive`, `inbox`, `git fetch` — refreshes it, so after a
-  send it still describes the previous check. `dud inbox PEER` reads it now,
-  without committing anything.
+- **Inbound waiting** reports what the last inbox read saw. Only `receive`,
+  `inbox`, or `git fetch` refreshes it, so after a send it still describes the
+  previous check. `dud inbox PEER` reads it now, without committing anything.
 - **A halted relationship** means the client detected state it will not act on
   without a human. Read the halt reason before doing anything; it names the
   invariant that failed.
@@ -110,32 +109,32 @@ with work still queued says why in its `Stopped` block:
   with different contents. Move it aside, or rerun with the default
   `--on-conflict skip`, which commits and acknowledges the delivery without
   writing the file.
-- **Already applied:** the oldest delivery is one this device has committed and
+- **Already applied.** The oldest delivery is one this device has committed and
   the server has not yet retired. The completion is queued; `dud sync PEER`
   retries it.
 
-A delivery whose output was skipped is not lost: the plaintext stays in the
-durable transfer store, and the report prints the command that writes it out.
+A delivery whose output was skipped remains in the durable transfer store. The
+report prints the command that writes it out.
 
 ```sh
 dud receive PEER --id DESCRIPTOR_DIGEST --out /work/recovered --on-conflict overwrite
 ```
 
-If the relationship is genuinely unusable, revoke and re-pair (§6) rather than
-editing local state by hand.
+If the relationship is unusable, revoke and re-pair (§6) rather than editing
+local state by hand.
 
 ## 5. Capability expiry and reissue
 
 Symptom: a peer operation fails because the capability is no longer active.
 
 Capabilities expire on their own schedule and the client reissues them through
-`/v2/capabilities/reissue` as part of normal peer work, proving possession of
-the relationship secret, not presenting an administrative credential. In the
-usual case a plain `dud sync` restores service, and `dud peer show PEER --json`
-reports the reissue count.
+`/v2/capabilities/reissue` as part of normal peer work. It proves possession of
+the relationship secret and does not present an administrative credential. A
+plain `dud sync` restores service when the relationship is still valid, and
+`dud peer show PEER --json` reports the reissue count.
 
-Reissue cannot recover from a _revoked_ relationship. That is the intended
-asymmetry: expiry is routine, revocation is a decision.
+Reissue cannot recover from a _revoked_ relationship. Expiry is routine;
+revocation is a decision.
 
 ## 6. Losing a device, or ending a relationship
 
@@ -149,8 +148,8 @@ dud peer revoke laptop --yes
 
 `dud peer revoke` is an online protocol operation. It durably revokes the
 relationship on the server and preserves local recovery evidence, so you can
-still see what the relationship was. An operator with data-directory access can
-do the same offline:
+still inspect the relationship. An operator with data-directory access can do
+the same offline:
 
 ```sh
 npm run v2:admin -- revoke --data-dir ./dud-data --relationship HEX \
@@ -202,9 +201,9 @@ do not lower it below the time a large upload takes on your deployment.
 Metadata rows whose body is gone are not repairable; the ciphertext is the data.
 The sender still holds the plaintext, so the recovery is to send again.
 
-Prevention: back up the data directory as one unit. On Cloudflare, D1 and R2
-have independent backup schedules, so expect to reconcile after any restore that
-did not capture both at the same moment.
+Back up the data directory as one unit. On Cloudflare, D1 and R2 have
+independent backup schedules. Reconcile after any restore that did not capture
+both at the same moment.
 
 ## 8. Rotating the deployment key
 
@@ -273,9 +272,9 @@ Read the reason with:
 dud git status PEER --json
 ```
 
-[`git-sync-v2.md`](git-sync-v2.md) covers the specific failures — size, object
+[`git-sync-v2.md`](git-sync-v2.md) covers the specific failures: size, object
 count, delta depth, wall time, disk budget, metadata mismatch, and history
-rewrite — and what each one means about the sender.
+rewrite. It also explains what each one means about the sender.
 
 ## 11. Quarantined delivery chains
 
@@ -313,8 +312,8 @@ the sender to send them again.
 
 ## 12. Related documents
 
-- [`server-v2.md`](server-v2.md) — deployment and operations
-- [`migration-v1-v2.md`](migration-v1-v2.md) — moving between deployment shapes
-- [`git-sync-v2.md`](git-sync-v2.md) — peer Git synchronization
-- [`threat-model-v2.md`](threat-model-v2.md) — why these rules are shaped this
+- [`server-v2.md`](server-v2.md): deployment and operations
+- [`migration-v1-v2.md`](migration-v1-v2.md): moving between deployment shapes
+- [`git-sync-v2.md`](git-sync-v2.md): peer Git synchronization
+- [`threat-model-v2.md`](threat-model-v2.md): why these rules are shaped this
   way

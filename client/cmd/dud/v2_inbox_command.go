@@ -15,7 +15,7 @@ import (
 // v2InboxPreview describes the delivery at the head of a peer's queue without
 // committing it. Only the head is visible: the server answers an inbox query
 // with the oldest pending delivery and nothing else, so there is no listing to
-// report and this deliberately does not pretend otherwise.
+// report, and this command does not imply one exists.
 type v2InboxPreview struct {
 	Sequence         uint64 `json:"sequence"`
 	Expected         uint64 `json:"expected_sequence"`

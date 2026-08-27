@@ -66,8 +66,8 @@ const (
 // v2MinimumExtensionKey is the first key of the optional extension range shared
 // by the descriptor and by every type_meta map. Keys below it are the frozen
 // core namespace: an unrecognised one is a rejection. Keys at or above it are
-// ignored when unknown, which is what lets a later release add a field without
-// a protocol version bump. See protocol-v2.md §2.
+// ignored when unknown. This permits additive fields without a protocol version
+// bump. See protocol-v2.md §2.
 const v2MinimumExtensionKey = 128
 
 // kPeerFeatures is the acknowledgement type_meta extension carrying the feature
@@ -79,9 +79,8 @@ const kPeerFeatures = 128
 
 // validateV2MetadataKeys applies the extension rule of protocol-v2.md §2 to a
 // type_meta map. Applying the same rule the descriptor already uses keeps one
-// convention rather than a second per-payload-type one, and it is what allows a
-// later release to add a type_meta field that this release ignores instead of
-// rejecting outright.
+// convention rather than a second per-payload-type one. This permits additive
+// type_meta fields without rejecting an otherwise valid descriptor.
 func validateV2MetadataKeys(keys []int, required, optional []int) error {
 	for _, key := range keys {
 		if key >= v2MinimumExtensionKey {

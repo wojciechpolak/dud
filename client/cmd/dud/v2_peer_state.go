@@ -449,7 +449,7 @@ func pruneV2ReplayHistory(state *v2PeerDeliveryState, now uint64) {
 }
 
 // pruneV2ExpiredInboundTransfers removes the private durable copy of payloads
-// whose signed transport lifetime has ended. CommittedOutput is deliberately
+// whose signed transport lifetime has ended. CommittedOutput remains
 // not touched: it may be an operator-selected destination rather than DUD's
 // own recovery copy.
 //
@@ -497,7 +497,7 @@ func pruneV2ExpiredInboundTransfers(state *v2PeerDeliveryState, now uint64) (boo
 // skipped, a message that went to stdout, and an extracted collection, whose
 // committed output is the destination directory rather than the archive these
 // bytes are. Verifying the output against the signed digest decides all three
-// without naming a payload type — a directory or a mismatch simply retains.
+// without naming a payload type. A directory or a mismatch retains the copy.
 func discardRedundantV2DurableCopy(transfer *v2InboundTransfer, durablePath, committedOutput string, payloadDigest []byte) (bool, error) {
 	if durablePath == "" || committedOutput == "" || committedOutput == durablePath {
 		return false, nil

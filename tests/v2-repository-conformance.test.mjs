@@ -372,8 +372,8 @@ for (const [name, factory] of factories) {
   // A receiver walks one descriptor chain: a delivery handed to it before an
   // earlier one reads as a gap and quarantines the chain. Publication order is
   // therefore a contract, and neither `created_at` (whole seconds) nor the
-  // random `id` can carry it — two sends inside one second, or a clock that
-  // steps back between them, must still drain in the order they were published.
+  // random `id` can carry it. Two sends inside one second, or a clock that
+  // steps back between them, must still drain in publication order.
   test(`${name} drains the inbox in publication order regardless of timestamps`, async (t) => {
     const { repository } = await factory(t);
     await repository.initialize();

@@ -1,4 +1,4 @@
-# Dead Drops
+# Dead drops
 
 A dead drop is addressed by an opaque ID. Encrypt to a passphrase or an `age`
 recipient, upload, and hand the ID to the other side out of band. Nothing is
@@ -23,20 +23,18 @@ It succeeds only if the client reaches the service through its own DoH
 resolution and exactly TLS 1.3, with an accepted ECH handshake under the default
 `hard` mode.
 
-`hard` is the strict privacy setting: the target's HTTPS DNS record must publish
-a valid ECH configuration and the TLS handshake must actually use it, or the
-command fails.
+`hard` requires the target's HTTPS DNS record to publish a valid ECH
+configuration, and the TLS handshake must use it. Otherwise, the command fails.
 
-`off` disables ECH for that connection. Every other transport check still
-applies — DoH resolution, the public address-range check, exactly TLS 1.3, and
-redirect rejection — but the target hostname travels in cleartext in the TLS
-SNI, so a passive observer learns which host you are talking to. It exists so a
-self-hosted origin without an ECH-capable front end can use DUD at all; the
-trade-off is recorded as `DUD-V2-DEC-001` in
+`off` disables ECH for that connection. DoH resolution, the public address-range
+check, exactly TLS 1.3, and redirect rejection still apply. The target hostname
+travels in cleartext in the TLS SNI, so a passive observer learns which host you
+are talking to. A self-hosted origin without an ECH-capable front end can use
+DUD this way. The trade-off is recorded as `DUD-V2-DEC-001` in
 [`threat-model-v2.md`](threat-model-v2.md).
 
-Use `hard` when you want DUD's intended transport security properties. Treat
-`off` as a concession you make knowingly, for one origin that cannot do better.
+Use `hard` when the origin supports ECH. Use `off` only when you accept SNI
+exposure for that origin.
 
 ## 2. Upload a file, directory, or message
 
@@ -170,9 +168,10 @@ moves a local branch, so apply the imported branch deliberately:
 git merge --ff-only machine-a/main
 ```
 
-For repeated bidirectional sync, give each side the other's name: `machine-a` on
-machine B and `machine-b` on machine A. The paired equivalent, which adds sender
-authentication and ordering, is in [`git-sync-v2.md`](git-sync-v2.md).
+For repeated bidirectional sync, give each side the other's name. Use
+`machine-a` on machine B and `machine-b` on machine A. The paired equivalent,
+which adds sender authentication and ordering, is in
+[`git-sync-v2.md`](git-sync-v2.md).
 
 ## 6. Flush expired objects
 
@@ -183,8 +182,7 @@ dud flush
 ```
 
 It deletes expired and already-consumed objects immediately and returns JSON
-with `deletedCount`. Cleanup is otherwise cron-free: sweeps happen as a side
-effect of normal traffic.
+with `deletedCount`. Otherwise, cleanup runs during normal traffic.
 
 ## 7. The `/v1` HTTP API
 
@@ -245,8 +243,8 @@ Deletes expired and already-consumed objects immediately. Requires the
 
 ## Related documents
 
-- [`client.md`](client.md) — client configuration, wrappers, and JSON output
-- [`peer-setup.md`](peer-setup.md) — pairing devices, the other transfer mode
-- [`migration-v1-v2.md`](migration-v1-v2.md) — what v1 and v2 do and do not
-  share on one deployment
-- [`server-v2.md`](server-v2.md) — running the server behind these routes
+- [`client.md`](client.md): client configuration, wrappers, and JSON output
+- [`peer-setup.md`](peer-setup.md): pairing devices, the other transfer mode
+- [`migration-v1-v2.md`](migration-v1-v2.md): what v1 and v2 do and do not share
+  on one deployment
+- [`server-v2.md`](server-v2.md): running the server behind these routes

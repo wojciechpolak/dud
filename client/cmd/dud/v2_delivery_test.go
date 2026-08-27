@@ -1213,9 +1213,9 @@ func TestPruneV2ExpiredInboundTransfersRetainsStateWhenPayloadRemovalFails(t *te
 	if err := os.WriteFile(filepath.Join(payload, "child"), []byte("plaintext"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// A second, removable transfer proves the undeletable one is reported
-	// without stalling the rest of the sweep — every peer operation prunes, so
-	// one stuck file must not make the peer unusable.
+	// A second removable transfer proves the undeletable one is reported without
+	// stopping the sweep. Every peer operation prunes, so one stuck file must not
+	// make the peer unusable.
 	removable := filepath.Join(t.TempDir(), "removable")
 	if err := os.WriteFile(removable, []byte("plaintext"), 0o600); err != nil {
 		t.Fatal(err)

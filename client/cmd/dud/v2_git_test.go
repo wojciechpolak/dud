@@ -494,8 +494,8 @@ func TestV2GitIsAncestorAnswersWithoutImporting(t *testing.T) {
 
 		// The same "no", from a Git that also wrote an advisory to stderr.
 		// runV2Git replaces the exit error's text whenever that happens, so
-		// this is the case that a message-based classification gets wrong —
-		// turning a non-fast-forward into a failure --allow-rewrite cannot fix.
+		// a message-based classification gets this case wrong. It turns a
+		// non-fast-forward into a failure that --allow-rewrite cannot fix.
 		stub := filepath.Join(t.TempDir(), "git-stub.sh")
 		if err := os.WriteFile(stub, []byte("#!/bin/sh\necho 'hint: advisory' >&2\nexit 1\n"), 0o700); err != nil {
 			t.Fatal(err)

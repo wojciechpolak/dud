@@ -1,12 +1,11 @@
 # DUD Client
 
-The client is one static Go binary. It carries its own transport —
-DNS-over-HTTPS resolution, candidate-address classification, exactly TLS 1.3,
-and ECH all happen inside the `dud` binary — so it needs no HTTP subprocess and
-ships none. Both transfer modes go through it.
+The client is one static Go binary. It performs DNS-over-HTTPS resolution,
+candidate-address classification, exactly TLS 1.3, and ECH inside the `dud`
+binary. It needs no HTTP subprocess and ships none. Both transfer modes use it.
 
-The Docker image is how it is normally installed, because the image also carries
-the `age`, `age-keygen`, `git`, and `qrencode` the binary calls out to:
+Most installs use the Docker image, which also contains the `age`, `age-keygen`,
+`git`, and `qrencode` helpers the binary calls:
 
 ```sh
 docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
@@ -49,13 +48,12 @@ calls out to along with it:
 brew install wojciechpolak/dud/dud
 ```
 
-The name has to be spelled in full. Homebrew's own index already carries an
-unrelated formula named `dud` — a data versioning tool by a different author —
-and a bare `brew install dud` resolves to that one, before and after this tap is
-added. Both install a `dud` executable into the same Homebrew prefix, so only
-one of the two can be installed at a time; `brew uninstall dud` removes
-whichever is there. `upgrade`, `reinstall`, and `uninstall` need the qualified
-name too:
+The name has to be spelled in full. Homebrew's own index carries an unrelated
+formula named `dud`, a data versioning tool by a different author. A bare
+`brew install dud` resolves to that formula. Both install a `dud` executable
+into the same Homebrew prefix, so only one of the two can be installed at a
+time; `brew uninstall dud` removes whichever is there. `upgrade`, `reinstall`,
+and `uninstall` need the qualified name too:
 
 ```sh
 brew upgrade wojciechpolak/dud/dud
@@ -78,15 +76,15 @@ does until the function is removed from the profile and the shell restarted, and
 the installed binary stays reachable by its full path meanwhile. `type dud` says
 which of the two a shell will run.
 
-Running the binary directly means supplying `age`, `age-keygen`, `git`, and
-`qrencode` on `PATH` yourself — Homebrew's formula does that for you, an
-unpacked release asset does not — and giving up what the generated wrappers
-harden (§6): the container boundary, the in-memory `/tmp`, and the pinned helper
-lookup. `DUD_AGE_BIN`, `DUD_AGE_KEYGEN_BIN`, `DUD_GIT_BIN`, and
-`DUD_QRENCODE_BIN` name each helper for a host that keeps them somewhere other
-than `PATH`. In exchange the paths are the host's own, so `/work` in every
-example below becomes an ordinary path and `~/.dud` is read in place. The two
-forms accept identical commands, options, and environment variables.
+Running the binary directly requires `age`, `age-keygen`, `git`, and `qrencode`
+on `PATH`. Homebrew's formula provides them; an unpacked release asset does not.
+It also omits the generated wrappers' hardening (§6): the container boundary,
+the in-memory `/tmp`, and the pinned helper lookup. `DUD_AGE_BIN`,
+`DUD_AGE_KEYGEN_BIN`, `DUD_GIT_BIN`, and `DUD_QRENCODE_BIN` name each helper for
+a host that keeps them somewhere other than `PATH`. In exchange the paths are
+the host's own, so `/work` in every example below becomes an ordinary path and
+`~/.dud` is read in place. The two forms accept identical commands, options, and
+environment variables.
 
 ## 1. Environment
 
@@ -110,8 +108,8 @@ forms accept identical commands, options, and environment variables.
 
 `DUD_ECH_MODE` accepts exactly two values:
 
-- `hard` — require real ECH and fail the request if the connection cannot use it
-- `off` — do not request ECH at all, leaving the target hostname visible in the
+- `hard`: require real ECH and fail the request if the connection cannot use it
+- `off`: do not request ECH at all, leaving the target hostname visible in the
   TLS SNI
 
 The four helper selectors apply to a binary run directly. The generated wrappers
@@ -167,8 +165,8 @@ transfers, but pairing starts from the origin the world itself resolves, and the
 device identity is shared by everything in it. Testing a second deployment is
 therefore a second world, not a second peer.
 
-`DUD_PROFILE` selects one. It names a directory under the DUD root —
-`~/.dud/NAME` — and the wrapper mounts that one directory into the container:
+`DUD_PROFILE` selects one. It names a directory under the DUD root,
+`~/.dud/NAME`, and the wrapper mounts that one directory into the container:
 
 ```sh
 DUD_PROFILE=test dud init --device laptop-test --url https://other.example.com
@@ -191,24 +189,23 @@ deployment with `DUD_BASE_URL`.
 | Runtime state | `~/.dud/default/state`  | `/dud/default/state`      |
 | Working files | the current host folder | `/work`                   |
 
-Everything a world holds is secret — the configuration directory carries the
+Everything a world holds is secret. The configuration directory carries the
 device master seed, and the state directory carries pairing material and any
-received plaintext DUD is still the only holder of — so the two sit together
-under one root that no convention asks anyone to synchronize. `~/.config` in
-particular is a path dotfile managers routinely commit to a repository, and a
-device seed must never travel that way.
+received plaintext that DUD alone holds. They share one root because no sync
+convention needs to copy either directory. `~/.config` is a path dotfile
+managers routinely commit to a repository, and a device seed must never travel
+that way.
 
 `DUD_HOME` moves the root. Leave it unset for normal use; the wrapper creates
 the private directories and maps them itself. Each machine gets its own seed and
 state, so two real devices need no variables at all; use `DUD_PROFILE` rather
 than `DUD_HOME` when one machine needs a second world.
 
-Removing `~/.dud` removes every world, but it is not a complete erasure: peer
+Removing `~/.dud` removes every world, but it is not a complete erasure. Peer
 state inside a Git repository lives in that repository's own `.git/dud`, and the
-client image stays in the local Docker store. `dud erase` is the command that
-accounts for this: it reports what it removed, what it retained, and what it
-cannot reach at all, including copies already held by a peer or the server. See
-`recovery-v2.md` §7.
+client image stays in the local Docker store. `dud erase` reports what it
+removed, what it retained, and what it cannot reach, including copies already
+held by a peer or the server. See `recovery-v2.md` §7.
 
 ## 4. Running it
 
@@ -241,7 +238,7 @@ Every command that reports a result accepts `--json`: `test`, `upload`,
 `doctor`, `capabilities`, `config`, `migrate`, `erase`, `peer *`, `sync`,
 `inbox`, `send`, and `receive`.
 
-Where a payload already owns stdout, the two cannot share the stream:
+Where a payload already owns stdout, the two cannot share the stream.
 `download --json` is rejected with `--stdout`, and `keygen --json` requires
 `--out` rather than writing a private key next to a JSON document.
 
@@ -327,12 +324,12 @@ do not belong in a client container.
 
 Running `dud` with no command in an interactive terminal opens a menu organized
 around verbs: `send`, `receive`, `git`, `peers`, `status`, `setup`, and `tools`.
-Each transfer verb asks for its target first — a numbered list of the paired
-peers plus a `dead drop — share by ID` entry — so the menu selects a peer
-transfer or a drop the same way a positional peer alias or a leading flag
-selects it on the command line. Typing a peer alias at the target step is a
-shortcut for it. Without an initialized device or paired peers, the target step
-offers the drop entry alone, points at `setup`, and defaults to the drop.
+Each transfer verb asks for its target first. The menu lists paired peers and
+the `dead drop — share by ID` entry. A positional peer alias or a leading flag
+makes the same peer-transfer or drop selection on the command line. Typing a
+peer alias at the target step is a shortcut. Without an initialized device or
+paired peers, the target step offers the dead drop entry alone, points at
+`setup`, and defaults to it.
 
 Both send paths share one payload step, so the target never changes what can be
 sent: a short one-line message, longer text typed or pasted until Ctrl-D, or
@@ -341,17 +338,17 @@ repeated file and directory paths that the command bundles. The words `test`,
 level and reach the same operations with the same prompts.
 
 Every prompt below the top level offers `b` to go back one step and `q` to quit,
-so no step is a dead end that only Ctrl-C can leave. The menu stays up: a
-command that completes returns to the top level, so one session can run several.
-`q`, `b` out of the top-level verb, or end of input leaves it successfully, and
-a command that fails ends the session with that command's exit status. If stdin
-is not a TTY, it prints usage information and exits instead.
+so no step is a dead end that only Ctrl-C can leave. The menu returns to the top
+level after each successful command, so one session can run several. `q`, `b`
+out of the top-level verb, or end of input leaves it successfully, and a command
+that fails ends the session with that command's exit status. If stdin is not a
+TTY, it prints usage information and exits instead.
 
 ## Related documents
 
-- [`dead-drops-v1.md`](dead-drops-v1.md) — the drop commands in full
-- [`peer-setup.md`](peer-setup.md) — pairing, sending, and receiving with peers
-- [`recovery-v2.md`](recovery-v2.md) — `dud erase`, stuck relationships, and
+- [`dead-drops-v1.md`](dead-drops-v1.md): the drop commands in full
+- [`peer-setup.md`](peer-setup.md): pairing, sending, and receiving with peers
+- [`recovery-v2.md`](recovery-v2.md): `dud erase`, stuck relationships, and
   local state problems
-- [`supported-versions.md`](supported-versions.md) — the tools the client
-  assumes on the host
+- [`supported-versions.md`](supported-versions.md): the tools the client assumes
+  on the host

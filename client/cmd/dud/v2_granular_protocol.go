@@ -180,8 +180,8 @@ func newV2GranularSlotProofInput(tokenSecret []byte, direction, scope string, ch
 	// Clamping to the end of the slot epoch is only meaningful while that
 	// epoch is still running. Protocol §8 has a receiver poll the current slot
 	// plus a recovery window of roughly 30 past slots, and a proof for one of
-	// those would otherwise be born already expired — the server rejects
-	// anything whose expiry is behind its clock. The epoch is a separate
+	// those would otherwise be born already expired. The server rejects anything
+	// whose expiry is behind its clock. The epoch is a separate
 	// signed field in the proof, so a past-epoch query is still bound to the
 	// epoch it names; only the authorization lifetime lives here.
 	epochEnd := (epoch + 1) * v2SlotEpochSeconds

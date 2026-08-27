@@ -1,4 +1,4 @@
-# DUD Git Synchronization
+# DUD Git synchronization
 
 `dud git push PEER` and `dud git fetch PEER` move a Git repository between two
 paired devices as encrypted bundles. The server sees one opaque ciphertext body
@@ -13,9 +13,9 @@ is in [`peer-setup.md`](peer-setup.md).
 - **Every push is a complete checkpoint.** DUD sends the full advertised
   history, never a delta against what the peer is assumed to have. There are no
   incremental bundle chains, so `--incremental` and `--full` are rejected
-  outright instead of being quietly ignored. A checkpoint this client cannot
-  apply — one carrying prerequisites, for instance — is refused rather than left
-  sitting at the head of the queue: the peer is told, and your chain moves on.
+  outright instead of being quietly ignored. DUD refuses a checkpoint this
+  client cannot apply, such as one carrying prerequisites. It tells the peer and
+  advances the chain.
 - **The transport is a peer delivery.** A checkpoint is an ordinary v2 delivery
   addressed to a peer alias, so it inherits capability scoping, rotating slots,
   and signed acknowledgements.
@@ -46,8 +46,8 @@ dud git push laptop --ttl 24h --json
 - `--current` requires an attached branch and cannot be combined with
   `--branch`.
 - `--ttl` defaults to 168 hours and cannot exceed 720 hours.
-- `--url`, `--doh-url`, and `--ech-mode` are rejected: a paired relationship
-  pins its own origin and transport mode.
+- `--url`, `--doh-url`, and `--ech-mode` are rejected because a paired
+  relationship pins its own origin and transport mode.
 
 Only `refs/heads/*` and `refs/tags/*` are advertised. Any other namespace is
 refused before the bundle is built.
@@ -72,7 +72,7 @@ perform deliberately:
 git merge --ff-only laptop/main
 ```
 
-For bidirectional sync, give each side the other's alias: `laptop` on the
+For bidirectional sync, give each side the other's alias. Use `laptop` on the
 desktop and `desktop` on the laptop.
 
 ## 4. History rewrites
@@ -123,8 +123,8 @@ or error message cannot inject control characters into your terminal.
 ## 6. Local limits
 
 Each limit has a fixed maximum and a per-repository Git configuration key that
-may only make it **stricter**. A value above the maximum is a configuration
-error, not a weaker limit.
+may only make it stricter. A value above the maximum is a configuration error,
+not a weaker limit.
 
 | Key                     | Maximum | What it bounds                           |
 | ----------------------- | ------- | ---------------------------------------- |
@@ -179,7 +179,7 @@ Peer laptop
 | `Git bundle delta depth D exceeds the limit`                     | over `dud.gitDeltaDepth`; the sender packed unusually deep chains          |
 | `Git operation exceeded the ... wall-time limit`                 | the repository is larger than the local time budget allows                 |
 | `Git quarantine requires N free bytes`                           | not enough free space for the 3x reservation                               |
-| `Git bundle header does not match the signed encrypted metadata` | the bundle and its signed metadata disagree — treat the sender as hostile  |
+| `Git bundle header does not match the signed encrypted metadata` | the bundle and its signed metadata disagree; treat the sender as hostile   |
 | `Refused Git checkpoint N: ...`                                  | the checkpoint cannot be applied; the peer was told and the chain advanced |
 | `incremental Git prerequisites`                                  | the sender is not sending complete checkpoints                             |
 | `requires --allow-rewrite`                                       | the incoming history is not a descendant of what you have                  |
@@ -189,22 +189,20 @@ A quarantined delivery never entered your repository. Once you understand why it
 failed, either ask the sender to push again or drop it; there is nothing to
 clean up on your side beyond the quarantine directory the client manages itself.
 
-A refused checkpoint is different from a failed one. A failure leaves the
-checkpoint pending, so fixing the cause — freeing disk space, raising a local
-limit — and fetching again picks it up. A refusal is final: the checkpoint could
-never be applied by this client, so it is acknowledged as refused and the chain
-advances past it, which is what stops one bad checkpoint from stalling every
-later transfer. `dud git status PEER` lists both, along with any checkpoint of
-yours the peer refused.
+A refused checkpoint differs from a failed one. A failed checkpoint stays
+pending. After fixing the cause, such as freeing disk space or raising a local
+limit, fetching again picks it up. A refusal is final. This client cannot apply
+the checkpoint, so it acknowledges the refusal and advances the chain. That
+prevents one bad checkpoint from stalling later transfers. `dud git status PEER`
+lists both, along with any checkpoint of yours the peer refused.
 
 ## 8. What the server learns
 
-A checkpoint is an opaque delivery body. The server learns its size, its timing,
-its TTL, and that it belongs to a relationship: the same metadata every other v2
-delivery exposes, enumerated in
-[`threat-model-v2.md`](threat-model-v2.md#4-known-metadata-leakage). It does not
-learn that the payload is a Git bundle, which branches it carries, or anything
-about the commits.
+A checkpoint is an opaque delivery body. The server learns its size, timing,
+TTL, and relationship. Every v2 delivery exposes the same metadata, listed in
+[`threat-model-v2.md`](threat-model-v2.md#4-known-metadata-leakage). The server
+does not learn that the payload is a Git bundle, which branches it carries, or
+anything about the commits.
 
 The payload type is carried in the encrypted descriptor, so only the peer knows
 to treat it as a bundle.
@@ -217,9 +215,9 @@ documented in [`dead-drops-v1.md`](dead-drops-v1.md#5-git-sync-by-id).
 
 ## 10. Related documents
 
-- [`peer-setup.md`](peer-setup.md) — pairing two devices
-- [`recovery-v2.md`](recovery-v2.md) — recovering a stuck relationship
-- [`protocol-v2.md`](protocol-v2.md) — descriptors, slots, and payload-type
+- [`peer-setup.md`](peer-setup.md): pairing two devices
+- [`recovery-v2.md`](recovery-v2.md): recovering a stuck relationship
+- [`protocol-v2.md`](protocol-v2.md): descriptors, slots, and payload-type
   metadata
-- [`threat-model-v2.md`](threat-model-v2.md) — hostile object databases and ref
+- [`threat-model-v2.md`](threat-model-v2.md): hostile object databases and ref
   input

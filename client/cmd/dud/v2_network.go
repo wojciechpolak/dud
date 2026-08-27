@@ -26,7 +26,7 @@ const (
 )
 
 // v2NetworkOverrides carries the explicit command-line network options of the
-// commands that accept them. Peer-scoped commands deliberately reject these
+// commands that accept them. Peer-scoped commands reject these
 // options instead of overriding a paired relationship's pinned origin.
 type v2NetworkOverrides struct {
 	BaseURL string
@@ -96,11 +96,10 @@ func v2NetworkLayerName(source, option string) string {
 }
 
 // v2NetworkProvenance names the layers that chose a target and its ECH mode.
-// A resolution failure otherwise reports a hostname the reader never typed —
-// a dead drop command falling back to the compiled default base URL and a peer
-// command reading a pinned origin out of the profile produce the same sentence
-// — so the layer to correct is part of the error rather than something to
-// rediscover. Sources are diagnostic only: an empty one drops its clause.
+// A resolution failure can otherwise report a hostname the reader never typed.
+// A dead drop command may use the compiled default base URL, while a peer
+// command reads a pinned origin from its profile. The error names the layer to
+// correct. Sources are diagnostic only, and an empty source omits its clause.
 func v2NetworkProvenance(originSource, echModeSource string) string {
 	clauses := []string{}
 	if originSource != "" {
@@ -121,7 +120,7 @@ func v2NetworkProvenance(originSource, echModeSource string) string {
 // are canonicalized here so an override cannot introduce an origin form that
 // silently fails signature binding later.
 //
-// The peer profile deliberately outranks the environment. A paired relationship
+// The peer profile outranks the environment. A paired relationship
 // pins the origin that every one of its signed descriptors is bound to, and the
 // DUD_* variables are ambient: they are also the only way to point dead drop
 // commands at a deployment, so a shell that exports them for drops must not
@@ -202,12 +201,10 @@ func pinnedV2Network(peer v2PeerProfile) map[string]any {
 	}
 }
 
-// overriddenV2NetworkEnvironment names the DUD_* variables the peer profile
-// outranked with a different value. Those variables are ambient — the same ones
-// point dead drop commands at a deployment — so a report says when a pinned
-// profile won instead of leaving the operator to wonder why an export had no
-// effect. A variable that merely repeats what the profile pins overrode nothing
-// and is not reported, which keeps the usual single-deployment shell quiet.
+// overriddenV2NetworkEnvironment names DUD_* variables whose values differ
+// from the peer profile. Those variables also point dead drop commands at a
+// deployment. The report explains why an export had no effect. A variable that
+// repeats the pinned value did not override anything and is not reported.
 //
 // The environment value is canonicalized before the comparison because the
 // losing layer is never validated: only the winning value passed through
@@ -242,10 +239,9 @@ func overriddenV2NetworkEnvironment(settings v2NetworkSettings) []string {
 
 // renderPinnedV2Network adds what a peer profile pins to a report section that
 // already carries the effective values. A row appears only where the two differ,
-// so the common case — a paired peer used as it was paired — reads exactly as it
-// did before this provenance existed. Reaching a row means either a command-line
-// override is in play, or the profile pins nothing and a weaker layer supplied
-// the value.
+// so a paired peer using its pinned transport adds no row. A row means a
+// command-line override is in effect, or the profile pins nothing and a weaker
+// layer supplied the value.
 func renderPinnedV2Network(section *textSection, pinned map[string]any, settings v2NetworkSettings) {
 	for _, row := range []struct {
 		label  string

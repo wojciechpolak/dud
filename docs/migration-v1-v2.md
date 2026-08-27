@@ -1,13 +1,12 @@
 # Migrating a deployment from v1 to v2
 
-This is about the two wire protocols a _server_ speaks, not about retiring a
-transfer mode. Dead drops and peer transfers are both permanent client features;
-see the README for what each one is for.
+This document describes the two wire protocols a _server_ speaks. Dead drops and
+peer transfers are permanent client features; see the README for what each one
+is for.
 
-DUD 2.0 is a clean break, not an upgrade in place. v1 and v2 share a hostname
-and a storage backend but nothing else: no identity, no credential, no object,
-and no local state carries across. This document says what that means in
-practice, how to run both at once while you move, and how to finish the move.
+v1 and v2 can share a hostname and storage backend, but their identities,
+credentials, objects, and local state stay separate. This document explains how
+to run both routes and select a deployment shape.
 
 See [`server-v2.md`](server-v2.md) for the operational reference and
 [`recovery-v2.md`](recovery-v2.md) for undoing any of this.
@@ -22,38 +21,35 @@ See [`server-v2.md`](server-v2.md) for the operational reference and
 | no local state beyond environment variables               | a device seed and peer graph under `~/.dud`        |
 | `dud upload` / `dud download` with an ID                  | `dud send PEER` / `dud receive PEER`               |
 
-Capabilities replace the shared secret for transfer, not for admission. A v2
-deployment still holds one deployment-wide credential, `DUD_PEER_SECRET`, and it
-authorizes creating a pairing invitation and nothing else. Once a pair is
-established, every transfer between those two devices is authorized by their own
-capabilities, and the enrollment secret has no further part in it. See
+Capabilities authorize transfers. A v2 deployment holds one deployment-wide
+credential, `DUD_PEER_SECRET`, which authorizes creating a pairing invitation
+and nothing else. Once a pair is established, its capabilities authorize every
+transfer between those two devices. See
 [`server-v2.md`](server-v2.md#31-enrollment-is-closed-by-default).
 
-A dropped object stays readable by a v1 client for as long as it exists, and a
-v2 client cannot read it. There is no import step, and none is planned: dropped
-objects carry no sender identity, so importing one would fabricate
-authentication that never existed.
+A dropped object remains readable by a v1 client for as long as it exists, and a
+v2 client cannot read it. DUD does not import dropped objects because they carry
+no sender identity; importing one would fabricate authentication.
 
-The dead drop commands are not deprecated by v2. `dud upload`, `dud download`,
-`dud git push --id`, `dud git fetch --id`, and `dud flush` keep their exact
-behavior on a dual-stack deployment, including their defaults, accepted
-object-ID forms, and subprocess exit codes. The shared secret they read is named
-`DUD_DROP_SECRET`; a deployment coming from 1.x carries the same value over
-under that name, on the server and in every client environment.
+The dead drop commands, `dud upload`, `dud download`, `dud git push --id`,
+`dud git fetch --id`, and `dud flush`, retain their behavior on a dual-stack
+deployment, including their defaults, accepted object-ID forms, and subprocess
+exit codes. They read `DUD_DROP_SECRET` from the server and each client
+environment; use the same value in every location.
 
 ## 2. The three deployment shapes
 
-Migration is a walk across the two feature flags described in
-[`server-v2.md`](server-v2.md#2-feature-flags):
+The two feature flags described in
+[`server-v2.md`](server-v2.md#2-feature-flags) select a deployment shape:
 
-1. **v1-only** — where you start; the deployment serves dead drops only.
-2. **dual-stack** — both protocols on one hostname, so the same server serves
+1. **v1-only** — the deployment serves dead drops only.
+2. **dual-stack** — both protocols share one hostname, so the server serves
    drops and peer transfers. Existing v1 clients keep working unchanged while
    devices pair.
-3. **v2-only** — `/v1/` is gone, and with it the ability to accept a drop.
+3. **v2-only** — `/v1/` is unavailable, so the deployment cannot accept a drop.
 
-Nothing forces you past step 2. A dual-stack deployment is a supported end
-state; run it as long as any v1 client matters to you.
+A dual-stack deployment is a supported end state. Use it while any v1 client
+needs the deployment.
 
 ## 3. Moving to dual-stack
 
@@ -78,7 +74,7 @@ curl -sS https://your-dud-host.example.com/v1/test
 dud capabilities
 ```
 
-Discovery must now advertise protocols `[1, 2]`. If it advertises `[2]`, v1 is
+Discovery must advertise protocols `[1, 2]`. If it advertises `[2]`, v1 is
 disabled; if `/v2/capabilities` returns `404`, v2 is not enabled.
 
 Enabling v2 changes v1 in exactly one way: v1 traffic is metered by the shared
@@ -107,9 +103,8 @@ Once paired, the peer equivalents of the dead drop workflows are:
 | `dud git push --id` / `--id` fetch  | `dud git push PEER` / `dud git fetch PEER` |
 | n/a                                 | `dud sync` (drain every active peer)       |
 
-Keep `DUD_DROP_SECRET` in place until every device has paired. A device that has
-initialized peer state can still run the drop commands; they neither read nor
-write that state.
+Keep `DUD_DROP_SECRET` in place until every device has paired. Peer state does
+not affect the dead drop commands; they neither read nor write it.
 
 ## 5. Moving to v2-only
 
@@ -155,21 +150,19 @@ Every step above is reversible, and rolling back does not corrupt state:
 
 [`recovery-v2.md`](recovery-v2.md) covers the failure cases in detail.
 
-## 7. The v1 protocol is frozen, not deprecated
+## 7. v1 protocol support
 
-Dead drops answer a question peer transfers cannot: reaching someone you have
-not paired with. That is not a transitional need, so no deprecation is planned
-and `v1-only` and `dual-stack` are both supported end states.
+Dead drops let you reach someone you have not paired with. `v1-only` and
+`dual-stack` are supported deployment shapes.
 
-Frozen means the v1 wire protocol receives security fixes, not features. New
-protocol work happens in v2, and a drop-shaped need that requires a wire change
-is a reason to reconsider the design rather than to extend v1.
+The v1 wire protocol receives security fixes. New protocol features belong in
+v2. Design any drop-shaped requirement that needs a wire change as a v2 feature.
 
-If a future major version ever did remove the routes, the process would be:
+If a major version removes the routes, it must:
 
-- a release landing with `DUD_DROP_ENABLED` defaulting to `false` first, so a
-  deployment can pin the old default for one more cycle
-- removal announced in [`CHANGELOG.md`](../CHANGELOG.md), with the
+- release with `DUD_DROP_ENABLED` defaulting to `false` first, so a deployment
+  can pin the old default for one more cycle
+- announce removal in [`CHANGELOG.md`](../CHANGELOG.md), with the
   supported-version window in [`SECURITY.md`](../SECURITY.md) stating the
   security-fix cutoff for the last v1-capable release
-- nothing deleting dropped objects on your behalf at any point
+- leave dropped objects intact at every point

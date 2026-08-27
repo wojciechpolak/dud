@@ -225,7 +225,7 @@ export interface V2BodyInventoryEntry {
 /**
  * Bounded walk over the opaque body namespace, used only by the explicit
  * administrator reconciliation command. Request handling never lists storage:
- * this surface is deliberately kept off {@link V2BodyStore} so no delivery,
+ * this method is outside {@link V2BodyStore} so no delivery,
  * inbox, control, or pairing path can reach it.
  */
 export interface V2BodyInventory {

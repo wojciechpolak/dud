@@ -100,8 +100,8 @@ func validateDownloadOptions(opts downloadOptions) error {
 	if opts.out != "" && opts.outputStdout {
 		return fatalError("download accepts only one output target: --out or --stdout")
 	}
-	// The payload owns stdout under --stdout, so a JSON report would interleave
-	// with it. Refusing is clearer than quietly moving the report to stderr.
+	// The payload owns stdout under --stdout. A JSON report would interleave with
+	// it, so the command rejects this combination.
 	if opts.outputJSON && opts.outputStdout {
 		return fatalError("download does not support --json with --stdout")
 	}
@@ -198,9 +198,9 @@ func (a *app) cmdDownload(args []string) error {
 	return nil
 }
 
-// downloadReport describes where the plaintext landed. The byte count comes
-// from the decrypted temp file rather than the transfer, so it measures what
-// was written rather than what was received.
+// downloadReport describes the plaintext output. It reads the byte count from
+// the decrypted temporary file, which measures the output rather than the
+// ciphertext transfer.
 func (a *app) downloadReport(opts downloadOptions, output, plainFile string) map[string]any {
 	report := map[string]any{
 		"ok":        true,
@@ -214,10 +214,9 @@ func (a *app) downloadReport(opts downloadOptions, output, plainFile string) map
 	return report
 }
 
-// getDownload streams the ciphertext into its temp file. The body is copied
-// through to EOF rather than abandoned once the file is written, because the
-// server runs its post-read cleanup — the tombstone behind
-// `--delete-after-read` — only after it has finished sending the object.
+// getDownload streams ciphertext into its temporary file and reads through
+// EOF. The server performs --delete-after-read cleanup only after sending the
+// whole object.
 func (a *app) getDownload(encryptedFile string, opts downloadOptions) error {
 	response, err := a.dropRequest(
 		context.Background(),

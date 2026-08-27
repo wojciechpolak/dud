@@ -3,18 +3,16 @@
 
 // The Worker, on workerd, against a real D1 database and a real R2 bucket.
 //
-// Every other suite substitutes one of those three: the handler runs in Node,
-// D1 is `node:sqlite` behind an adapter, and R2 is an in-memory store. Each
-// substitution has hidden a defect that reached the deployment and broke every
-// v2 request against it — D1 returning BLOB columns as `Array<number>` rather
-// than `Uint8Array`, and a bootstrap edited after it had been applied, so the
-// live tables were missing `deliveries.sequence` and
-// `staged_bodies.reserved_bytes`. Both are asserted below.
+// Other suites replace the handler, D1, or R2 with Node, a `node:sqlite`
+// adapter, or an in-memory store. Those replacements hid defects that reached
+// production. D1 returns BLOB columns as `Array<number>`, not `Uint8Array`.
+// An edited bootstrap also left live tables without `deliveries.sequence` and
+// `staged_bodies.reserved_bytes`. This suite asserts both cases.
 //
 // The bundle is built the way Wrangler builds it and handed to Miniflare as an
 // explicit module, which keeps the dynamic `import('crypto')` inside @hpke
-// unresolved exactly as it is in production: workerd never evaluates that
-// branch, because `globalThis.crypto` is always defined.
+// unresolved as it is in production. Workerd never evaluates that branch
+// because `globalThis.crypto` is always defined.
 
 import assert from 'node:assert/strict';
 import test from 'node:test';

@@ -89,10 +89,9 @@ test('offline admin rewraps and revokes without exposing secrets', async (t) => 
 });
 
 test('offline derivation prints an enrollment key a deployment can hold', async () => {
-  // The whole point of the command is to move the derivation off the server, so
-  // what it prints must be accepted as DUD_PEER_SECRET and reach the same key the
-  // passphrase reaches — otherwise a deployment configured from it would refuse
-  // its own clients.
+  // The command moves derivation off the server. Its output must be accepted as
+  // DUD_PEER_SECRET and derive the same key as the passphrase. Otherwise, a
+  // deployment configured from it would refuse its own clients.
   const { deriveV2EnrollmentKey, formatV2EnrollmentKey } =
     await import('../dist/src/v2-auth.js');
   const secret = 'squid-lantern-rotate-9-mango';

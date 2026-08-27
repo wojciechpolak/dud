@@ -42,9 +42,8 @@ func newV2GitTestCheckpoint(t *testing.T, source string) ([]byte, *v2GitMetadata
 }
 
 // unapplicableV2GitMetadata makes a signed checkpoint that no 2.0 receiver can
-// apply, by advertising the incremental prerequisites this release refuses.
-// A future release sends exactly this shape, so it stands in for the
-// version-skew case the refusal path exists to survive.
+// apply, by advertising incremental prerequisites that this client refuses.
+// The fixture exercises the version-skew refusal path.
 func unapplicableV2GitMetadata(metadata map[int]any) {
 	metadata[5] = [][]byte{bytes.Repeat([]byte{0x11}, 20)}
 }
@@ -357,8 +356,8 @@ func TestV2PeerFeaturesAreAdvertisedAndParsed(t *testing.T) {
 			t.Fatalf("advertised features = %#v, want %#v", features, v2LocalPeerFeatures)
 		}
 	}
-	// Feature 6 is git-incremental. Advertising it would tell a later peer that
-	// this release can apply an incremental checkpoint, which it cannot.
+	// Feature 6 is git-incremental. Advertising it would say this client can
+	// apply an incremental checkpoint, which it cannot.
 	for _, id := range features {
 		if id == 6 {
 			t.Fatal("2.0 advertised git-incremental to its peer")

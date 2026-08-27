@@ -225,7 +225,7 @@ func parseV2EnrollmentPassphrase(passphrase string, iterations int) (v2Enrollmen
 // The parameters travel inside the value rather than in a second variable, so
 // that they reach every device the secret does. A work factor configured
 // separately on each side could disagree, and enrollment refusals are
-// deliberately indistinguishable, so that disagreement would be unreadable.
+// indistinguishable, so that disagreement would be unreadable.
 func parseV2EnrollmentCredential(value string) (v2EnrollmentCredential, error) {
 	if rest, found := strings.CutPrefix(value, v2EnrollmentKeyPrefix); found {
 		key, err := decodeV2Base64URL(rest, 32)
@@ -263,8 +263,8 @@ func parseV2EnrollmentCredential(value string) (v2EnrollmentCredential, error) {
 // deriveV2EnrollmentKey produces the 32-byte HMAC key a proof is computed under.
 // Unlike the two server-only v2 credentials this one is carried by hand to every
 // device that may invite, so it is typed rather than copied. A captured proof
-// lets an attacker test guesses offline, so the derivation is deliberately slow:
-// that cost, not the passphrase's own entropy, is what makes guessing
+// lets an attacker test guesses offline, so the derivation is slow. That cost,
+// not the passphrase's own entropy, is what makes guessing
 // impractical. A secret that already carries the derived key skips it, having
 // paid it once elsewhere.
 func deriveV2EnrollmentKey(secret string) ([]byte, error) {

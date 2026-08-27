@@ -21,8 +21,8 @@ type v2ReceivedItem struct {
 	Conflict         string `json:"conflict,omitempty"`
 	// Set when a copy DUD manages itself outlives the run. That copy is removed
 	// as soon as a separate output holds the same bytes, so what remains is
-	// either Output — a message, or an output the operator skipped — or the
-	// archive an extracted collection came from, which RetainedPayload names.
+	// either Output, a message or an output the operator skipped, or the archive
+	// that an extracted collection came from, which RetainedPayload names.
 	// Either way it is pruned once the delivery's signed transport lifetime
 	// ends, and a reader is holding a path with a deadline rather than a
 	// permanent one. It is the only announcement that plaintext DUD chose the

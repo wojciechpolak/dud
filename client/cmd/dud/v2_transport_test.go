@@ -215,7 +215,7 @@ func TestV2TransportPinnedDoHBootstrapNeverFallsBack(t *testing.T) {
 		t.Fatalf("dialled %s, want the pinned %s", got, listener.Addr())
 	}
 
-	// Without a pin the resolver hostname is deliberately left to the system
+	// Without a pin the resolver hostname is left to the system
 	// bootstrap; nothing else may be.
 	unpinned, err := newProductionV2Transport(v2TransportOptions{
 		DOHURL:  "https://dns.google/dns-query",
@@ -295,7 +295,7 @@ func TestV2CodeHasOneProductionNetworkBoundary(t *testing.T) {
 		} {
 			// Git peer sync invokes only the configured local Git binary. Keep
 			// every network-specific primitive forbidden in that file while
-			// allowing its deliberately isolated parser/quarantine subprocesses.
+			// allowing its isolated parser and quarantine subprocesses.
 			if name == "v2_git.go" && forbidden == "exec.Command" {
 				continue
 			}

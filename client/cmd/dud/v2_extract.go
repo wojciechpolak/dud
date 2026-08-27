@@ -189,8 +189,8 @@ func inspectV2CollectionArchive(body []byte, signedPlaintextSize uint64) ([]v2Co
 		}
 		// GNU adds sparse maps and long-name members whose bodies do not match
 		// their declared size. PAX is accepted only for the one record a
-		// non-ASCII name needs; anything else — xattrs, ownership, sparse maps
-		// — is an extension this format does not carry.
+		// non-ASCII name needs. Xattrs, ownership, and sparse maps are extensions
+		// this format does not carry.
 		if header.Format == tar.FormatGNU || header.Xattrs != nil {
 			return nil, fmt.Errorf("collection entry %q uses unsupported extensions", header.Name)
 		}

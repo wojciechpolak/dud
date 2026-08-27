@@ -34,15 +34,13 @@ const (
 	v2GitMaximumOutputBytes = 64 * 1024 * 1024
 )
 
-// v2GitPermanentRejection marks a Git delivery this device will never be able
-// to commit, however often it retries, because the cause is a deterministic
-// function of signed content or of a durable local limit. Environment-dependent
-// failures — free space, wall time, memory, transport — must never carry it:
-// refusing those would discard a delivery a later run could have accepted.
+// v2GitPermanentRejection marks a Git delivery this device cannot commit. Its
+// cause is deterministic signed content or a durable local limit. Free space,
+// wall time, memory, and transport failures must not carry this type because
+// their outcome does not establish a refusal.
 //
-// It is a distinct type rather than a matched message so that a new error site
-// has to opt in deliberately instead of inheriting refusal by accident. See
-// docs/threat-model-v2.md §3.19.
+// A distinct type requires each error site to opt in. Matching error text could
+// reject a new error site by accident. See docs/threat-model-v2.md §3.19.
 type v2GitPermanentRejection struct{ cause error }
 
 func (rejection v2GitPermanentRejection) Error() string { return rejection.cause.Error() }
@@ -107,9 +105,8 @@ type v2GitLimitedBuffer struct {
 	limit  int
 }
 
-// localV2GitCommand is the single subprocess construction point shared by V2
-// Git synchronization and offline repository erasure. It never performs a
-// network request.
+// localV2GitCommand constructs subprocesses for peer Git synchronization and
+// local repository deletion. It never performs a network request.
 func (a *app) localV2GitCommand(args ...string) *exec.Cmd {
 	return exec.Command(a.cfg.GitBin, args...)
 }
@@ -597,17 +594,13 @@ func decodeV2GitMetadata(value any) (*v2GitMetadata, error) {
 	return &metadata, nil
 }
 
-// requireCompleteV2GitCheckpoint enforces that a checkpoint carries no
-// incremental prerequisites, which is the one capability a later release will
-// legitimately add to this metadata.
+// requireCompleteV2GitCheckpoint rejects checkpoints with incremental
+// prerequisites.
 //
-// It is deliberately separate from decodeV2GitMetadata, and deliberately not
-// part of descriptor validation. A descriptor that is merely ahead of this
-// release must stay parseable, so that the receiver can answer with a signed
-// refusal and advance the chain. Rejecting it at parse time instead would leave
-// the delivery stuck at the head of the chain with no way to report why —
-// which is exactly the deadlock a version-skewed peer would otherwise cause.
-// Everything structural about the metadata is still checked before this point.
+// Metadata decoding checks structural validity. This check runs afterward so a
+// receiver can sign a refusal for an unsupported checkpoint and advance the
+// chain. Rejecting it while decoding would leave the delivery at the chain head
+// without a signed answer.
 func requireCompleteV2GitCheckpoint(metadata *v2GitMetadata) error {
 	if len(metadata.Prerequisites) != 0 {
 		return errors.New("incremental Git prerequisites are unsupported in DUD 2.0")
@@ -619,10 +612,9 @@ func (a *app) runV2Git(ctx context.Context, repository *v2GitRepository, input [
 	return a.runV2GitWithEnv(ctx, repository, nil, input, args...)
 }
 
-// runV2GitWithEnv retains the hardened local Git invocation while allowing a
-// caller to expose a verified quarantine object directory read-only through
-// Git's alternate-object lookup. It never imports those objects into the
-// current repository.
+// runV2GitWithEnv runs hardened local Git commands. It can expose a verified
+// quarantine object directory read-only through Git's alternate-object lookup
+// without importing its objects into the repository.
 func (a *app) runV2GitWithEnv(ctx context.Context, repository *v2GitRepository, extraEnv []string, input []byte, args ...string) ([]byte, error) {
 	hardened := []string{
 		"-c", "core.hooksPath=/dev/null",
@@ -672,10 +664,8 @@ func (a *app) runV2GitWithEnv(ctx context.Context, repository *v2GitRepository, 
 		if message != "" {
 			message = strconv.QuoteToASCII(message)
 		}
-		// Carry the status separately from the message. Some callers expect a
-		// particular non-zero status as an answer rather than a failure, and
-		// Git writes advisories to stderr often enough that classifying on the
-		// message text would misread those answers as hard errors.
+		// Keep the status separate from stderr. Some callers treat a non-zero
+		// status as an answer, and Git advisories on stderr are not hard errors.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return nil, &v2GitCommandError{code: exitErr.ExitCode(), message: message}
@@ -875,9 +865,8 @@ func (a *app) createV2GitBundle(repository *v2GitRepository, opts v2GitPushOptio
 		Refs:          refs,
 		Prerequisites: [][]byte{},
 	}
-	// Parsing an incremental checkpoint is now deliberately possible, so that a
-	// version-skewed peer can be answered rather than left stuck. Sending one
-	// is not: this release has no way to produce a bundle a peer could apply.
+	// Checkpoints carry no incremental prerequisites. Peers can parse an
+	// incremental checkpoint and sign a refusal, but this command never sends one.
 	if err := requireCompleteV2GitCheckpoint(metadata); err != nil {
 		_ = os.Remove(bundlePath)
 		return "", nil, err
@@ -1215,8 +1204,8 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 	if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "fsck", "--strict", "--full", "--no-reflogs"); err != nil {
 		return "", err
 	}
-	// verify-pack covers every object in the received packs, including valid
-	// dangling objects that are deliberately unreachable from advertised refs.
+	// verify-pack covers every object in received packs, including valid dangling
+	// objects unreachable from advertised refs.
 	if err := a.verifyV2GitPackLimits(ctx, repository, scratch); err != nil {
 		return "", err
 	}
@@ -1224,10 +1213,10 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 	if err != nil {
 		return "", err
 	}
-	// Pack indexes and the empty bare-repository scaffolding have a fixed cost
-	// that dominates tiny bundles. The one-MiB allowance is metadata overhead,
-	// not object expansion; payload-derived storage remains capped at 2x here
-	// and at 3x by the preflight free-space reservation above.
+	// Pack indexes and an empty bare repository have fixed costs that dominate
+	// tiny bundles. The one-MiB allowance covers metadata, not object expansion.
+	// Payload-derived storage is capped at 2x here and at 3x by the preflight
+	// free-space reservation.
 	scratchMultiplier := uint64(0)
 	if repository.Limits.DiskMultiplier > 0 {
 		scratchMultiplier = repository.Limits.DiskMultiplier - 1
@@ -1281,9 +1270,9 @@ func (a *app) v2GitIsAncestor(repository *v2GitRepository, oldOID, newOID, scrat
 	if err == nil {
 		return true, nil
 	}
-	// `merge-base --is-ancestor` answers "no" with status 1; anything else is a
-	// real failure, including the 128 Git uses for an object the quarantine
-	// alternate did not make reachable.
+	// `merge-base --is-ancestor` answers "no" with status 1. Other statuses are
+	// failures, including 128 when the quarantine alternate cannot reach an
+	// object.
 	if code, ok := v2GitExitCode(err); ok && code == 1 {
 		return false, nil
 	}
@@ -1496,9 +1485,9 @@ func reconcileV2GitAcknowledgements(runtime *v2PeerRuntime, repository *v2GitRep
 				return err
 			}
 			if !bytes.Equal(metadata.RepositoryID, repositoryID) {
-				// Delivery-chain state is relationship-wide, while Git state is
-				// repository-local. Other repositories paired with this peer
-				// are expected to appear in the same durable Sent map.
+				// Delivery-chain state belongs to the peer relationship. Git state
+				// belongs to one repository. The durable Sent map therefore holds
+				// deliveries for every repository paired with this peer.
 				continue
 			}
 			outbound = v2GitOutboundState{
@@ -1593,16 +1582,14 @@ func (runtime *v2PeerRuntime) receiveAvailableV2Git(ctx context.Context, a *app,
 	return runtime.applyV2GitDelivery(ctx, a, repository, opts, delivery, sourceEpoch)
 }
 
-// rejectV2GitDelivery commits a refusal of a delivery this device can never
-// apply: it acknowledges with result 1, advances the data-chain watermark, and
-// records the reason durably. Advancing the watermark is the whole point.
-// Without it the delivery stays at the head of the chain forever, and because
-// `dud receive` also refuses to step over a Git payload, one unprocessable
-// checkpoint would silence the relationship in both directions.
+// rejectV2GitDelivery records a refusal for a delivery this device cannot
+// apply. It acknowledges result 1 and advances the data-chain watermark. The
+// watermark prevents the rejected delivery from holding the chain head. Without
+// it, `dud receive` cannot step over the Git payload and the relationship
+// stops in both directions.
 //
-// The refusal is written to state before it is queued, so a crash in between
-// leaves the delivery to be re-offered and refused again rather than lost. The
-// causes are deterministic, so repeating the refusal reaches the same verdict.
+// The method writes the refusal to state before queueing it. A crash between
+// those steps causes the sender to offer it again and produces the same refusal.
 func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, opts v2GitFetchOptions, envelope *validatedV2Envelope, delivery *v2GranularInboxDelivery, sourceSlotEpoch uint64, policyDigest []byte, sequence uint64, digest string, cause error) (bool, error) {
 	now := uint64(time.Now().Unix())
 	transfer := runtime.state.InboundTransfers[digest]
@@ -1676,10 +1663,8 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	if payloadType != 4 {
 		return false, fmt.Errorf("next delivery is payload type %d; receive it with dud receive %s before fetching Git", payloadType, opts.Alias)
 	}
-	// Chain position and policy are established before the payload is judged, so
-	// that a refusal is only ever issued for a delivery that legitimately sits
-	// at the head of this chain, and so that the binding a refusal has to carry
-	// is already in hand at every site that can raise one.
+	// Validate chain position and policy before judging the payload. A refusal
+	// applies only to a delivery at this chain's head and must bind to its policy.
 	next, err := runtime.validateNextDescriptor(runtime.state.Chains["in:data"], envelope)
 	if err != nil {
 		_ = writeV2PeerDeliveryState(runtime.paths, runtime.state)
@@ -1692,8 +1677,8 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	if err := validateV2EffectivePolicy(policy, delivery.EffectivePolicy); err != nil {
 		return false, err
 	}
-	// Validated non-zero just above, so the pruner never reads this as the
-	// "retain indefinitely" sentinel.
+	// The validation above excludes zero, which the pruner reserves for
+	// "retain indefinitely".
 	expiresAt, _ := asV2Uint(delivery.EffectivePolicy[1])
 	policyDigest, err := v2PolicyDigest(policy)
 	if err != nil {
@@ -1832,10 +1817,9 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 		}
 		scratch, err := a.verifyV2GitQuarantine(repository, bundlePath, digest, metadata)
 		if err != nil {
-			// Only the durable-limit and signed-content failures inside
-			// quarantine verification carry a permanent rejection. A full disk,
-			// an exceeded wall-time budget, or a failed fsck stays an error so
-			// the delivery is offered again.
+			// Only durable-limit and signed-content failures in quarantine
+			// verification reject a delivery permanently. Full disks, wall-time
+			// limits, and failed fsck checks leave it available for another attempt.
 			if isV2GitPermanentRejection(err) {
 				return reject(err)
 			}
@@ -2081,10 +2065,10 @@ func (a *app) v2GitStatusForPeer(repository *v2GitRepository, repositoryID []byt
 	return rendered, err
 }
 
-// quarantinedV2GitDeliveries lists inbound checkpoints that were accepted and
-// verified locally but never promoted into peer refs, for example because the
-// checkpoint rewrites accepted history and is waiting for --allow-rewrite.
-// They hold local disk and block the chain, so every Git result reports them.
+// quarantinedV2GitDeliveries lists verified inbound checkpoints that are not in
+// peer refs. A checkpoint that rewrites accepted history remains quarantined
+// until the user passes --allow-rewrite. Quarantined deliveries use local disk
+// and block the chain, so every Git result reports them.
 func quarantinedV2GitDeliveries(state *v2GitPeerState) []map[string]any {
 	digests := make([]string, 0, len(state.Inbound))
 	for digest, inbound := range state.Inbound {
@@ -2105,13 +2089,10 @@ func quarantinedV2GitDeliveries(state *v2GitPeerState) []map[string]any {
 	return quarantined
 }
 
-// v2GitStatusReport renders the shared delivery counters plus the Git-specific
-// quarantine list as one block, so every Git command reports the same rows in
-// the same order as send, receive, and sync. Like the peer commands it reports
-// on request or on trouble, and the trouble here is wider than the shared
-// counters know about: a quarantined or refused Git delivery leaves every
-// v2DeliveryStatus counter at zero, so those two lists raise the block on their
-// own rather than waiting for a -v that an operator has no reason to pass.
+// v2GitStatusReport renders shared counters and Git-specific deliveries in one
+// block. send, receive, and sync use the same rows in the same order. It also
+// reports quarantined and refused deliveries when counters need no attention,
+// because both leave every v2DeliveryStatus counter at zero.
 func v2GitStatusReport(verbose bool, status v2DeliveryStatus, quarantined, rejected []map[string]any) *textReport {
 	report := &textReport{}
 	if !verbose && !status.needsAttention() && len(quarantined) == 0 && len(rejected) == 0 {
@@ -2148,9 +2129,9 @@ func countPendingV2GitOutbound(state *v2GitPeerState) int {
 	return count
 }
 
-// refusedV2GitCheckpoints lists checkpoints the peer acknowledged with result 1.
-// They are counted apart from pending ones because waiting will not resolve
-// them: the peer already answered, and the answer was no.
+// refusedV2GitCheckpoints lists checkpoints acknowledged by the peer with
+// result 1. They are separate from pending checkpoints because the peer has
+// already refused them.
 func refusedV2GitCheckpoints(state *v2GitPeerState) []map[string]any {
 	digests := make([]string, 0, len(state.Outbound))
 	for digest, outbound := range state.Outbound {
@@ -2171,8 +2152,8 @@ func refusedV2GitCheckpoints(state *v2GitPeerState) []map[string]any {
 }
 
 // rejectedV2GitDeliveries lists inbound checkpoints this device refused. They
-// live in relationship-wide delivery state rather than per-repository Git state
-// because a checkpoint can be refused before its repository is ever identified.
+// live in relationship-wide delivery state because a checkpoint may be refused
+// before its repository is identified.
 func rejectedV2GitDeliveries(state *v2PeerDeliveryState) []map[string]any {
 	digests := make([]string, 0, len(state.InboundTransfers))
 	for digest, transfer := range state.InboundTransfers {

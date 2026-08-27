@@ -34,8 +34,8 @@ type v2DescriptorVector struct {
 	Name        string `json:"name"`
 	Category    string `json:"category,omitempty"`
 	PayloadType uint64 `json:"payloadType,omitempty"`
-	// TextKeyedMaps marks descriptors carrying a CBOR map with text keys —
-	// only Git `refs` and `fetched_refs` do. The server's protocol codec
+	// TextKeyedMaps marks descriptors carrying a CBOR map with text keys. Only
+	// Git `refs` and `fetched_refs` do. The server's protocol codec
 	// accepts integer keys alone, because no structure the server parses uses
 	// anything else, so it cannot decode these descriptors. It never needs to:
 	// a descriptor reaches the server as opaque ciphertext.
@@ -78,8 +78,7 @@ type v2LookupVector struct {
 type v2EnrollmentVector struct {
 	// Secret is the operator's passphrase verbatim, and Key is what it stretches
 	// to. Pinning both keeps the two implementations agreeing on the PBKDF2 step
-	// — its salt and iteration count included — as well as on the HMAC that
-	// follows it.
+	// including its salt and iteration count, and the HMAC that follows it.
 	Secret    string `json:"secret"`
 	Key       string `json:"key"`
 	Locator   string `json:"locator"`
@@ -197,7 +196,7 @@ func v2VectorBaseDescriptor(payloadType, chain uint64) v2Descriptor {
 }
 
 // signV2VectorEnvelope encodes, signs and wraps a descriptor map without
-// running validation, so deliberately malformed vectors can still be produced
+// running validation, so malformed vectors can still be produced
 // with an otherwise correct signature.
 func signV2VectorEnvelope(t *testing.T, desc map[int]any, key ed25519.PrivateKey) (envelope, descriptorBytes, signature []byte) {
 	t.Helper()
@@ -484,8 +483,8 @@ func buildV2DescriptorVectors(t *testing.T) []v2DescriptorVector {
 		5: []any{},
 	}
 
-	// An incremental checkpoint must remain parseable even though this release
-	// cannot apply one. Parsing it is what lets the receiver answer with a
+	// An incremental checkpoint must remain parseable even though this client
+	// cannot apply one. Parsing it lets the receiver answer with a
 	// signed refusal and advance its chain; rejecting it at the descriptor
 	// layer would strand the delivery and silence the relationship. The refusal
 	// itself is asserted in TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues.
