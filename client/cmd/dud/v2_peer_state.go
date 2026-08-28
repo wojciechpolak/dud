@@ -128,6 +128,9 @@ type v2SentDelivery struct {
 	// permanently, and will not change its mind on a retry.
 	Rejected   bool   `json:"rejected,omitempty"`
 	RejectedAt uint64 `json:"rejected_at,omitempty"`
+	// FullCheckpointRequired records a validated git_retry hint on a rejected
+	// incremental checkpoint. Other payloads and complete checkpoints ignore it.
+	FullCheckpointRequired bool `json:"full_checkpoint_required,omitempty"`
 }
 
 type v2InboundTransfer struct {

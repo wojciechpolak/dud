@@ -276,6 +276,14 @@ dud git status PEER --json
 count, delta depth, wall time, disk budget, metadata mismatch, and history
 rewrite. It also explains what each one means about the sender.
 
+An incremental checkpoint whose authenticated base or prerequisite commit is
+missing is refused rather than quarantined. The signed refusal requests a
+complete checkpoint. Run `dud sync PEER` on the sender to collect it, then run
+`dud git push PEER` from the repository. Automatic mode sends the complete
+checkpoint; `dud sync` does not send Git data because it has no repository
+context. `dud git status PEER` reports `complete checkpoint required  true`
+until a later complete checkpoint is durably published.
+
 ## 11. Quarantined delivery chains
 
 Symptom: `dud receive PEER` reports `gap before sequence N`, and repeats it on

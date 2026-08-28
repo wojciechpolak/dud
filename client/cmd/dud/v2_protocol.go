@@ -77,6 +77,16 @@ const v2MinimumExtensionKey = 128
 // accept. An absent key means "assume nothing beyond the 2.0.0 baseline".
 const kPeerFeatures = 128
 
+// kGitBaseSequence is the git-bundle type_meta extension that binds an
+// incremental checkpoint to the acknowledged checkpoint used for its
+// prerequisites. Extension keys are scoped to their containing metadata map,
+// so key 128 can also name peer_features in acknowledgement metadata.
+const kGitBaseSequence = 128
+
+// kGitRetry is the acknowledgement type_meta extension used when an
+// authenticated incremental base cannot be recovered locally.
+const kGitRetry = 129
+
 // validateV2MetadataKeys applies the extension rule of protocol-v2.md §2 to a
 // type_meta map. Applying the same rule the descriptor already uses keeps one
 // convention rather than a second per-payload-type one. This permits additive
@@ -104,13 +114,13 @@ func validateV2MetadataKeys(keys []int, required, optional []int) error {
 // than guess, so this never reports an error.
 func v2MetadataFeatures(metadata map[int]any) []uint64 {
 	raw, ok := metadata[kPeerFeatures].([]any)
-	if !ok {
+	if !ok || len(raw) == 0 {
 		return nil
 	}
 	features := make([]uint64, 0, len(raw))
 	for _, entry := range raw {
 		value, valid := asV2Uint(entry)
-		if !valid {
+		if !valid || len(features) != 0 && value <= features[len(features)-1] {
 			return nil
 		}
 		features = append(features, value)

@@ -57,9 +57,8 @@ var v2FeatureNames = map[uint64]string{
 // as a peer, advertised to the other side on every acknowledgement. It is not
 // the server feature list: a server feature says what the relay will carry,
 // while this says what the peer at the far end can actually process. Only
-// features with peer-visible behaviour belong here, so 6 (git-incremental) is
-// absent until that release implements it.
-var v2LocalPeerFeatures = []uint64{5}
+// features with peer-visible behaviour belong here.
+var v2LocalPeerFeatures = []uint64{5, 6}
 
 func v2LocalPeerFeatureList() []any {
 	features := make([]any, 0, len(v2LocalPeerFeatures))

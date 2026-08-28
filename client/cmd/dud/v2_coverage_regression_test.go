@@ -424,7 +424,7 @@ func TestV2GitAndReceiveOptionParsersCoverSupportedFlags(t *testing.T) {
 		t.Fatalf("fetch options = %#v, %v", fetch, err)
 	}
 	for _, args := range [][]string{
-		nil, {"laptop", "--branch"}, {"laptop", "--ttl", "0s"}, {"laptop", "--current", "--branch", "main"}, {"laptop", "--incremental"}, {"laptop", "extra"},
+		nil, {"laptop", "--branch"}, {"laptop", "--ttl", "0s"}, {"laptop", "--current", "--branch", "main"}, {"laptop", "--incremental", "--full"}, {"laptop", "extra"},
 	} {
 		if _, err := parseV2GitPushOptions(args); err == nil {
 			t.Fatalf("push options accepted: %v", args)

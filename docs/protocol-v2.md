@@ -4,9 +4,9 @@ Normative specification of the v2 wire protocol as released in DUD 2.0.0. It
 describes what two implementations have to agree on, not how either is built.
 The threat model behind it is [`threat-model-v2.md`](threat-model-v2.md).
 
-Everything below is implemented and served, apart from incremental Git and
-chunked transfer: their descriptor keys and feature IDs are reserved, and a
-2.0.0 server advertises neither.
+Everything below is implemented and served, apart from chunked transfer. Its
+descriptor keys and feature IDs are reserved, and a server does not advertise
+them.
 
 ## 1. Conventions
 
@@ -729,8 +729,15 @@ For `acknowledgement` (5):
 |   8 | `hwm_in_control`  | uint  | sender's incoming control-chain watermark   |
 |   9 | `result_meta`     | map   | optional; payload-type acknowledgement data |
 | 128 | `peer_features`   | array | optional; feature IDs the sender implements |
+| 129 | `git_retry`       | uint  | optional; Git recovery request              |
 
 For `result = 1`, `output_digest` is 32 zero bytes and `result_meta` is absent.
+`git_retry = 1` means `full_checkpoint_required`. It appears only when an
+incremental Git checkpoint is rejected because its authenticated base or a
+prerequisite commit is unavailable. A sender acts on it only after validating
+the signature, acknowledged sequence and digest, watermarks, payload type, and
+result. The referenced outbound checkpoint must be incremental. A retry hint on
+a complete checkpoint is ignored.
 
 `peer_features` (key 128) is an extension key and therefore optional. It carries
 the registered feature IDs of [§11.2](#112-capability-discovery) that the
@@ -740,10 +747,12 @@ mechanism; two peers never speak to each other except through delivered
 descriptors, so an acknowledgement is the only place this can travel. A receiver
 that does not implement the key ignores it. A sender that does not see a clean
 list `MUST` assume the 2.0.0 baseline and `MUST NOT` infer support from silence:
-an absent list means the peer said nothing, not that it supports nothing beyond
-the baseline by choice. A 2.0.0 device advertises `[5]`. Acknowledgements apply
-to data-chain deliveries; acknowledgement and peer-control descriptors are never
-themselves acknowledged, preventing an acknowledgement loop.
+an absent, empty, duplicate, unsorted, or malformed list means the peer said
+nothing. A later signed acknowledgement with no clean list clears a retained
+feature 6 advertisement. A device that accepts incremental Git checkpoints
+advertises `[5, 6]`. Acknowledgements apply to data-chain deliveries;
+acknowledgement and peer-control descriptors are never themselves acknowledged,
+preventing an acknowledgement loop.
 
 The four watermark fields are present on every acknowledgement and every
 `peer-control` message. They are relative to the control-message sender and
@@ -778,24 +787,34 @@ For `git-bundle` (4):
 |   2 | `object_format`  | uint  | 1 SHA-1, 2 SHA-256                                       |
 |   3 | `bundle_version` | uint  | 2 or 3                                                   |
 |   4 | `refs`           | map   | full ref name to 20- or 32-byte object ID                |
-|   5 | `prerequisites`  | array | prerequisite object IDs; empty for a 2.0 full checkpoint |
+|   5 | `prerequisites`  | array | prerequisite object IDs; empty for a complete checkpoint |
+| 128 | `base_sequence`  | uint  | acknowledged checkpoint supplying prerequisites          |
 
 Every ref name is validated with `git check-ref-format` before bundle
 processing. Object-ID lengths must match `object_format`.
 
-A 2.0.0 `git-bundle` descriptor has no `incremental_base` core field, and its
-`prerequisites` array is empty. The two are enforced at different layers, and
-deliberately so. `incremental_base` is a core descriptor key, so its presence is
-rejected during validation by the rule in [§7.3](#73-rejection-rules). A
-non-empty `prerequisites` array is _structurally valid_. An incremental sender
-legitimately produces this form, so it parses and the Git handler then refuses
-the delivery under [§7.6](#76-refusing-a-delivery). Nothing reaches Git
-unvalidated either way. The second case can be answered.
+Incremental Git is signalled by a non-empty `prerequisites` array. Such a
+checkpoint also carries `base_sequence`, which names the acknowledged inbound
+checkpoint that supplied the prerequisites. A complete checkpoint omits it.
+Descriptor core key 26, `incremental_base`, stays rejected on presence. A 2.0.0
+peer ignores extension key 128, sees the non-empty prerequisites, refuses the
+checkpoint in its Git handler, and advances the data chain with `result = 1`.
 
-Incremental Git is therefore signalled by `prerequisites` alone. Key 26 stays
-reserved and stays rejected on presence: it duplicates what the signed
-`prerequisites` array already carries, and leaving it untouched keeps the frozen
-wire vector for a reserved core key intact.
+Every checkpoint carries a complete desired ref snapshot. An incremental pack
+contains only objects added since its acknowledged base. The sender uses branch
+tips shared by the base and current snapshot as sorted, unique prerequisites.
+Tags are never prerequisites. It builds a non-thin pack with
+`git pack-objects --stdout --revs --no-thin --no-reuse-delta`, so every delta
+base remains inside the received pack.
+
+The receiver binds the prerequisite set to the saved, output-committed base
+checkpoint and checks each prerequisite commit by direct object ID. It indexes
+only the bundle's pack section into a scratch object directory with
+`git index-pack --stdin --strict`. The real object directory is a read-only
+alternate. The receiver does not run `bundle verify` or a full `fsck` for an
+incremental checkpoint because either could traverse unrelated repository
+objects. Object count and delta-depth checks inspect only indexes created in
+scratch.
 
 For a successful Git acknowledgement, `result_meta` is:
 
@@ -1210,9 +1229,12 @@ Feature IDs:
 |   6 | git-incremental |
 |   7 | chunked-upload  |
 |   8 | strict-consume  |
+|   9 | atomic-delivery |
+|  10 | batched-inbox   |
+|  11 | inline-control  |
 
-A 2.0.0 server `MUST NOT` advertise IDs 6, 7, or 8 unless that feature and its
-backend conformance suite are present.
+A server `MUST NOT` advertise a feature unless that feature and its backend
+conformance suite are present. DUD servers advertise `[2, 3, 5, 6, 9, 10, 11]`.
 
 Limit IDs and 2.0 defaults:
 
@@ -1600,9 +1622,9 @@ semantics from [§3](#3-encoding).
 ### 12.9 Capability Discovery
 
 ```text
-capabilities_cbor   = a4018201020285010203040503a9011a06400000021a00040000031a00278d00
-                      04184005190100060407183c081a0c8000000919100004a201020201
-capabilities_digest = eab6e4b3ca29c4995c8dbe5319d31e46ca0c82a8fc9a04ef30f62fea5b793f34
+capabilities_cbor   = a401820102028702030506090a0b03a9011a06400000021a00040000031a0027
+                      8d0004184005190100060407183c081a0c8000000919100004a201020201
+capabilities_digest = c8f164f234ea97d92224484c7ba12963c681bb46d4579ef4ad7d6d6099e85700
 ```
 
 ### 12.10 What Cannot Be Pinned

@@ -1660,7 +1660,7 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 	return item, nil
 }
 
-func (runtime *v2PeerRuntime) acknowledgementMetadata(ackedSequence uint64, ackedDigest, outputDigest []byte, result uint64, resultMetadata map[int]any) map[int]any {
+func (runtime *v2PeerRuntime) acknowledgementMetadata(ackedSequence uint64, ackedDigest, outputDigest []byte, result uint64, resultMetadata map[int]any, extensions map[int]any) map[int]any {
 	metadata := map[int]any{
 		1: ackedSequence,
 		2: ackedDigest,
@@ -1678,6 +1678,11 @@ func (runtime *v2PeerRuntime) acknowledgementMetadata(ackedSequence uint64, acke
 	// know it ignore it. The key advertises payload-type features without a
 	// separate handshake.
 	metadata[kPeerFeatures] = v2LocalPeerFeatureList()
+	for key, value := range extensions {
+		if key >= v2MinimumExtensionKey {
+			metadata[key] = value
+		}
+	}
 	return metadata
 }
 
@@ -1686,15 +1691,19 @@ func (runtime *v2PeerRuntime) acknowledgementMetadata(ackedSequence uint64, acke
 // delivery cannot block the chain. The caller advances the watermark. Only
 // permanentV2GitRejection causes reach this function. See
 // docs/threat-model-v2.md §3.19.
-func (runtime *v2PeerRuntime) queueV2GranularRejection(dataEnvelope *validatedV2Envelope, deliveryID, dataSlot []byte, dataSlotEpoch uint64, policyDigest []byte) error {
-	return runtime.queueV2GranularAcknowledgement(dataEnvelope, deliveryID, dataSlot, dataSlotEpoch, policyDigest, make([]byte, 32), 1, nil)
+func (runtime *v2PeerRuntime) queueV2GranularRejection(dataEnvelope *validatedV2Envelope, deliveryID, dataSlot []byte, dataSlotEpoch uint64, policyDigest []byte, fullCheckpointRequired bool) error {
+	var extensions map[int]any
+	if fullCheckpointRequired {
+		extensions = map[int]any{kGitRetry: uint64(1)}
+	}
+	return runtime.queueV2GranularAcknowledgement(dataEnvelope, deliveryID, dataSlot, dataSlotEpoch, policyDigest, make([]byte, 32), 1, nil, extensions)
 }
 
 func (runtime *v2PeerRuntime) queueV2GranularCompletion(dataEnvelope *validatedV2Envelope, deliveryID, dataSlot []byte, dataSlotEpoch uint64, policyDigest, outputDigest []byte, resultMetadata map[int]any) error {
-	return runtime.queueV2GranularAcknowledgement(dataEnvelope, deliveryID, dataSlot, dataSlotEpoch, policyDigest, outputDigest, 0, resultMetadata)
+	return runtime.queueV2GranularAcknowledgement(dataEnvelope, deliveryID, dataSlot, dataSlotEpoch, policyDigest, outputDigest, 0, resultMetadata, nil)
 }
 
-func (runtime *v2PeerRuntime) queueV2GranularAcknowledgement(dataEnvelope *validatedV2Envelope, deliveryID, dataSlot []byte, dataSlotEpoch uint64, policyDigest, outputDigest []byte, result uint64, resultMetadata map[int]any) error {
+func (runtime *v2PeerRuntime) queueV2GranularAcknowledgement(dataEnvelope *validatedV2Envelope, deliveryID, dataSlot []byte, dataSlotEpoch uint64, policyDigest, outputDigest []byte, result uint64, resultMetadata map[int]any, extensions map[int]any) error {
 	if len(deliveryID) != 16 || len(dataSlot) != 16 || dataSlotEpoch == 0 || len(policyDigest) != 32 || len(outputDigest) != 32 {
 		return errors.New("granular completion binding is invalid")
 	}
@@ -1722,7 +1731,7 @@ func (runtime *v2PeerRuntime) queueV2GranularAcknowledgement(dataEnvelope *valid
 		SenderDeviceID: runtime.localID, RecipientDeviceID: runtime.peerID,
 		CanonicalOrigin: runtime.origin, CreatedAt: now, TransportPolicy: policy,
 		PayloadHash: payloadHash[:], ChunkHashes: [][]byte{chunkHash[:]},
-		TypeMetadata: runtime.acknowledgementMetadata(sequence, dataEnvelope.DescriptorDigest[:], outputDigest, result, resultMetadata),
+		TypeMetadata: runtime.acknowledgementMetadata(sequence, dataEnvelope.DescriptorDigest[:], outputDigest, result, resultMetadata, extensions),
 	}
 	acknowledgement, err := encryptV2Envelope(descriptor, runtime.signingKey, runtime.recipient)
 	if err != nil {
@@ -2106,6 +2115,18 @@ func (runtime *v2PeerRuntime) applySignedAcknowledgement(envelope *validatedV2En
 	if !exists || sent.Sequence != ackedSequence {
 		return errors.New("acknowledgement does not match a committed outbound delivery")
 	}
+	fullCheckpointRequired := false
+	if retry, valid := asV2Uint(metadata[kGitRetry]); valid && retry == 1 && result == 1 && sent.PayloadType == 4 {
+		metadataBytes, decodeErr := decodeV2Base64URL(sent.TypeMetadata, -1)
+		if decodeErr == nil {
+			var raw any
+			if decodeErr = v2DecMode.Unmarshal(metadataBytes, &raw); decodeErr == nil {
+				if gitMetadata, gitErr := decodeV2GitMetadata(raw); gitErr == nil && len(gitMetadata.Prerequisites) != 0 {
+					fullCheckpointRequired = true
+				}
+			}
+		}
+	}
 	if result == 0 {
 		sent.Acknowledged = true
 		sent.AcknowledgedAt = uint64(time.Now().Unix())
@@ -2124,6 +2145,7 @@ func (runtime *v2PeerRuntime) applySignedAcknowledgement(envelope *validatedV2En
 		// leave the operator waiting for an acknowledgement that never comes.
 		sent.Rejected = true
 		sent.RejectedAt = uint64(time.Now().Unix())
+		sent.FullCheckpointRequired = fullCheckpointRequired
 		runtime.state.Sent[key] = sent
 	}
 	signedEnvelope, err := v2EncMode.Marshal(map[int]any{
@@ -2133,11 +2155,9 @@ func (runtime *v2PeerRuntime) applySignedAcknowledgement(envelope *validatedV2En
 	if err != nil {
 		return err
 	}
-	// Recorded only once the acknowledgement has fully validated, so a refused
-	// one cannot teach this device anything about the peer.
-	if features := v2MetadataFeatures(metadata); features != nil {
-		runtime.state.PeerFeatures = features
-	}
+	// A signed acknowledgement replaces the prior advertisement. Silence or a
+	// malformed list means baseline support and clears a retained feature 6.
+	runtime.state.PeerFeatures = v2MetadataFeatures(metadata)
 	runtime.state.SignedAcknowledgements[hex.EncodeToString(envelope.DescriptorDigest[:])] = v2Base64URL(signedEnvelope)
 	return nil
 }

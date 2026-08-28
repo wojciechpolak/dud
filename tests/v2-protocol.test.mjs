@@ -63,7 +63,7 @@ function slotProof(seed, epoch = 20_000, chain = 0) {
 test('deterministic CBOR matches the frozen capability-discovery vector', () => {
   const value = new Map([
     [1, [1, 2]],
-    [2, [2, 3, 5, 9, 10, 11]],
+    [2, [2, 3, 5, 6, 9, 10, 11]],
     [
       3,
       new Map([
@@ -88,7 +88,7 @@ test('deterministic CBOR matches the frozen capability-discovery vector', () => 
   ]);
   assert.equal(
     hex(encodeCbor(value)),
-    'a4018201020286020305090a0b03a9011a06400000021a00040000031a00278d0004184005190100060407183c081a0c8000000919100004a201020201',
+    'a401820102028702030506090a0b03a9011a06400000021a00040000031a00278d0004184005190100060407183c081a0c8000000919100004a201020201',
   );
 });
 
@@ -287,13 +287,10 @@ test('framed delivery reader streams a content-addressed payload', async () => {
 });
 
 test('v2 capability and error registries are frozen', () => {
-  assert.deepEqual(V2_SERVER_FEATURES, [2, 3, 5, 9, 10, 11]);
+  assert.deepEqual(V2_SERVER_FEATURES, [2, 3, 5, 6, 9, 10, 11]);
   assert.deepEqual(V2_REQUIRED_PEER_FEATURES, [2, 3, 9, 10, 11]);
   assert.deepEqual(V2_REQUIRED_GIT_FEATURES, [2, 3, 9, 10, 11, 5]);
-  // Feature 6 is git-incremental. protocol-v2.md forbids advertising it until
-  // the feature and its backend conformance suite exist, and a client that saw
-  // it advertised would believe incremental checkpoints were carried.
-  assert.equal(V2_SERVER_FEATURES.includes(6), false);
+  assert.equal(V2_SERVER_FEATURES.includes(6), true);
   assert.equal(hasRequiredV2Features(V2_SERVER_FEATURES), true);
   assert.equal(hasRequiredV2Features([2, 3, 5, 9, 10]), false);
   assert.equal(V2_ERROR_HTTP_STATUS[V2_ERROR.unsupportedContract], 409);

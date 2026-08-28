@@ -440,7 +440,7 @@ func descriptorVectors() {
 	fmt.Printf("\n### Vector 12 — capability discovery response (deterministic)\n")
 	capabilities := map[int]any{
 		1: []uint64{1, 2},
-		2: []uint64{1, 2, 3, 4, 5},
+		2: []uint64{2, 3, 5, 6, 9, 10, 11},
 		3: map[int]uint64{
 			1: 104857600,
 			2: 262144,
