@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-28
+
 ### Added
 
 - Add incremental peer Git synchronization with explicit selection, automatic
