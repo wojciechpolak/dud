@@ -10,12 +10,10 @@ is in [`peer-setup.md`](peer-setup.md).
 
 ## 1. The model
 
-- **Every push is a complete checkpoint.** DUD sends the full advertised
-  history, never a delta against what the peer is assumed to have. There are no
-  incremental bundle chains, so `--incremental` and `--full` are rejected
-  outright instead of being quietly ignored. DUD refuses a checkpoint this
-  client cannot apply, such as one carrying prerequisites. It tells the peer and
-  advances the chain.
+- **Every checkpoint is a complete ref snapshot.** The object pack may be
+  complete or incremental, but its signed metadata and bundle header always name
+  the complete desired branch and tag state. DUD builds an incremental only from
+  a checkpoint the peer acknowledged.
 - **The transport is a peer delivery.** A checkpoint is an ordinary v2 delivery
   addressed to a peer alias, so it inherits capability scoping, rotating slots,
   and signed acknowledgements.
@@ -31,6 +29,13 @@ Both SHA-1 and SHA-256 repositories are supported. A SHA-1 repository produces a
 version 2 bundle; a SHA-256 repository produces a version 3 bundle carrying its
 `object-format` capability.
 
+`dud git push` and `dud git fetch` reject shallow repositories. A Git bundle
+does not carry `.git/shallow`, so a checkpoint from a shallow repository can
+reference parent commits that the sender does not have. Fetch the missing
+history, usually with `git fetch --unshallow`, before synchronizing.
+`dud git status` still reports, because reading stored peer state neither packs
+nor applies objects.
+
 ## 2. Sending a checkpoint
 
 From the repository root:
@@ -39,6 +44,8 @@ From the repository root:
 dud git push laptop                       # every branch and tag
 dud git push laptop --current             # the checked-out branch only
 dud git push laptop --branch main --branch release
+dud git push laptop --full
+dud git push laptop --incremental
 dud git push laptop --ttl 24h --json
 ```
 
@@ -46,11 +53,27 @@ dud git push laptop --ttl 24h --json
 - `--current` requires an attached branch and cannot be combined with
   `--branch`.
 - `--ttl` defaults to 168 hours and cannot exceed 720 hours.
+- Automatic mode is the default. It sends an incremental when the peer
+  advertises feature 6 and the selected branches have an acknowledged base.
+- `--full` always sends a complete object pack. `--incremental` requires a clean
+  feature 6 advertisement and an acknowledged branch base. The two options are
+  mutually exclusive.
 - `--url`, `--doh-url`, and `--ech-mode` are rejected because a paired
   relationship pins its own origin and transport mode.
 
 Only `refs/heads/*` and `refs/tags/*` are advertised. Any other namespace is
 refused before the bundle is built.
+
+Automatic mode sends a complete checkpoint for bootstrap, after a signed full
+recovery request, when incremental packing adds no objects, or after 16
+persisted incremental checkpoints since the last complete one. Explicit
+`--incremental` bypasses the 16-checkpoint cadence but fails if its pack would
+contain no objects. Deletion-only and ref-only changes therefore use a complete
+checkpoint in automatic mode.
+
+Text output names a `complete Git checkpoint` or an
+`incremental Git checkpoint`. Push and fetch JSON include `checkpoint_mode` with
+value `full` or `incremental`. Incremental results also include `base_sequence`.
 
 ## 3. Receiving a checkpoint
 
@@ -101,11 +124,21 @@ repository and leaves your refs and objects untouched.
 - free space is at least three times the bundle size
 - the bundle header's version, refs, and prerequisites match the signed
   encrypted metadata exactly
-- there are no prerequisites at all; a complete checkpoint has none
+- complete checkpoints have no prerequisites
+- incremental prerequisites are sorted, unique, and derived exactly from the
+  authenticated, output-committed base checkpoint named by `base_sequence`
+- every prerequisite commit exists in the real object database
 
 **While unpacking**, Git runs with hooks disabled, all protocols denied except
-the local file access it needs, `fsck` enabled on both transfer and fetch, one
-packing thread, bounded pack memory, and on Linux an address-space `ulimit`.
+the local file access it needs, one packing thread, bounded pack memory, and on
+Linux an address-space `ulimit`. A complete checkpoint uses `bundle verify`,
+`bundle unbundle`, and a full strict `fsck` in an empty scratch repository.
+
+An incremental checkpoint takes a narrower path. DUD passes only the pack
+section to `git index-pack --stdin --strict`, without `--fix-thin`, and exposes
+the real object directory as a read-only alternate. It creates the signed refs
+in scratch after indexing. It does not run `bundle verify` or a full `fsck`,
+because those commands can walk unrelated packs in the real repository.
 
 **After unpacking**
 
@@ -115,6 +148,10 @@ packing thread, bounded pack memory, and on Linux an address-space `ulimit`.
   sender can pad a pack past them
 - no delta chain is deeper than the delta-depth limit
 - the expanded object store is within the disk budget
+
+`verify-pack` runs only on indexes created in the scratch object directory.
+Large or corrupt unrelated packs in the real repository are outside the
+incremental validation scan.
 
 Every Git subprocess runs under a wall-time limit, and its output is captured
 into a bounded buffer. A failure is reported ASCII-quoted, so a hostile ref name
@@ -149,8 +186,9 @@ dud git status            # every associated peer
 dud git status laptop --json
 ```
 
-The status reports the last received and last acknowledged sequence, per-branch
-divergence against your local branches, pending outbound checkpoints, and any
+The status reports the last received and last acknowledged sequence, the count
+of incremental checkpoints since the last complete one, a pending complete
+recovery request, per-branch divergence, pending outbound checkpoints, and any
 quarantined deliveries with the reason each failed. Each peer gets its own
 section:
 
@@ -161,6 +199,8 @@ Peer laptop
   remote                      laptop
   received sequence           7
   acknowledged sent sequence  6
+  incremental checkpoints since full  3
+  complete checkpoint required        false
   pending outbound            0
   queued completions          0
   undrained control           false
@@ -178,10 +218,11 @@ Peer laptop
 | `Git bundle contains more than N objects`                        | over `dud.gitObjectCount`, counting unreachable objects                    |
 | `Git bundle delta depth D exceeds the limit`                     | over `dud.gitDeltaDepth`; the sender packed unusually deep chains          |
 | `Git operation exceeded the ... wall-time limit`                 | the repository is larger than the local time budget allows                 |
+| `git ... does not support shallow repositories`                  | fetch the missing Git history and retry                                    |
 | `Git quarantine requires N free bytes`                           | not enough free space for the 3x reservation                               |
 | `Git bundle header does not match the signed encrypted metadata` | the bundle and its signed metadata disagree; treat the sender as hostile   |
 | `Refused Git checkpoint N: ...`                                  | the checkpoint cannot be applied; the peer was told and the chain advanced |
-| `incremental Git prerequisites`                                  | the sender is not sending complete checkpoints                             |
+| `incremental Git base checkpoint is unavailable`                 | the peer receives a signed request for a complete checkpoint               |
 | `requires --allow-rewrite`                                       | the incoming history is not a descendant of what you have                  |
 | `No pending Git checkpoint from PEER`                            | nothing to fetch; the sender has not pushed since your last fetch          |
 
@@ -195,6 +236,12 @@ limit, fetching again picks it up. A refusal is final. This client cannot apply
 the checkpoint, so it acknowledges the refusal and advances the chain. That
 prevents one bad checkpoint from stalling later transfers. `dud git status PEER`
 lists both, along with any checkpoint of yours the peer refused.
+
+If the authenticated base or a prerequisite commit is unavailable, the refusal
+adds a signed `full_checkpoint_required` hint. The next automatic
+`dud git push PEER` sends a complete checkpoint. `dud sync` records the hint but
+does not push because it has no repository context. Flat refusals and hints
+attached to complete checkpoints do not trigger recovery.
 
 ## 8. What the server learns
 

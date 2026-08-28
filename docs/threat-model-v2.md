@@ -281,12 +281,19 @@ different anonymous-credential design and a network anonymity layer.
 
 ### 3.19 Malicious Git Object Database and Ref Input
 
-Bundles are unbundled into a temporary scratch repository, validated with strict
-object checking and `git check-ref-format`, and bounded by bundle bytes, object
-count, delta depth, wall time, memory, and disk. Hooks, external helpers,
-submodule recursion, and unsafe protocols are disabled. Promotion is an ordinary
-fetch with an explicit refspec into `refs/remotes/<peer>/*`, so branch selection
-and tag isolation follow from the refspec.
+Complete bundles are unbundled into an empty scratch repository and receive a
+full strict object check. Incremental bundles bind their prerequisites to an
+authenticated, output-committed base. Their non-thin pack section is indexed
+with `git index-pack --stdin --strict` into a scratch object directory that uses
+the real repository as a read-only alternate. Incremental validation never runs
+`bundle verify` or a full `fsck`, so its work does not scale with unrelated
+repository packs. `verify-pack` reads only scratch indexes.
+
+Both paths validate ref names and are bounded by bundle bytes, object count,
+delta depth, wall time, memory, and disk. Hooks, external helpers, submodule
+recursion, and unsafe protocols are disabled. Promotion is an ordinary fetch
+with an explicit refspec into `refs/remotes/<peer>/*`, so branch selection and
+tag isolation follow from the refspec.
 
 Quarantine lives under the repository's bind-mounted `.git/dud/`, never `/tmp`,
 because the wrapper's 128 MB tmpfs cannot hold a 100 MB bundle plus a scratch
@@ -301,10 +308,13 @@ since no other command consumes a `git-bundle` delivery.
 Advancing a watermark past a delivery that was never applied is only safe under
 a closed list of causes, so the causes are enumerated and never inferred from
 the mere fact that something failed. A delivery may be refused when its signed
-metadata describes behaviour this release does not implement, when its bundle
-header contradicts its signed metadata, or when it exceeds a bounded local limit
-on size, object count, or delta depth. Each of those verdicts is fixed by signed
-content or by durable local policy, and a retry cannot change it.
+metadata is malformed, when its bundle header contradicts that metadata, or when
+it exceeds a bounded local limit on size, object count, or delta depth. Each
+verdict is fixed by signed content or durable local policy, and a retry cannot
+change it. A missing authenticated incremental base or prerequisite commit also
+produces a refusal. That refusal carries a signed request for a complete
+checkpoint because replaying the same incremental cannot restore the missing
+state.
 
 A delivery is **not** refused when verification fails for any other reason.
 Exhausted disk space, an exceeded wall-time budget, a memory limit, and a

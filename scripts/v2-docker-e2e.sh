@@ -326,6 +326,113 @@ printf '%s\n' "$EMPTIED" | grep -q '^No pending delivery from laptop.$' || {
   exit 1
 }
 
+# Git synchronization starts with a complete checkpoint. Once the receiver's
+# signed acknowledgement reaches the sender, automatic mode uses that exact
+# checkpoint as the base for a non-thin incremental pack.
+for state in "$DESKTOP_STATE" "$LAPTOP_STATE"; do
+  docker run --rm --user 1000 --entrypoint /bin/sh \
+    -v "$state:/state" "$CLIENT_IMAGE" -c \
+    'git init -b main /state/repo >/dev/null && git -C /state/repo config user.name "DUD E2E" && git -C /state/repo config user.email dud@example.test'
+done
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$DESKTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'printf "base\n" > /state/repo/README.md && git -C /state/repo add README.md && git -C /state/repo commit -m base >/dev/null'
+
+run_git_client_at() {
+  state=$1
+  workdir=$2
+  shift 2
+  docker run --rm --network "$NETWORK" \
+    --add-host "dud.local.test:$CADDY_IP" \
+    --add-host "doh.local.test:$CADDY_IP" \
+    -e DUD_HOME=/state/dud \
+    -e DUD_CA_BUNDLE=/cert/root.crt \
+    -v "$state:/state" \
+    -v "$ROOT_CERT:/cert/root.crt:ro" \
+    -w "$workdir" \
+    "$CLIENT_IMAGE" "$@"
+}
+
+run_git_client() {
+  state=$1
+  shift
+  run_git_client_at "$state" /state/repo "$@"
+}
+
+FULL_PUSH=$(run_git_client "$DESKTOP_STATE" git push laptop --full --json)
+printf '%s\n' "$FULL_PUSH" | grep -q '"checkpoint_mode": "full"' || {
+  printf '%s\n' "$FULL_PUSH" >&2
+  echo "first peer Git push was not a complete checkpoint" >&2
+  exit 1
+}
+FULL_FETCH=$(run_git_client "$LAPTOP_STATE" git fetch desktop --associate --json)
+printf '%s\n' "$FULL_FETCH" | grep -q '"checkpoint_mode": "full"' || {
+  printf '%s\n' "$FULL_FETCH" >&2
+  echo "first peer Git fetch did not apply a complete checkpoint" >&2
+  exit 1
+}
+run_client "$DESKTOP_STATE" sync laptop >/dev/null
+
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$DESKTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'printf "incremental\n" > /state/repo/README.md && git -C /state/repo add README.md && git -C /state/repo commit -m incremental >/dev/null'
+INCREMENTAL_PUSH=$(run_git_client "$DESKTOP_STATE" git push laptop --json)
+printf '%s\n' "$INCREMENTAL_PUSH" | grep -q '"checkpoint_mode": "incremental"' || {
+  printf '%s\n' "$INCREMENTAL_PUSH" >&2
+  echo "automatic peer Git push did not select an incremental checkpoint" >&2
+  exit 1
+}
+printf '%s\n' "$INCREMENTAL_PUSH" | grep -q '"base_sequence": ' || {
+  printf '%s\n' "$INCREMENTAL_PUSH" >&2
+  echo "incremental peer Git push omitted its base sequence" >&2
+  exit 1
+}
+INCREMENTAL_FETCH=$(run_git_client "$LAPTOP_STATE" git fetch desktop --json)
+printf '%s\n' "$INCREMENTAL_FETCH" | grep -q '"checkpoint_mode": "incremental"' || {
+  printf '%s\n' "$INCREMENTAL_FETCH" >&2
+  echo "peer Git fetch did not apply the incremental checkpoint" >&2
+  exit 1
+}
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$LAPTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'test "$(git -C /state/repo show refs/remotes/desktop/main:README.md)" = incremental' || {
+  echo "incremental peer Git fetch did not update the isolated remote ref" >&2
+  exit 1
+}
+
+# A Git bundle does not carry the repository's shallow-boundary file. Rejecting
+# the repository before creating DUD state prevents a bundle that looks complete
+# but still references parent commits the sender does not have.
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$DESKTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'git clone --depth 1 file:///state/repo /state/shallow-repo >/dev/null &&
+   cp -R /state/repo/.git/dud /state/shallow-repo/.git/dud &&
+   test "$(git -C /state/shallow-repo rev-parse --is-shallow-repository)" = true'
+if SHALLOW_PUSH=$(run_git_client_at "$DESKTOP_STATE" /state/shallow-repo git push laptop --full 2>&1); then
+  echo "peer Git push accepted a shallow repository" >&2
+  exit 1
+fi
+printf '%s\n' "$SHALLOW_PUSH" | grep -q 'git push does not support shallow repositories; fetch the missing history first' || {
+  printf '%s\n' "$SHALLOW_PUSH" >&2
+  echo "peer Git push did not explain its shallow-repository rejection" >&2
+  exit 1
+}
+if SHALLOW_FETCH=$(run_git_client_at "$DESKTOP_STATE" /state/shallow-repo git fetch laptop 2>&1); then
+  echo "peer Git fetch accepted a shallow repository" >&2
+  exit 1
+fi
+printf '%s\n' "$SHALLOW_FETCH" | grep -q 'git fetch does not support shallow repositories; fetch the missing history first' || {
+  printf '%s\n' "$SHALLOW_FETCH" >&2
+  echo "peer Git fetch did not explain its shallow-repository rejection" >&2
+  exit 1
+}
+# Reporting neither packs nor applies objects, so it answers the same way at any
+# history depth and stays available where an operator reads the rejection.
+run_git_client_at "$DESKTOP_STATE" /state/shallow-repo git status --json >/dev/null || {
+  echo "peer Git status rejected a shallow repository" >&2
+  exit 1
+}
+
 # Dead drops run on the same in-process transport. Exercising them against the
 # same stack is the only end-to-end proof that DoH resolution, address
 # classification, exactly TLS 1.3, and the streamed request and response bodies
@@ -389,4 +496,4 @@ if docker run --rm --entrypoint /bin/sh "$CLIENT_IMAGE" -c \
   exit 1
 fi
 
-echo "V2 Docker pairing, bidirectional delivery, and dead drop transport passed."
+echo "V2 Docker pairing, bidirectional delivery, incremental Git, shallow-repository rejection, and dead drop transport passed."

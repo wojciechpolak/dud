@@ -459,7 +459,7 @@ test('capability discovery advertises only implemented features and atomic quota
   assert.equal(response.headers.get('cache-control'), 'no-store');
   const body = await decodeResponse(response);
   assert.deepEqual(body.get(1), [1, 2]);
-  assert.deepEqual(body.get(2), [2, 3, 5, 9, 10, 11]);
+  assert.deepEqual(body.get(2), [2, 3, 5, 6, 9, 10, 11]);
   assert.equal(body.get(3).get(1), 104857600);
   assert.equal(body.get(4).get(1), 2);
   assert.equal(body.get(4).get(2), 0);

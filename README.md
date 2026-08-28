@@ -23,7 +23,8 @@ name. For one-off sharing, use a dead drop addressed by an opaque ID.
   sequences deliveries against a hash chain the receiver acknowledges, and can
   revoke a relationship when a device or its state is lost.
 - Synchronizes Git repositories over both paths: by opaque ID as a bundle in a
-  dead drop, or to a peer as a complete authenticated checkpoint.
+  dead drop, or to a peer with complete and incremental authenticated
+  checkpoints.
 - Opportunistically cleans up expired or consumed objects during normal traffic,
   on both the R2 and filesystem backends.
 - Verifies secure transport from the client with in-process DoH, exactly TLS
@@ -582,9 +583,9 @@ by `npm run check:pins`.
   transport before upload or download.
 - Cleanup is cron-free. Expired and consumed objects are removed during normal
   traffic, and `dud flush` is available for an explicit cleanup pass.
-- Every peer Git push is a complete checkpoint; there are no incremental bundle
-  chains. A checkpoint the receiving client cannot apply is refused back to the
-  peer instead of blocking the transfer queue behind it.
+- Peer Git pushes select complete or incremental object packs automatically.
+  Every checkpoint still carries the complete desired ref snapshot, and a
+  missing incremental base makes the next automatic push complete.
 
 ## License
 

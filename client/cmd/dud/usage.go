@@ -44,38 +44,36 @@ Peer commands (addressed by the local alias of a paired device):
   dud send PEER (--file PATH ... | -m TEXT | --stdin) [--name NAME] [--ttl 168h] [--delete-after-read] [-v] [--json]
   dud receive PEER [--out PATH | --out-dir DIR] [--wait DURATION] [--max N] [--on-conflict skip|refuse|overwrite] [--no-extract] [-v] [--json]
   dud receive PEER --id DESCRIPTOR_DIGEST [--out PATH] [--on-conflict overwrite] [--json]
-  dud git push PEER [--branch NAME ... | --current] [--ttl 168h] [-v] [--json]
+  dud git push PEER [--branch NAME ... | --current] [--full | --incremental] [--ttl 168h] [-v] [--json]
   dud git fetch PEER [--associate] [--allow-rewrite] [-v] [--json]
   dud git status [PEER] [--json]
 
 Peer receive:
-  One 'dud receive PEER' drains every delivery waiting from that peer, oldest
-  first, and reports each one. --max N stops after N. --wait applies only while
-  the queue is empty, so it never idles after a drain has started.
-  Deliveries are committed in order and each is acknowledged, so a receive
-  cannot take a later delivery while skipping an earlier one. --on-conflict
-  decides what happens when an output name is already taken by different
-  contents: 'skip' (the default) leaves the file alone but still commits and
-  acknowledges the delivery, so the queue keeps moving and the payload stays
-  recoverable with 'dud receive PEER --id DIGEST --out PATH'; 'refuse' stops
-  the drain there; 'overwrite' replaces the file.
-  A Git checkpoint in the queue stops the drain, because applying it needs a
-  repository; the report names 'dud git fetch PEER' and everything ahead of it
-  is already committed.
-  'dud inbox' reports the oldest waiting delivery without committing it. The
-  server answers with the oldest delivery only, so there is no full queue
-  listing to show.
+  'dud receive PEER' drains deliveries oldest first and reports each one.
+  --max N limits the drain. --wait waits only when the queue starts empty.
+  DUD commits and acknowledges each delivery before taking the next one.
+
+  --on-conflict handles an output name already used by different contents:
+    skip       Keep the file but commit the delivery. This is the default.
+               Recover its payload with
+               'dud receive PEER --id DIGEST --out PATH'.
+    refuse     Stop the drain at the conflict.
+    overwrite  Replace the file.
+
+  A Git checkpoint stops the drain because it needs a repository. The report
+  points to 'dud git fetch PEER'. Earlier deliveries stay committed.
+  'dud inbox' shows the oldest waiting delivery without committing it. The
+  server exposes only that delivery, not the full queue.
 
 Peer status reporting:
   'dud sync', 'dud doctor', 'dud peer show', and 'dud git status' always print
-  the delivery counters, which is what those commands are for. 'dud send',
-  'dud receive', and the peer Git commands print them only when -v is given or
-  when something is queued, undrained, quarantined, halted, or still waiting in
-  the inbox, so a routine transfer reports what it did in one line. --json is
-  unaffected: it always carries every counter, with or without -v.
-  No command waits for the peer's signed acknowledgement. A send publishes the
-  delivery and returns; the peer signs an acknowledgement when it receives, and
-  'dud sync PEER' collects it here.
+  delivery counters. 'dud send', 'dud receive', and peer Git commands print them
+  only with -v or when work remains queued, undrained, quarantined, halted, or
+  in the inbox. --json always includes every counter.
+
+  A send returns after publishing. It does not wait for the peer. The peer signs
+  an acknowledgement when it receives the delivery. 'dud sync PEER' collects
+  that acknowledgement.
 
 Aliases:
   dud send, dud receive          a positional peer alias selects the peer
@@ -89,47 +87,43 @@ Environment:
                       Default: https://cloudflare-dns.com/dns-query
   DUD_ECH_MODE        ECH mode. Allowed: hard, off. Default: hard
   DUD_DROP_SECRET     Shared secret required for dead drop upload and flush
-  DUD_PEER_SECRET     Enrollment secret required to create a peer invitation
-                      on a deployment that gates enrollment. Only the inviter
-                      needs it; an invitee accepts with the pairing code
-                      alone. Usually the passphrase the operator issued;
-                      'dud peer enrollment-key' converts one into the
-                      derived-key form a server can hold without running the
-                      key derivation itself
-  DUD_CA_BUNDLE       Optional CA bundle path inside the client container. The
-                      generated wrappers bind an absolute host path read-only
-                      at the same path; a relative path resolves under /work
+  DUD_PEER_SECRET     Enrollment secret for creating invitations on a gated
+                      deployment. Only the inviter needs it. The invitee uses
+                      the pairing code. Run 'dud peer enrollment-key' to turn
+                      an operator passphrase into a derived key the server can
+                      store without running the key derivation
+  DUD_CA_BUNDLE       Optional CA bundle path inside the client container.
+                      Generated wrappers mount an absolute host path read-only
+                      at the same path. Relative paths resolve under /work
   DUD_CONNECT_TO      Inert: the in-process transport rejects it outright
   DUD_DOCKER_NETWORK  Optional docker network for install/shell-init wrappers
   DUD_GIT_BIN         Git binary used by dud git commands. Default: git
   DUD_HOME            Directory holding every peer world. Default: ~/.dud
   DUD_IMAGE           Docker image used by install/shell-init output
-  DUD_PROFILE         Selects a separate peer world: the whole world moves to
-                      NAME under the DUD root. Starts with a letter or digit
-                      and continues with letters, digits, '.', '_', or '-'.
-                      Dead drop commands read no configuration file and
-                      ignore it
+  DUD_PROFILE         Peer world under the DUD root. NAME starts with a letter
+                      or digit and may also contain '.', '_', or '-'. Dead drop
+                      commands ignore it and read no configuration file
 
 Peer network options:
-  Effective base URL, DoH URL, and ECH mode resolve in one fixed order:
+  DUD resolves the base URL, DoH URL, and ECH mode in this order:
   command line, peer profile, environment, local configuration, compiled
-  default. A paired peer therefore keeps the transport it was paired against:
-  the DUD_* variables are ambient, and they also point dead drop commands at a
-  deployment, so they never retarget a relationship whose origin is bound into
-  its signed descriptors. Peer-scoped commands reject --url, --doh-url, and
-  --ech-mode for the same reason. 'dud doctor' and 'dud peer show' report the
-  layer each effective value came from, what the profile pinned when the two
-  differ, and which DUD_* variables the profile overrode.
+  default.
+
+  Signed descriptors bind a paired peer to its origin. DUD_* variables may
+  point dead drop commands elsewhere, but they cannot retarget a paired peer.
+  Commands that target a paired peer reject --url, --doh-url, and --ech-mode.
+  'dud doctor' and 'dud peer show' report where each value came from, any value
+  pinned by the profile, and any DUD_* variable the profile overrode.
 
 Peer local state:
   Config: $DUD_HOME/default/config (default: ~/.dud/default/config)
   State:  $DUD_HOME/default/state  (default: ~/.dud/default/state)
-  DUD_PROFILE=NAME moves the whole world to $DUD_HOME/NAME. Each world holds
-  one device identity, one seed, and one peer graph, so a second deployment is
-  a second profile rather than a second peer. All of it is secret, so it sits
-  under one root no convention asks anyone to synchronize.
-  Every network operation, in either mode, rejects DUD_CONNECT_TO and requires
-  a canonical HTTPS origin, HTTPS DoH, exactly TLS 1.3, and ECH hard mode
-  unless off was explicitly selected.
+  DUD_PROFILE=NAME moves both directories under $DUD_HOME/NAME. A peer world
+  contains one device identity, one seed, and one peer graph. Use another
+  profile for another deployment. The whole DUD root is secret. Do not sync it.
+
+  Every network operation rejects DUD_CONNECT_TO. Both modes require a
+  canonical HTTPS origin, HTTPS DoH, and TLS 1.3. ECH uses hard mode unless you
+  select off.
 `)
 }

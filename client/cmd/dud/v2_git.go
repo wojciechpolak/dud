@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,14 @@ const (
 	v2GitMaximumOutputBytes = 64 * 1024 * 1024
 )
 
+type v2GitCheckpointMode string
+
+const (
+	v2GitCheckpointAuto        v2GitCheckpointMode = "auto"
+	v2GitCheckpointFull        v2GitCheckpointMode = "full"
+	v2GitCheckpointIncremental v2GitCheckpointMode = "incremental"
+)
+
 // v2GitPermanentRejection marks a Git delivery this device cannot commit. Its
 // cause is deterministic signed content or a durable local limit. Free space,
 // wall time, memory, and transport failures must not carry this type because
@@ -55,6 +64,24 @@ func rejectV2Git(err error) error {
 
 func isV2GitPermanentRejection(err error) bool {
 	var rejection v2GitPermanentRejection
+	return errors.As(err, &rejection)
+}
+
+// v2GitFullCheckpointRequired marks the two authenticated state failures that
+// an incremental retry cannot repair: the saved base checkpoint or one of its
+// prerequisite commits is missing. The acknowledgement layer attaches the
+// recovery hint only after the rest of the signed acknowledgement validates.
+type v2GitFullCheckpointRequired struct{ cause error }
+
+func (rejection v2GitFullCheckpointRequired) Error() string { return rejection.cause.Error() }
+func (rejection v2GitFullCheckpointRequired) Unwrap() error { return rejection.cause }
+
+func requireFullV2GitCheckpoint(err error) error {
+	return v2GitFullCheckpointRequired{cause: rejectV2Git(err)}
+}
+
+func isFullV2GitCheckpointRequired(err error) bool {
+	var rejection v2GitFullCheckpointRequired
 	return errors.As(err, &rejection)
 }
 
@@ -81,6 +108,12 @@ type v2GitMetadata struct {
 	BundleVersion uint64
 	Refs          map[string][]byte
 	Prerequisites [][]byte
+	BaseSequence  uint64
+	// These flags preserve malformed incremental extension state until the Git
+	// handler can sign a refusal and advance the data chain.
+	PrerequisitesValid  bool
+	BaseSequencePresent bool
+	BaseSequenceValid   bool
 }
 
 type v2GitPushOptions struct {
@@ -90,6 +123,7 @@ type v2GitPushOptions struct {
 	TTL      time.Duration
 	JSON     bool
 	Verbose  bool
+	Mode     v2GitCheckpointMode
 }
 
 type v2GitFetchOptions struct {
@@ -126,15 +160,47 @@ func (writer *v2GitLimitedBuffer) Write(value []byte) (int, error) {
 func (writer *v2GitLimitedBuffer) Bytes() []byte  { return writer.buffer.Bytes() }
 func (writer *v2GitLimitedBuffer) String() string { return writer.buffer.String() }
 
+// v2GitPackWriter appends a streamed pack to a bundle file. It keeps the twelve
+// header bytes so the object count is known without holding the pack in memory,
+// and it stops at the remaining bundle-byte allowance so an incremental pack
+// obeys the same size limit as a complete bundle.
+type v2GitPackWriter struct {
+	file       io.Writer
+	header     []byte
+	written    uint64
+	limit      uint64
+	overflowed bool
+}
+
+func (writer *v2GitPackWriter) Write(value []byte) (int, error) {
+	if writer.written+uint64(len(value)) > writer.limit {
+		writer.overflowed = true
+		return 0, errors.New("Git pack exceeds the local bundle limit")
+	}
+	if len(writer.header) < 12 {
+		writer.header = append(writer.header, value[:min(len(value), 12-len(writer.header))]...)
+	}
+	count, err := writer.file.Write(value)
+	writer.written += uint64(count)
+	return count, err
+}
+
+// errV2GitEmptyIncrementalPack reports that the acknowledged base already
+// carries every object the selected refs need. Automatic selection answers it
+// with a complete checkpoint; explicit incremental selection reports it.
+var errV2GitEmptyIncrementalPack = errors.New("incremental Git checkpoint contains no new objects")
+
 type v2GitOutboundState struct {
-	Sequence         uint64            `json:"sequence"`
-	DescriptorDigest string            `json:"descriptor_digest"`
-	Refs             map[string]string `json:"refs"`
-	Prerequisites    []string          `json:"prerequisites"`
-	Acknowledged     bool              `json:"acknowledged"`
-	AcknowledgedAt   uint64            `json:"acknowledged_at,omitempty"`
-	Rejected         bool              `json:"rejected,omitempty"`
-	RejectedAt       uint64            `json:"rejected_at,omitempty"`
+	Sequence               uint64            `json:"sequence"`
+	DescriptorDigest       string            `json:"descriptor_digest"`
+	Refs                   map[string]string `json:"refs"`
+	Prerequisites          []string          `json:"prerequisites"`
+	BaseSequence           uint64            `json:"base_sequence,omitempty"`
+	Acknowledged           bool              `json:"acknowledged"`
+	AcknowledgedAt         uint64            `json:"acknowledged_at,omitempty"`
+	Rejected               bool              `json:"rejected,omitempty"`
+	RejectedAt             uint64            `json:"rejected_at,omitempty"`
+	FullCheckpointRequired bool              `json:"full_checkpoint_required,omitempty"`
 }
 
 type v2GitInboundState struct {
@@ -145,6 +211,7 @@ type v2GitInboundState struct {
 	Refs             map[string]string `json:"refs"`
 	FetchedRefs      map[string]string `json:"fetched_refs,omitempty"`
 	Prerequisites    []string          `json:"prerequisites"`
+	BaseSequence     uint64            `json:"base_sequence,omitempty"`
 	OutputDigest     string            `json:"output_digest,omitempty"`
 }
 
@@ -177,7 +244,7 @@ func parseV2GitPushOptions(args []string) (v2GitPushOptions, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return v2GitPushOptions{}, errors.New("dud git push requires a positional peer alias")
 	}
-	opts := v2GitPushOptions{Alias: args[0], TTL: 7 * 24 * time.Hour}
+	opts := v2GitPushOptions{Alias: args[0], TTL: 7 * 24 * time.Hour, Mode: v2GitCheckpointAuto}
 	for args = args[1:]; len(args) != 0; {
 		switch args[0] {
 		case "--branch":
@@ -209,8 +276,18 @@ func parseV2GitPushOptions(args []string) (v2GitPushOptions, error) {
 				return opts, err
 			}
 			args = args[1:]
-		case "--incremental", "--full":
-			return opts, errors.New("incremental Git selection is unavailable in DUD 2.0; every peer push is a full checkpoint")
+		case "--incremental":
+			if opts.Mode != v2GitCheckpointAuto {
+				return opts, errors.New("--incremental and --full are mutually exclusive")
+			}
+			opts.Mode = v2GitCheckpointIncremental
+			args = args[1:]
+		case "--full":
+			if opts.Mode != v2GitCheckpointAuto {
+				return opts, errors.New("--incremental and --full are mutually exclusive")
+			}
+			opts.Mode = v2GitCheckpointFull
+			args = args[1:]
 		case "--url", "--doh-url", "--ech-mode":
 			return opts, v2PeerNetworkOptionError(args[0])
 		default:
@@ -250,7 +327,7 @@ func parseV2GitFetchOptions(args []string) (v2GitFetchOptions, error) {
 			}
 			args = args[1:]
 		case "--incremental":
-			return opts, errors.New("incremental Git fetch is unavailable in DUD 2.0")
+			return opts, errors.New("--incremental selects how git push packs objects and is not valid for git fetch")
 		case "--url", "--doh-url", "--ech-mode":
 			return opts, v2PeerNetworkOptionError(args[0])
 		default:
@@ -263,7 +340,21 @@ func parseV2GitFetchOptions(args []string) (v2GitFetchOptions, error) {
 	return opts, nil
 }
 
+// resolveV2GitRepository prepares the repository for a command that builds or
+// applies checkpoints.
 func (a *app) resolveV2GitRepository(action string) (*v2GitRepository, error) {
+	return a.openV2GitRepository(action, true)
+}
+
+// resolveV2GitReportingRepository prepares the repository for a command that
+// only reports stored peer Git state. Reporting neither packs nor applies
+// objects, so it answers the same way at any history depth and stays available
+// in a shallow clone, which is where an operator goes to read the rejection.
+func (a *app) resolveV2GitReportingRepository(action string) (*v2GitRepository, error) {
+	return a.openV2GitRepository(action, false)
+}
+
+func (a *app) openV2GitRepository(action string, requireCompleteHistory bool) (*v2GitRepository, error) {
 	command := exec.Command(a.cfg.GitBin, "rev-parse", "--git-common-dir")
 	command.Stderr = a.errOut
 	output, err := command.Output()
@@ -300,6 +391,24 @@ func (a *app) resolveV2GitRepository(action string) (*v2GitRepository, error) {
 		repository.ObjectHexLen = 64
 	default:
 		return nil, errors.New("Git repository uses an unsupported object format")
+	}
+	// A bundle carries no `.git/shallow` boundary, so a checkpoint built from a
+	// shallow repository advertises refs whose parent commits the sender does
+	// not have. The check runs before any directory is created so a shallow
+	// repository never acquires DUD state.
+	if requireCompleteHistory {
+		shallowCommand := exec.Command(a.cfg.GitBin, "rev-parse", "--is-shallow-repository")
+		shallowOutput, err := shallowCommand.Output()
+		if err != nil {
+			return nil, fmt.Errorf("detect shallow Git repository: %w", err)
+		}
+		switch strings.TrimSpace(string(shallowOutput)) {
+		case "false":
+		case "true":
+			return nil, fatalError("git " + action + " does not support shallow repositories; fetch the missing history first")
+		default:
+			return nil, errors.New("Git returned an invalid shallow repository status")
+		}
 	}
 	for _, directory := range []string{
 		repository.DUDDir,
@@ -508,6 +617,14 @@ func stringGitRefs(refs map[string][]byte) map[string]string {
 	return result
 }
 
+func stringGitPrerequisites(prerequisites [][]byte) []string {
+	result := make([]string, 0, len(prerequisites))
+	for _, oid := range prerequisites {
+		result = append(result, hex.EncodeToString(oid))
+	}
+	return result
+}
+
 func byteGitRefs(refs map[string]string, objectBytes int) (map[string][]byte, error) {
 	result := make(map[string][]byte, len(refs))
 	for name, value := range refs {
@@ -528,13 +645,17 @@ func appendV2GitHistory(state *v2GitPeerState, direction string, sequence uint64
 }
 
 func encodeV2GitMetadata(metadata v2GitMetadata) map[int]any {
-	return map[int]any{
+	result := map[int]any{
 		1: metadata.RepositoryID,
 		2: metadata.ObjectFormat,
 		3: metadata.BundleVersion,
 		4: metadata.Refs,
 		5: metadata.Prerequisites,
 	}
+	if metadata.BaseSequence != 0 {
+		result[kGitBaseSequence] = metadata.BaseSequence
+	}
+	return result
 }
 
 func decodeV2GitMetadata(value any) (*v2GitMetadata, error) {
@@ -550,7 +671,7 @@ func decodeV2GitMetadata(value any) (*v2GitMetadata, error) {
 	for key := range raw {
 		keys = append(keys, key)
 	}
-	if err := validateV2MetadataKeys(keys, []int{1, 2, 3, 4, 5}, nil); err != nil {
+	if err := validateV2MetadataKeys(keys, []int{1, 2, 3, 4, 5}, []int{kGitBaseSequence}); err != nil {
 		return nil, fmt.Errorf("Git metadata is invalid: %w", err)
 	}
 	for key := 1; key <= 5; key++ {
@@ -573,8 +694,11 @@ func decodeV2GitMetadata(value any) (*v2GitMetadata, error) {
 	if err := v2DecMode.Unmarshal(raw[4], &metadata.Refs); err != nil || len(metadata.Refs) == 0 {
 		return nil, errors.New("Git metadata refs are invalid")
 	}
-	if err := v2DecMode.Unmarshal(raw[5], &metadata.Prerequisites); err != nil {
-		return nil, errors.New("Git metadata prerequisites are invalid")
+	metadata.PrerequisitesValid = v2DecMode.Unmarshal(raw[5], &metadata.Prerequisites) == nil
+	metadata.BaseSequenceValid = true
+	if value := raw[kGitBaseSequence]; value != nil {
+		metadata.BaseSequencePresent = true
+		metadata.BaseSequenceValid = v2DecMode.Unmarshal(value, &metadata.BaseSequence) == nil && metadata.BaseSequence != 0
 	}
 	objectBytes := 20
 	if metadata.ObjectFormat == 2 {
@@ -616,6 +740,18 @@ func (a *app) runV2Git(ctx context.Context, repository *v2GitRepository, input [
 // quarantine object directory read-only through Git's alternate-object lookup
 // without importing its objects into the repository.
 func (a *app) runV2GitWithEnv(ctx context.Context, repository *v2GitRepository, extraEnv []string, input []byte, args ...string) ([]byte, error) {
+	stdout := v2GitLimitedBuffer{limit: v2GitMaximumOutputBytes}
+	if err := a.runV2GitToWriter(ctx, repository, extraEnv, input, &stdout, args...); err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
+
+// runV2GitToWriter streams standard output to writer instead of collecting it.
+// A command whose output is the transferred payload itself, such as
+// `pack-objects --stdout`, is then bounded by the limit of its destination
+// rather than by the smaller buffer that bounds diagnostic command output.
+func (a *app) runV2GitToWriter(ctx context.Context, repository *v2GitRepository, extraEnv []string, input []byte, stdout io.Writer, args ...string) error {
 	hardened := []string{
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "protocol.allow=never",
@@ -652,13 +788,12 @@ func (a *app) runV2GitWithEnv(ctx context.Context, repository *v2GitRepository, 
 	if input != nil {
 		command.Stdin = bytes.NewReader(input)
 	}
-	stdout := v2GitLimitedBuffer{limit: v2GitMaximumOutputBytes}
 	stderr := v2GitLimitedBuffer{limit: 1024 * 1024}
-	command.Stdout = &stdout
+	command.Stdout = stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("Git operation exceeded the %s wall-time limit", repository.Limits.WallTime)
+			return fmt.Errorf("Git operation exceeded the %s wall-time limit", repository.Limits.WallTime)
 		}
 		message := strings.TrimSpace(stderr.String())
 		if message != "" {
@@ -668,14 +803,14 @@ func (a *app) runV2GitWithEnv(ctx context.Context, repository *v2GitRepository, 
 		// status as an answer, and Git advisories on stderr are not hard errors.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return nil, &v2GitCommandError{code: exitErr.ExitCode(), message: message}
+			return &v2GitCommandError{code: exitErr.ExitCode(), message: message}
 		}
 		if message != "" {
-			return nil, fmt.Errorf("Git command failed: %s", message)
+			return fmt.Errorf("Git command failed: %s", message)
 		}
-		return nil, err
+		return err
 	}
-	return stdout.Bytes(), nil
+	return nil
 }
 
 // v2GitCommandError reports a Git invocation that exited non-zero, keeping the
@@ -712,16 +847,28 @@ func (a *app) validateV2GitRef(repository *v2GitRepository, ref string) error {
 	return nil
 }
 
-func parseV2GitBundleHeader(path string, objectBytes int) (uint64, map[string][]byte, [][]byte, error) {
+type v2GitCountingReader struct {
+	reader io.Reader
+	read   int64
+}
+
+func (reader *v2GitCountingReader) Read(value []byte) (int, error) {
+	count, err := reader.reader.Read(value)
+	reader.read += int64(count)
+	return count, err
+}
+
+func parseV2GitBundleHeaderWithOffset(path string, objectBytes int) (uint64, map[string][]byte, [][]byte, int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, 0, err
 	}
 	defer file.Close()
-	reader := bufio.NewReader(io.LimitReader(file, 1024*1024))
+	counting := &v2GitCountingReader{reader: io.LimitReader(file, 1024*1024)}
+	reader := bufio.NewReader(counting)
 	first, err := reader.ReadString('\n')
 	if err != nil {
-		return 0, nil, nil, errors.New("Git bundle header is truncated")
+		return 0, nil, nil, 0, errors.New("Git bundle header is truncated")
 	}
 	var version uint64
 	switch strings.TrimSpace(first) {
@@ -730,7 +877,7 @@ func parseV2GitBundleHeader(path string, objectBytes int) (uint64, map[string][]
 	case "# v3 git bundle":
 		version = 3
 	default:
-		return 0, nil, nil, errors.New("Git bundle has an unsupported signature")
+		return 0, nil, nil, 0, errors.New("Git bundle has an unsupported signature")
 	}
 	refs := map[string][]byte{}
 	var prerequisites [][]byte
@@ -738,7 +885,7 @@ func parseV2GitBundleHeader(path string, objectBytes int) (uint64, map[string][]
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return 0, nil, nil, errors.New("Git bundle header is truncated")
+			return 0, nil, nil, 0, errors.New("Git bundle header is truncated")
 		}
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if line == "" {
@@ -750,7 +897,7 @@ func parseV2GitBundleHeader(path string, objectBytes int) (uint64, map[string][]
 				expected = "@object-format=sha256"
 			}
 			if version != 3 || sawObjectFormat || line != expected {
-				return 0, nil, nil, fmt.Errorf("Git bundle contains unsupported capability %q", line)
+				return 0, nil, nil, 0, fmt.Errorf("Git bundle contains unsupported capability %q", line)
 			}
 			sawObjectFormat = true
 			continue
@@ -761,11 +908,11 @@ func parseV2GitBundleHeader(path string, objectBytes int) (uint64, map[string][]
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return 0, nil, nil, errors.New("Git bundle header contains an invalid reference")
+			return 0, nil, nil, 0, errors.New("Git bundle header contains an invalid reference")
 		}
 		oid, err := hex.DecodeString(fields[0])
 		if err != nil || len(oid) != objectBytes {
-			return 0, nil, nil, errors.New("Git bundle header contains an invalid object ID")
+			return 0, nil, nil, 0, errors.New("Git bundle header contains an invalid object ID")
 		}
 		if prerequisite {
 			prerequisites = append(prerequisites, oid)
@@ -773,17 +920,23 @@ func parseV2GitBundleHeader(path string, objectBytes int) (uint64, map[string][]
 		}
 		name := fields[1]
 		if _, exists := refs[name]; exists {
-			return 0, nil, nil, fmt.Errorf("Git bundle repeats ref %q", name)
+			return 0, nil, nil, 0, fmt.Errorf("Git bundle repeats ref %q", name)
 		}
 		refs[name] = oid
 	}
 	if len(refs) == 0 {
-		return 0, nil, nil, errors.New("Git bundle advertises no refs")
+		return 0, nil, nil, 0, errors.New("Git bundle advertises no refs")
 	}
 	if version == 3 && !sawObjectFormat {
-		return 0, nil, nil, errors.New("Git bundle version 3 omits its object-format capability")
+		return 0, nil, nil, 0, errors.New("Git bundle version 3 omits its object-format capability")
 	}
-	return version, refs, prerequisites, nil
+	offset := counting.read - int64(reader.Buffered())
+	return version, refs, prerequisites, offset, nil
+}
+
+func parseV2GitBundleHeader(path string, objectBytes int) (uint64, map[string][]byte, [][]byte, error) {
+	version, refs, prerequisites, _, err := parseV2GitBundleHeaderWithOffset(path, objectBytes)
+	return version, refs, prerequisites, err
 }
 
 func equalV2GitRefs(left, right map[string][]byte) bool {
@@ -798,23 +951,121 @@ func equalV2GitRefs(left, right map[string][]byte) bool {
 	return true
 }
 
-func (a *app) createV2GitBundle(repository *v2GitRepository, opts v2GitPushOptions, repositoryID []byte) (string, *v2GitMetadata, error) {
+func equalV2GitPrerequisites(left, right [][]byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !bytes.Equal(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func checkpointModeV2Git(metadata *v2GitMetadata) v2GitCheckpointMode {
+	if len(metadata.Prerequisites) == 0 {
+		return v2GitCheckpointFull
+	}
+	return v2GitCheckpointIncremental
+}
+
+func checkpointLabelV2Git(mode v2GitCheckpointMode) string {
+	if mode == v2GitCheckpointFull {
+		return "complete"
+	}
+	return string(mode)
+}
+
+func (a *app) selectedV2GitBranches(repository *v2GitRepository, opts v2GitPushOptions) ([]string, error) {
 	branches := append([]string(nil), opts.Branches...)
 	if opts.Current {
 		output, err := exec.Command(a.cfg.GitBin, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
 		if err != nil {
-			return "", nil, errors.New("--current requires an attached current branch")
+			return nil, errors.New("--current requires an attached current branch")
 		}
 		branches = []string{strings.TrimSpace(string(output))}
 	}
 	for _, branch := range branches {
 		if strings.HasPrefix(branch, "-") {
-			return "", nil, fmt.Errorf("invalid branch name %q", branch)
+			return nil, fmt.Errorf("invalid branch name %q", branch)
 		}
 		if err := a.validateV2GitRef(repository, "refs/heads/"+branch); err != nil {
-			return "", nil, err
+			return nil, err
 		}
 	}
+	return branches, nil
+}
+
+// resolveV2GitSnapshot records the complete selected ref state before object
+// packing starts. Every checkpoint carries this snapshot, including refs whose
+// objects are omitted from an incremental pack because the peer acknowledged
+// them in its base checkpoint.
+func (a *app) resolveV2GitSnapshot(repository *v2GitRepository, opts v2GitPushOptions) (map[string][]byte, error) {
+	branches, err := a.selectedV2GitBranches(repository, opts)
+	if err != nil {
+		return nil, err
+	}
+	selected := make(map[string]bool, len(branches))
+	for _, branch := range branches {
+		selected["refs/heads/"+branch] = true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	defer cancel()
+	output, err := a.runV2Git(ctx, repository, nil,
+		"for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags")
+	if err != nil {
+		return nil, err
+	}
+	refs := map[string][]byte{}
+	foundBranches := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, errors.New("Git returned an invalid ref snapshot")
+		}
+		name := fields[1]
+		if strings.HasPrefix(name, "refs/heads/") {
+			if len(selected) != 0 && !selected[name] {
+				continue
+			}
+			foundBranches[name] = true
+		} else if !strings.HasPrefix(name, "refs/tags/") {
+			continue
+		}
+		oid, decodeErr := hex.DecodeString(fields[0])
+		if decodeErr != nil || len(oid) != repository.ObjectHexLen/2 {
+			return nil, fmt.Errorf("Git ref %q has an invalid object ID", name)
+		}
+		if err := a.validateV2GitRef(repository, name); err != nil {
+			return nil, err
+		}
+		refs[name] = oid
+	}
+	for name := range selected {
+		if !foundBranches[name] {
+			return nil, fmt.Errorf("selected Git branch %s does not exist", strings.TrimPrefix(name, "refs/heads/"))
+		}
+	}
+	if len(refs) == 0 {
+		return nil, errors.New("Git repository has no selected branches or tags")
+	}
+	return refs, nil
+}
+
+func sortedV2GitRefNames(refs map[string][]byte) []string {
+	names := make([]string, 0, len(refs))
+	for name := range refs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (a *app) createCompleteV2GitBundle(repository *v2GitRepository, repositoryID []byte, refs map[string][]byte) (string, *v2GitMetadata, error) {
 	bundle, err := os.CreateTemp(filepath.Join(repository.DUDDir, "transfers"), ".outgoing-*.bundle")
 	if err != nil {
 		return "", nil, err
@@ -829,34 +1080,21 @@ func (a *app) createV2GitBundle(repository *v2GitRepository, opts v2GitPushOptio
 		version = 3
 	}
 	args := []string{"bundle", "create", "--version=" + strconv.FormatUint(version, 10), bundlePath}
-	if len(branches) == 0 {
-		args = append(args, "--branches", "--tags")
-	} else {
-		for _, branch := range branches {
-			args = append(args, "refs/heads/"+branch)
-		}
-		args = append(args, "--tags")
-	}
+	args = append(args, sortedV2GitRefNames(refs)...)
 	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
 	defer cancel()
 	if _, err := a.runV2Git(ctx, repository, nil, args...); err != nil {
 		_ = os.Remove(bundlePath)
 		return "", nil, err
 	}
-	actualVersion, refs, prerequisites, err := parseV2GitBundleHeader(bundlePath, repository.ObjectHexLen/2)
+	actualVersion, actualRefs, prerequisites, err := parseV2GitBundleHeader(bundlePath, repository.ObjectHexLen/2)
 	if err != nil {
 		_ = os.Remove(bundlePath)
 		return "", nil, err
 	}
-	if actualVersion != version || len(prerequisites) != 0 {
+	if actualVersion != version || len(prerequisites) != 0 || !equalV2GitRefs(actualRefs, refs) {
 		_ = os.Remove(bundlePath)
 		return "", nil, errors.New("Git did not create the requested complete checkpoint bundle")
-	}
-	for ref := range refs {
-		if err := a.validateV2GitRef(repository, ref); err != nil {
-			_ = os.Remove(bundlePath)
-			return "", nil, err
-		}
 	}
 	metadata := &v2GitMetadata{
 		RepositoryID:  repositoryID,
@@ -865,13 +1103,244 @@ func (a *app) createV2GitBundle(repository *v2GitRepository, opts v2GitPushOptio
 		Refs:          refs,
 		Prerequisites: [][]byte{},
 	}
-	// Checkpoints carry no incremental prerequisites. Peers can parse an
-	// incremental checkpoint and sign a refusal, but this command never sends one.
-	if err := requireCompleteV2GitCheckpoint(metadata); err != nil {
-		_ = os.Remove(bundlePath)
+	return bundlePath, metadata, nil
+}
+
+// v2GitIncrementalPrerequisites derives the negative revisions and signed
+// prerequisites for an incremental pack from the acknowledged checkpoint alone.
+// An empty result means the acknowledged state supplies no usable branch base
+// and the caller must build a complete checkpoint. An error means Git itself
+// failed, which is reported rather than disguised as a missing base.
+func (a *app) v2GitIncrementalPrerequisites(repository *v2GitRepository, refs map[string][]byte, state *v2GitPeerState) ([][]byte, error) {
+	if state.LastAcknowledgedSentSequence == 0 {
+		return nil, nil
+	}
+	unique := map[string][]byte{}
+	for name := range refs {
+		if !strings.HasPrefix(name, "refs/heads/") {
+			continue
+		}
+		value, exists := state.LastAcknowledgedRefs[name]
+		if !exists {
+			continue
+		}
+		oid, err := hex.DecodeString(value)
+		if err != nil || len(oid) != repository.ObjectHexLen/2 {
+			return nil, fmt.Errorf("acknowledged Git ref %s has an invalid object ID", name)
+		}
+		unique[value] = oid
+	}
+	values := make([]string, 0, len(unique))
+	for value := range unique {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	objectTypes, err := a.v2GitBatchObjectTypes(repository, values)
+	if err != nil {
+		return nil, err
+	}
+	result := make([][]byte, 0, len(values))
+	for index, value := range values {
+		// A base tip that is absent or is not a commit cannot serve as a
+		// negative revision, so the checkpoint falls back to a complete pack.
+		if objectTypes[index] != "commit" {
+			return nil, nil
+		}
+		result = append(result, unique[value])
+	}
+	return result, nil
+}
+
+// v2GitBatchObjectTypes resolves every object under one Git process and one
+// wall-time budget. Incremental checkpoints may name many shared branch tips,
+// so a separate timeout per object would make the aggregate work unbounded.
+func (a *app) v2GitBatchObjectTypes(repository *v2GitRepository, objectIDs []string) ([]string, error) {
+	if len(objectIDs) == 0 {
+		return nil, nil
+	}
+	var input strings.Builder
+	for _, objectID := range objectIDs {
+		input.WriteString(objectID)
+		input.WriteByte('\n')
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	defer cancel()
+	output, err := a.runV2Git(ctx, repository, []byte(input.String()), "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != len(objectIDs) {
+		return nil, errors.New("Git returned the wrong number of object type results")
+	}
+	objectTypes := make([]string, len(objectIDs))
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != objectIDs[index] {
+			return nil, errors.New("Git returned an invalid object type result")
+		}
+		objectTypes[index] = fields[1]
+	}
+	return objectTypes, nil
+}
+
+func hasV2GitIncrementalFeature(features []uint64) bool {
+	if len(features) == 0 {
+		return false
+	}
+	found := false
+	for index, feature := range features {
+		if index != 0 && feature <= features[index-1] {
+			return false
+		}
+		if feature == 6 {
+			found = true
+		}
+	}
+	return found
+}
+
+func incrementalCheckpointCountV2Git(state *v2GitPeerState) uint64 {
+	var count uint64
+	for _, outbound := range state.Outbound {
+		if outbound.Sequence > state.LastFullCheckpointSequence && len(outbound.Prerequisites) != 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func fullCheckpointRequiredV2Git(state *v2GitPeerState) bool {
+	for _, outbound := range state.Outbound {
+		if outbound.Sequence > state.LastFullCheckpointSequence && len(outbound.Prerequisites) != 0 && outbound.FullCheckpointRequired {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) createIncrementalV2GitBundle(repository *v2GitRepository, repositoryID []byte, refs map[string][]byte, prerequisites [][]byte, baseSequence uint64) (string, *v2GitMetadata, error) {
+	var revisions bytes.Buffer
+	seenPositive := map[string]bool{}
+	for _, name := range sortedV2GitRefNames(refs) {
+		value := hex.EncodeToString(refs[name])
+		if !seenPositive[value] {
+			fmt.Fprintln(&revisions, value)
+			seenPositive[value] = true
+		}
+	}
+	for _, oid := range prerequisites {
+		fmt.Fprintf(&revisions, "^%s\n", hex.EncodeToString(oid))
+	}
+	var header bytes.Buffer
+	version := uint64(2)
+	if repository.ObjectFormat == 2 {
+		version = 3
+	}
+	fmt.Fprintf(&header, "# v%d git bundle\n", version)
+	if version == 3 {
+		fmt.Fprintln(&header, "@object-format=sha256")
+	}
+	for _, oid := range prerequisites {
+		fmt.Fprintf(&header, "-%s DUD acknowledged checkpoint\n", hex.EncodeToString(oid))
+	}
+	for _, name := range sortedV2GitRefNames(refs) {
+		fmt.Fprintf(&header, "%s %s\n", hex.EncodeToString(refs[name]), name)
+	}
+	header.WriteByte('\n')
+	if uint64(header.Len()) >= repository.Limits.BundleBytes {
+		return "", nil, fmt.Errorf("Git bundle exceeds the local limit of %d bytes", repository.Limits.BundleBytes)
+	}
+	bundle, err := os.CreateTemp(filepath.Join(repository.DUDDir, "transfers"), ".outgoing-*.bundle")
+	if err != nil {
 		return "", nil, err
 	}
-	return bundlePath, metadata, nil
+	bundlePath := bundle.Name()
+	defer func() { _ = bundle.Close() }()
+	discard := func(cause error) (string, *v2GitMetadata, error) {
+		_ = os.Remove(bundlePath)
+		return "", nil, cause
+	}
+	if err := bundle.Chmod(0o600); err != nil {
+		return discard(err)
+	}
+	if _, err := bundle.Write(header.Bytes()); err != nil {
+		return discard(err)
+	}
+	// The pack is written straight through to the bundle so its size is bounded
+	// by the bundle-byte limit that also bounds a complete checkpoint, rather
+	// than by the smaller buffer that bounds collected command output.
+	pack := &v2GitPackWriter{file: bundle, limit: repository.Limits.BundleBytes - uint64(header.Len())}
+	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	defer cancel()
+	packErr := a.runV2GitToWriter(ctx, repository, nil, revisions.Bytes(), pack,
+		"pack-objects", "--stdout", "--revs", "--no-thin", "--no-reuse-delta")
+	// An overflow makes Git fail on a closed pipe, so the recorded flag rather
+	// than the reported exit status names the cause.
+	if pack.overflowed {
+		return discard(fmt.Errorf("Git bundle exceeds the local limit of %d bytes", repository.Limits.BundleBytes))
+	}
+	if packErr != nil {
+		return discard(packErr)
+	}
+	if len(pack.header) < 12 || string(pack.header[:4]) != "PACK" {
+		return discard(errors.New("Git produced an invalid incremental pack"))
+	}
+	if binary.BigEndian.Uint32(pack.header[8:12]) == 0 {
+		return discard(errV2GitEmptyIncrementalPack)
+	}
+	if err := bundle.Sync(); err != nil {
+		return discard(err)
+	}
+	actualVersion, actualRefs, actualPrerequisites, err := parseV2GitBundleHeader(bundlePath, repository.ObjectHexLen/2)
+	if err != nil || actualVersion != version || !equalV2GitRefs(actualRefs, refs) || !equalV2GitPrerequisites(actualPrerequisites, prerequisites) {
+		return discard(errors.New("Git did not create the requested incremental checkpoint bundle"))
+	}
+	return bundlePath, &v2GitMetadata{
+		RepositoryID: repositoryID, ObjectFormat: repository.ObjectFormat,
+		BundleVersion: version, Refs: refs, Prerequisites: prerequisites,
+		BaseSequence: baseSequence,
+	}, nil
+}
+
+func (a *app) createV2GitCheckpoint(repository *v2GitRepository, opts v2GitPushOptions, repositoryID []byte, state *v2GitPeerState, peerFeatures []uint64) (string, *v2GitMetadata, v2GitCheckpointMode, error) {
+	refs, err := a.resolveV2GitSnapshot(repository, opts)
+	if err != nil {
+		return "", nil, "", err
+	}
+	if opts.Mode == v2GitCheckpointFull || opts.Mode == v2GitCheckpointAuto && (fullCheckpointRequiredV2Git(state) || incrementalCheckpointCountV2Git(state) >= 16) {
+		path, metadata, err := a.createCompleteV2GitBundle(repository, repositoryID, refs)
+		return path, metadata, v2GitCheckpointFull, err
+	}
+	prerequisites, err := a.v2GitIncrementalPrerequisites(repository, refs, state)
+	if err != nil {
+		return "", nil, "", err
+	}
+	canIncrement := hasV2GitIncrementalFeature(peerFeatures) && state.LastAcknowledgedSentSequence != 0 && len(prerequisites) != 0
+	if opts.Mode == v2GitCheckpointIncremental && !canIncrement {
+		return "", nil, "", errors.New("incremental Git push requires peer feature 6 and an acknowledged branch base; use --full or automatic mode")
+	}
+	if !canIncrement {
+		path, metadata, err := a.createCompleteV2GitBundle(repository, repositoryID, refs)
+		return path, metadata, v2GitCheckpointFull, err
+	}
+	path, metadata, err := a.createIncrementalV2GitBundle(repository, repositoryID, refs, prerequisites, state.LastAcknowledgedSentSequence)
+	if err == nil {
+		return path, metadata, v2GitCheckpointIncremental, nil
+	}
+	if opts.Mode == v2GitCheckpointIncremental || !errors.Is(err, errV2GitEmptyIncrementalPack) {
+		return "", nil, "", err
+	}
+	path, metadata, fullErr := a.createCompleteV2GitBundle(repository, repositoryID, refs)
+	return path, metadata, v2GitCheckpointFull, fullErr
+}
+
+func (a *app) createV2GitBundle(repository *v2GitRepository, opts v2GitPushOptions, repositoryID []byte) (string, *v2GitMetadata, error) {
+	refs, err := a.resolveV2GitSnapshot(repository, opts)
+	if err != nil {
+		return "", nil, err
+	}
+	return a.createCompleteV2GitBundle(repository, repositoryID, refs)
 }
 
 func (runtime *v2PeerRuntime) publishV2PeerPayload(ctx context.Context, plaintext []byte, payloadType uint64, typeMetadata map[int]any, ttl time.Duration) (uint64, string, error) {
@@ -1007,7 +1476,7 @@ func (a *app) cmdV2GitPush(args []string) error {
 		if err := reconcileV2GitAcknowledgements(runtime, repository, state); err != nil {
 			return err
 		}
-		bundlePath, metadata, err := a.createV2GitBundle(repository, opts, repositoryID)
+		bundlePath, metadata, checkpointMode, err := a.createV2GitCheckpoint(repository, opts, repositoryID, state, runtime.state.PeerFeatures)
 		if err != nil {
 			return err
 		}
@@ -1025,9 +1494,12 @@ func (a *app) cmdV2GitPush(args []string) error {
 		}
 		state.Outbound[digest] = v2GitOutboundState{
 			Sequence: sequence, DescriptorDigest: digest,
-			Refs: stringGitRefs(metadata.Refs), Prerequisites: []string{},
+			Refs: stringGitRefs(metadata.Refs), Prerequisites: stringGitPrerequisites(metadata.Prerequisites),
+			BaseSequence: metadata.BaseSequence,
 		}
-		state.LastFullCheckpointSequence = sequence
+		if checkpointMode == v2GitCheckpointFull {
+			state.LastFullCheckpointSequence = sequence
+		}
 		appendV2GitHistory(state, "outbound", sequence, digest, "committed")
 		if err := repository.writePeerState(state); err != nil {
 			return err
@@ -1037,30 +1509,45 @@ func (a *app) cmdV2GitPush(args []string) error {
 		rejected := rejectedV2GitDeliveries(runtime.state)
 		refused := refusedV2GitCheckpoints(state)
 		if opts.JSON {
-			return writeJSON(a.out, status.merge(map[string]any{
+			result := status.merge(map[string]any{
 				"peer": opts.Alias, "repository_id": hex.EncodeToString(repositoryID),
 				"sequence": sequence, "descriptor_digest": digest,
 				"refs": state.Outbound[digest].Refs, "acknowledged": false,
+				"checkpoint_mode":            checkpointMode,
 				"quarantined_git_deliveries": quarantined,
 				"rejected_git_deliveries":    rejected,
 				"refused_git_checkpoints":    refused,
-			}))
+			})
+			if metadata.BaseSequence != 0 {
+				result["base_sequence"] = metadata.BaseSequence
+			}
+			return writeJSON(a.out, result)
 		}
-		if err := fprintWrapped(a.out,
-			"Sent complete Git checkpoint to %s as data sequence %d.",
-			opts.Alias, sequence); err != nil {
-			return err
+		if checkpointMode == v2GitCheckpointIncremental {
+			return fprintV2GitPushResult(a, opts, sequence, checkpointMode, metadata.BaseSequence, refused, status, quarantined, rejected)
 		}
-		if err := fprintWrapped(a.out,
-			"Not acknowledged yet; 'dud sync %s' collects the acknowledgement.",
-			opts.Alias); err != nil {
-			return err
-		}
-		if len(refused) != 0 {
-			fmt.Fprintf(a.out, "%d earlier checkpoint(s) were refused by %s; see dud git status %s.\n", len(refused), opts.Alias, opts.Alias)
-		}
-		return v2GitStatusReport(opts.Verbose, status, quarantined, rejected).write(a.out)
+		return fprintV2GitPushResult(a, opts, sequence, checkpointMode, 0, refused, status, quarantined, rejected)
 	})
+}
+
+func fprintV2GitPushResult(a *app, opts v2GitPushOptions, sequence uint64, checkpointMode v2GitCheckpointMode, baseSequence uint64, refused []map[string]any, status v2DeliveryStatus, quarantined, rejected []map[string]any) error {
+	if err := fprintWrapped(a.out,
+		"Sent %s Git checkpoint to %s as data sequence %d.",
+		checkpointLabelV2Git(checkpointMode), opts.Alias, sequence); err != nil {
+		return err
+	}
+	if baseSequence != 0 {
+		fmt.Fprintf(a.out, "Built from acknowledged checkpoint %d.\n", baseSequence)
+	}
+	if err := fprintWrapped(a.out,
+		"Not acknowledged yet; 'dud sync %s' collects the acknowledgement.",
+		opts.Alias); err != nil {
+		return err
+	}
+	if len(refused) != 0 {
+		fmt.Fprintf(a.out, "%d earlier checkpoint(s) were refused by %s; see dud git status %s.\n", len(refused), opts.Alias, opts.Alias)
+	}
+	return v2GitStatusReport(opts.Verbose, status, quarantined, rejected).write(a.out)
 }
 
 func (a *app) validateV2GitMetadata(repository *v2GitRepository, metadata *v2GitMetadata) error {
@@ -1070,6 +1557,102 @@ func (a *app) validateV2GitMetadata(repository *v2GitRepository, metadata *v2Git
 	for ref := range metadata.Refs {
 		if err := a.validateV2GitRef(repository, ref); err != nil {
 			return err
+		}
+	}
+	if !metadata.PrerequisitesValid {
+		return errors.New("Git checkpoint prerequisites are malformed")
+	}
+	if metadata.BaseSequencePresent && !metadata.BaseSequenceValid {
+		return errors.New("Git checkpoint base sequence is malformed")
+	}
+	if len(metadata.Prerequisites) == 0 && metadata.BaseSequence != 0 {
+		return errors.New("complete Git checkpoint carries a base sequence")
+	}
+	if len(metadata.Prerequisites) != 0 && metadata.BaseSequence == 0 {
+		return errors.New("incremental Git checkpoint omits its base sequence")
+	}
+	for index, oid := range metadata.Prerequisites {
+		if len(oid) != repository.ObjectHexLen/2 {
+			return errors.New("Git checkpoint prerequisite has an object ID of the wrong length")
+		}
+		if index != 0 && bytes.Compare(metadata.Prerequisites[index-1], oid) >= 0 {
+			return errors.New("Git checkpoint prerequisites must be sorted and unique")
+		}
+	}
+	return nil
+}
+
+func expectedV2GitPrerequisites(baseRefs map[string]string, incoming map[string][]byte, objectBytes int) ([][]byte, error) {
+	unique := map[string][]byte{}
+	for name := range incoming {
+		if !strings.HasPrefix(name, "refs/heads/") {
+			continue
+		}
+		value, exists := baseRefs[name]
+		if !exists {
+			continue
+		}
+		oid, err := hex.DecodeString(value)
+		if err != nil || len(oid) != objectBytes {
+			return nil, fmt.Errorf("authenticated base ref %s has an invalid object ID", name)
+		}
+		unique[value] = oid
+	}
+	values := make([]string, 0, len(unique))
+	for value := range unique {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	result := make([][]byte, 0, len(values))
+	for _, value := range values {
+		result = append(result, unique[value])
+	}
+	return result, nil
+}
+
+func (a *app) validateV2GitIncrementalBase(repository *v2GitRepository, state *v2GitPeerState, metadata *v2GitMetadata, incomingSequence uint64) error {
+	if len(metadata.Prerequisites) == 0 {
+		return nil
+	}
+	var base *v2GitInboundState
+	for digest, candidate := range state.Inbound {
+		if candidate.Sequence != metadata.BaseSequence {
+			continue
+		}
+		if base != nil {
+			return rejectV2Git(errors.New("incremental Git base sequence is ambiguous"))
+		}
+		copy := candidate
+		copy.DescriptorDigest = digest
+		base = &copy
+	}
+	if base == nil || base.Sequence >= incomingSequence || base.Phase != "output-committed" {
+		return requireFullV2GitCheckpoint(errors.New("incremental Git base checkpoint is unavailable"))
+	}
+	if _, err := byteGitRefs(base.Refs, repository.ObjectHexLen/2); err != nil {
+		return rejectV2Git(fmt.Errorf("incremental Git base checkpoint is invalid: %w", err))
+	}
+	expected, err := expectedV2GitPrerequisites(base.Refs, metadata.Refs, repository.ObjectHexLen/2)
+	if err != nil {
+		return rejectV2Git(err)
+	}
+	if !equalV2GitPrerequisites(expected, metadata.Prerequisites) {
+		return rejectV2Git(errors.New("incremental Git prerequisites do not match the authenticated base checkpoint"))
+	}
+	objectIDs := make([]string, len(metadata.Prerequisites))
+	for index, oid := range metadata.Prerequisites {
+		objectIDs[index] = hex.EncodeToString(oid)
+	}
+	objectTypes, err := a.v2GitBatchObjectTypes(repository, objectIDs)
+	if err != nil {
+		return err
+	}
+	for _, objectType := range objectTypes {
+		if objectType == "missing" {
+			return requireFullV2GitCheckpoint(errors.New("incremental Git prerequisite commit is unavailable"))
+		}
+		if objectType != "commit" {
+			return rejectV2Git(errors.New("incremental Git prerequisite is not a commit"))
 		}
 	}
 	return nil
@@ -1135,6 +1718,51 @@ func (a *app) verifyV2GitPackLimits(ctx context.Context, repository *v2GitReposi
 	return nil
 }
 
+// requireV2GitRefObjects checks that every signed advertised ref tip resolves to
+// the required object type, either in the received pack or by direct object-ID
+// lookup through the read-only alternate. Git reports an unresolvable tip as
+// data on a successful exit, so an exhausted wall-time or memory budget stays a
+// retryable error instead of becoming a signed refusal that resending the same
+// checkpoint could never satisfy. One batch also keeps the work of the whole
+// check inside a single subprocess and a single share of the wall-time budget.
+func (a *app) requireV2GitRefObjects(ctx context.Context, repository *v2GitRepository, scratch string, extraEnv []string, refs map[string][]byte) error {
+	names := sortedV2GitRefNames(refs)
+	var query strings.Builder
+	for _, name := range names {
+		// A branch tip must be a commit. A tag may name any object type, so it
+		// only has to exist.
+		peel := "^{object}"
+		if strings.HasPrefix(name, "refs/heads/") {
+			peel = "^{commit}"
+		}
+		query.WriteString(hex.EncodeToString(refs[name]))
+		query.WriteString(peel)
+		query.WriteByte('\n')
+	}
+	output, err := a.runV2GitWithEnv(ctx, repository, extraEnv, []byte(query.String()),
+		"-C", scratch, "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != len(names) {
+		return errors.New("Git returned the wrong number of ref object results")
+	}
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return errors.New("Git returned an invalid ref object result")
+		}
+		if fields[1] == "missing" {
+			return rejectV2Git(fmt.Errorf("Git checkpoint ref %s does not resolve to the required object type", names[index]))
+		}
+		if len(fields[0]) != repository.ObjectHexLen {
+			return errors.New("Git returned an invalid ref object result")
+		}
+	}
+	return nil
+}
+
 func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, digest string, metadata *v2GitMetadata) (string, error) {
 	info, err := os.Lstat(bundlePath)
 	if err != nil {
@@ -1151,12 +1779,11 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 	if available < required {
 		return "", fmt.Errorf("Git quarantine requires %d free bytes but only %d are available", required, available)
 	}
-	version, refs, prerequisites, err := parseV2GitBundleHeader(bundlePath, repository.ObjectHexLen/2)
+	version, refs, prerequisites, packOffset, err := parseV2GitBundleHeaderWithOffset(bundlePath, repository.ObjectHexLen/2)
 	if err != nil {
 		return "", err
 	}
-	if version != metadata.BundleVersion || len(prerequisites) != 0 ||
-		!equalV2GitRefs(refs, metadata.Refs) {
+	if version != metadata.BundleVersion || !equalV2GitPrerequisites(prerequisites, metadata.Prerequisites) || !equalV2GitRefs(refs, metadata.Refs) {
 		return "", rejectV2Git(errors.New("Git bundle header does not match the signed encrypted metadata"))
 	}
 	scratch := filepath.Join(repository.DUDDir, "quarantine", digest)
@@ -1175,17 +1802,56 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 	if _, err := a.runV2Git(ctx, repository, nil, "init", "--bare", "--object-format="+objectFormat, scratch); err != nil {
 		return "", err
 	}
+	if len(metadata.Prerequisites) != 0 {
+		infoDirectory := filepath.Join(scratch, "objects", "info")
+		if err := os.MkdirAll(infoDirectory, 0o700); err != nil {
+			return "", err
+		}
+		if err := atomicWriteV2File(filepath.Join(infoDirectory, "alternates"), []byte(filepath.Join(repository.CommonDir, "objects")+"\n"), 0o600); err != nil {
+			return "", err
+		}
+	}
 	cleanup := true
 	defer func() {
 		if cleanup {
 			_ = os.RemoveAll(scratch)
 		}
 	}()
-	if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "bundle", "verify", bundlePath); err != nil {
-		return "", err
-	}
-	if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "bundle", "unbundle", bundlePath); err != nil {
-		return "", err
+	alternateEnv := []string{"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + filepath.Join(repository.CommonDir, "objects")}
+	if len(metadata.Prerequisites) == 0 {
+		if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "bundle", "verify", bundlePath); err != nil {
+			return "", err
+		}
+		if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "bundle", "unbundle", bundlePath); err != nil {
+			return "", err
+		}
+	} else {
+		file, err := os.Open(bundlePath)
+		if err != nil {
+			return "", err
+		}
+		if _, err := file.Seek(packOffset, io.SeekStart); err != nil {
+			_ = file.Close()
+			return "", err
+		}
+		pack, err := io.ReadAll(io.LimitReader(file, info.Size()-packOffset+1))
+		closeErr := file.Close()
+		if err != nil {
+			return "", err
+		}
+		if closeErr != nil {
+			return "", closeErr
+		}
+		if int64(len(pack)) != info.Size()-packOffset {
+			return "", errors.New("Git bundle pack section is truncated")
+		}
+		if _, err := a.runV2GitWithEnv(ctx, repository, alternateEnv, pack,
+			"-C", scratch, "index-pack", "--stdin", "--strict"); err != nil {
+			return "", err
+		}
+		if err := a.requireV2GitRefObjects(ctx, repository, scratch, alternateEnv, metadata.Refs); err != nil {
+			return "", err
+		}
 	}
 	var transaction strings.Builder
 	transaction.WriteString("start\n")
@@ -1198,11 +1864,13 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 		fmt.Fprintf(&transaction, "update %s %s\n", name, hex.EncodeToString(metadata.Refs[name]))
 	}
 	transaction.WriteString("prepare\ncommit\n")
-	if _, err := a.runV2Git(ctx, repository, []byte(transaction.String()), "-C", scratch, "update-ref", "--stdin"); err != nil {
+	if _, err := a.runV2GitWithEnv(ctx, repository, alternateEnv, []byte(transaction.String()), "-C", scratch, "update-ref", "--stdin"); err != nil {
 		return "", err
 	}
-	if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "fsck", "--strict", "--full", "--no-reflogs"); err != nil {
-		return "", err
+	if len(metadata.Prerequisites) == 0 {
+		if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "fsck", "--strict", "--full", "--no-reflogs"); err != nil {
+			return "", err
+		}
 	}
 	// verify-pack covers every object in received packs, including valid dangling
 	// objects unreachable from advertised refs.
@@ -1358,13 +2026,13 @@ func (a *app) promoteV2GitQuarantine(repository *v2GitRepository, state *v2GitPe
 		}
 	}
 	importPrefix := "refs/dud/import/" + digest
-	fetchArgs := []string{"fetch", "--no-tags", "--no-write-fetch-head", scratch}
+	fetchArgs := []string{"fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", scratch}
 	for _, name := range names {
 		target := importPrefix + "/" + strings.TrimPrefix(name, "refs/")
 		fetchArgs = append(fetchArgs, "+"+name+":"+target)
 	}
-	if _, err := a.runV2Git(ctx, repository, nil, fetchArgs...); err != nil {
-		return nil, err
+	if _, fetchErr := a.runV2Git(ctx, repository, nil, fetchArgs...); fetchErr != nil {
+		return nil, fetchErr
 	}
 	defer func() {
 		for _, name := range names {
@@ -1455,8 +2123,13 @@ func decodeV2GitResultMetadata(value any) ([]byte, map[string][]byte, [][]byte, 
 	if err := v2DecMode.Unmarshal(raw[2], &refs); err != nil {
 		return nil, nil, nil, errors.New("Git acknowledgement refs are invalid")
 	}
-	if err := v2DecMode.Unmarshal(raw[3], &prerequisites); err != nil || len(prerequisites) != 0 {
+	if err := v2DecMode.Unmarshal(raw[3], &prerequisites); err != nil {
 		return nil, nil, nil, errors.New("Git acknowledgement prerequisites are invalid")
+	}
+	for index, oid := range prerequisites {
+		if index != 0 && bytes.Compare(prerequisites[index-1], oid) >= 0 {
+			return nil, nil, nil, errors.New("Git acknowledgement prerequisites are invalid")
+		}
 	}
 	return repositoryID, refs, prerequisites, nil
 }
@@ -1466,10 +2139,25 @@ func reconcileV2GitAcknowledgements(runtime *v2PeerRuntime, repository *v2GitRep
 	if err != nil {
 		return err
 	}
+	type sentEntry struct {
+		digest string
+		sent   v2SentDelivery
+	}
+	entries := make([]sentEntry, 0, len(runtime.state.Sent))
 	for digest, sent := range runtime.state.Sent {
 		if sent.PayloadType != 4 {
 			continue
 		}
+		entries = append(entries, sentEntry{digest: digest, sent: sent})
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		if entries[left].sent.Sequence == entries[right].sent.Sequence {
+			return entries[left].digest < entries[right].digest
+		}
+		return entries[left].sent.Sequence < entries[right].sent.Sequence
+	})
+	for _, entry := range entries {
+		digest, sent := entry.digest, entry.sent
 		outbound, exists := state.Outbound[digest]
 		if !exists {
 			metadataBytes, err := decodeV2Base64URL(sent.TypeMetadata, -1)
@@ -1492,13 +2180,20 @@ func reconcileV2GitAcknowledgements(runtime *v2PeerRuntime, repository *v2GitRep
 			}
 			outbound = v2GitOutboundState{
 				Sequence: sent.Sequence, DescriptorDigest: digest,
-				Refs: stringGitRefs(metadata.Refs), Prerequisites: []string{},
+				Refs: stringGitRefs(metadata.Refs), Prerequisites: stringGitPrerequisites(metadata.Prerequisites),
+				BaseSequence: metadata.BaseSequence,
 			}
+		}
+		if len(outbound.Prerequisites) == 0 && state.LastFullCheckpointSequence < sent.Sequence {
+			state.LastFullCheckpointSequence = sent.Sequence
 		}
 		if sent.Rejected && !outbound.Rejected {
 			outbound.Rejected = true
 			outbound.RejectedAt = sent.RejectedAt
 			appendV2GitHistory(state, "outbound", sent.Sequence, digest, "rejected")
+		}
+		if sent.FullCheckpointRequired {
+			outbound.FullCheckpointRequired = true
 		}
 		if sent.Acknowledged && !outbound.Acknowledged {
 			resultBytes, err := decodeV2Base64URL(sent.ResultMetadata, -1)
@@ -1509,7 +2204,7 @@ func reconcileV2GitAcknowledgements(runtime *v2PeerRuntime, repository *v2GitRep
 			if err := v2DecMode.Unmarshal(resultBytes, &result); err != nil {
 				return err
 			}
-			ackedRepositoryID, fetchedRefs, _, err := decodeV2GitResultMetadata(result)
+			ackedRepositoryID, fetchedRefs, fetchedPrerequisites, err := decodeV2GitResultMetadata(result)
 			if err != nil {
 				return err
 			}
@@ -1520,10 +2215,23 @@ func reconcileV2GitAcknowledgements(runtime *v2PeerRuntime, repository *v2GitRep
 			if err != nil || !equalV2GitRefs(expectedRefs, fetchedRefs) {
 				return errors.New("Git acknowledgement fetched refs do not match the sent checkpoint")
 			}
+			expectedPrerequisites := make([][]byte, 0, len(outbound.Prerequisites))
+			for _, value := range outbound.Prerequisites {
+				oid, decodeErr := hex.DecodeString(value)
+				if decodeErr != nil || len(oid) != repository.ObjectHexLen/2 {
+					return errors.New("stored Git prerequisite has an invalid object ID")
+				}
+				expectedPrerequisites = append(expectedPrerequisites, oid)
+			}
+			if !equalV2GitPrerequisites(expectedPrerequisites, fetchedPrerequisites) {
+				return errors.New("Git acknowledgement prerequisites do not match the sent checkpoint")
+			}
 			outbound.Acknowledged = true
 			outbound.AcknowledgedAt = sent.AcknowledgedAt
-			state.LastAcknowledgedSentSequence = sent.Sequence
-			state.LastAcknowledgedRefs = stringGitRefs(fetchedRefs)
+			if sent.Sequence > state.LastAcknowledgedSentSequence {
+				state.LastAcknowledgedSentSequence = sent.Sequence
+				state.LastAcknowledgedRefs = stringGitRefs(fetchedRefs)
+			}
 			appendV2GitHistory(state, "outbound", sent.Sequence, digest, "acknowledged")
 		}
 		state.Outbound[digest] = outbound
@@ -1609,7 +2317,7 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return false, err
 	}
-	if err := runtime.queueV2GranularRejection(envelope, delivery.ID, delivery.Slot, sourceSlotEpoch, policyDigest); err != nil {
+	if err := runtime.queueV2GranularRejection(envelope, delivery.ID, delivery.Slot, sourceSlotEpoch, policyDigest, isFullV2GitCheckpointRequired(cause)); err != nil {
 		return false, err
 	}
 	dataChain := runtime.state.Chains["in:data"]
@@ -1632,13 +2340,18 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 		return true, writeJSON(a.out, status.merge(map[string]any{
 			"peer": opts.Alias, "received": false, "rejected": true,
 			"sequence": sequence, "descriptor_digest": digest,
-			"reason":          cause.Error(),
-			"acknowledgement": len(runtime.state.PendingCompletions) == 0,
+			"reason":                   cause.Error(),
+			"full_checkpoint_required": isFullV2GitCheckpointRequired(cause),
+			"acknowledgement":          len(runtime.state.PendingCompletions) == 0,
 		}))
 	}
 	fmt.Fprintf(a.out, "Refused Git checkpoint %d: %v\n", sequence, cause)
 	fmt.Fprintln(a.out, "The peer was told the checkpoint was refused, and the chain advanced past it.")
-	fmt.Fprintln(a.out, "No refs were changed. Ask the peer to push a checkpoint this client can apply.")
+	if isFullV2GitCheckpointRequired(cause) {
+		fmt.Fprintln(a.out, "No refs were changed. The peer was asked to send a complete Git checkpoint.")
+	} else {
+		fmt.Fprintln(a.out, "No refs were changed. Ask the peer to push a checkpoint this client can apply.")
+	}
 	return true, nil
 }
 
@@ -1694,9 +2407,6 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	}
 	metadata, err := decodeV2GitMetadata(envelope.Descriptor[kTypeMetadata])
 	if err != nil {
-		return reject(err)
-	}
-	if err := requireCompleteV2GitCheckpoint(metadata); err != nil {
 		return reject(err)
 	}
 	if err := a.validateV2GitMetadata(repository, metadata); err != nil {
@@ -1766,7 +2476,7 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	if err != nil {
 		return false, err
 	}
-	if headerVersion != metadata.BundleVersion || len(headerPrerequisites) != 0 ||
+	if headerVersion != metadata.BundleVersion || !equalV2GitPrerequisites(headerPrerequisites, metadata.Prerequisites) ||
 		!equalV2GitRefs(headerRefs, metadata.Refs) {
 		return reject(errors.New("Git bundle header does not match the signed encrypted metadata"))
 	}
@@ -1802,12 +2512,16 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	if err != nil {
 		return false, err
 	}
+	if err := a.validateV2GitIncrementalBase(repository, state, metadata, sequence); err != nil {
+		return reject(err)
+	}
 	inbound := state.Inbound[digest]
 	if inbound.Phase != "output-committed" {
 		if inbound.Phase == "" {
 			inbound = v2GitInboundState{
 				Sequence: sequence, DescriptorDigest: digest, Phase: "payload-verified",
-				BundlePath: bundlePath, Refs: stringGitRefs(metadata.Refs), Prerequisites: []string{},
+				BundlePath: bundlePath, Refs: stringGitRefs(metadata.Refs),
+				Prerequisites: stringGitPrerequisites(metadata.Prerequisites), BaseSequence: metadata.BaseSequence,
 			}
 			state.Inbound[digest] = inbound
 			appendV2GitHistory(state, "inbound", sequence, digest, "payload-verified")
@@ -1906,15 +2620,20 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	status := v2DeliveryStatusOf(runtime.state)
 	quarantined := quarantinedV2GitDeliveries(state)
 	if opts.JSON {
-		return true, writeJSON(a.out, status.merge(map[string]any{
+		result := status.merge(map[string]any{
 			"peer": opts.Alias, "received": true, "repository_id": hex.EncodeToString(repositoryID),
 			"sequence": sequence, "descriptor_digest": digest,
 			"remote": remote, "refs": stringGitRefs(fetchedRefs),
+			"checkpoint_mode":            checkpointModeV2Git(metadata),
 			"acknowledgement":            len(runtime.state.PendingCompletions) == 0,
 			"quarantined_git_deliveries": quarantined,
-		}))
+		})
+		if metadata.BaseSequence != 0 {
+			result["base_sequence"] = metadata.BaseSequence
+		}
+		return true, writeJSON(a.out, result)
 	}
-	fmt.Fprintf(a.out, "Fetched complete Git checkpoint into refs/remotes/%s/*.\n", remote)
+	fmt.Fprintf(a.out, "Fetched %s Git checkpoint into refs/remotes/%s/*.\n", checkpointLabelV2Git(checkpointModeV2Git(metadata)), remote)
 	if err := v2GitStatusReport(opts.Verbose, status, quarantined, rejectedV2GitDeliveries(runtime.state)).write(a.out); err != nil {
 		return false, err
 	}
@@ -2045,20 +2764,22 @@ func (a *app) v2GitStatusForPeer(repository *v2GitRepository, repositoryID []byt
 		}
 		rendered = v2DeliveryStatusOf(runtime.state).merge(map[string]any{
 			"peer": alias, "remote": remote,
-			"repository_id":                   state.RepositoryID,
-			"quarantined_git_deliveries":      quarantinedV2GitDeliveries(state),
-			"rejected_git_deliveries":         rejectedV2GitDeliveries(runtime.state),
-			"refused_git_checkpoints":         refusedV2GitCheckpoints(state),
-			"peer_features":                   runtime.state.PeerFeatures,
-			"last_received_sequence":          state.LastReceivedSequence,
-			"last_received_descriptor_digest": state.LastReceivedDescriptorDigest,
-			"last_received_delivery_id":       state.LastReceivedDeliveryID,
-			"last_received_refs":              state.LastReceivedRefs,
-			"last_acknowledged_sent_sequence": state.LastAcknowledgedSentSequence,
-			"last_acknowledged_refs":          state.LastAcknowledgedRefs,
-			"last_full_checkpoint_sequence":   state.LastFullCheckpointSequence,
-			"pending_outbound":                countPendingV2GitOutbound(state),
-			"divergence":                      a.v2GitDivergence(repository, remote, state.LastReceivedRefs),
+			"repository_id":                      state.RepositoryID,
+			"quarantined_git_deliveries":         quarantinedV2GitDeliveries(state),
+			"rejected_git_deliveries":            rejectedV2GitDeliveries(runtime.state),
+			"refused_git_checkpoints":            refusedV2GitCheckpoints(state),
+			"peer_features":                      runtime.state.PeerFeatures,
+			"last_received_sequence":             state.LastReceivedSequence,
+			"last_received_descriptor_digest":    state.LastReceivedDescriptorDigest,
+			"last_received_delivery_id":          state.LastReceivedDeliveryID,
+			"last_received_refs":                 state.LastReceivedRefs,
+			"last_acknowledged_sent_sequence":    state.LastAcknowledgedSentSequence,
+			"last_acknowledged_refs":             state.LastAcknowledgedRefs,
+			"last_full_checkpoint_sequence":      state.LastFullCheckpointSequence,
+			"incremental_checkpoints_since_full": incrementalCheckpointCountV2Git(state),
+			"full_checkpoint_required":           fullCheckpointRequiredV2Git(state),
+			"pending_outbound":                   countPendingV2GitOutbound(state),
+			"divergence":                         a.v2GitDivergence(repository, remote, state.LastReceivedRefs),
 		})
 		return nil
 	})
@@ -2143,9 +2864,10 @@ func refusedV2GitCheckpoints(state *v2GitPeerState) []map[string]any {
 	refused := make([]map[string]any, 0, len(digests))
 	for _, digest := range digests {
 		refused = append(refused, map[string]any{
-			"descriptor_digest": digest,
-			"sequence":          state.Outbound[digest].Sequence,
-			"rejected_at":       state.Outbound[digest].RejectedAt,
+			"descriptor_digest":        digest,
+			"sequence":                 state.Outbound[digest].Sequence,
+			"rejected_at":              state.Outbound[digest].RejectedAt,
+			"full_checkpoint_required": state.Outbound[digest].FullCheckpointRequired,
 		})
 	}
 	return refused
@@ -2196,7 +2918,7 @@ func (a *app) cmdV2GitStatus(args []string) error {
 			args = args[1:]
 		}
 	}
-	repository, err := a.resolveV2GitRepository("status")
+	repository, err := a.resolveV2GitReportingRepository("status")
 	if err != nil {
 		return err
 	}
@@ -2242,6 +2964,8 @@ func (a *app) cmdV2GitStatus(args []string) error {
 		section.addf("remote", "%v", status["remote"])
 		section.addf("received sequence", "%v", status["last_received_sequence"])
 		section.addf("acknowledged sent sequence", "%v", status["last_acknowledged_sent_sequence"])
+		section.addf("incremental checkpoints since full", "%v", status["incremental_checkpoints_since_full"])
+		section.addf("complete checkpoint required", "%v", status["full_checkpoint_required"])
 		section.addf("pending outbound", "%v", status["pending_outbound"])
 		section.addf("queued completions", "%v", status["pending_completions"])
 		section.addf("undrained control", "%v", status["undrained_control"])

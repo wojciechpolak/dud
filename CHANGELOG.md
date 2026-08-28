@@ -10,6 +10,9 @@ and this project follows
 
 ### Added
 
+- Add incremental peer Git synchronization with explicit selection, automatic
+  complete-checkpoint recovery, bounded pack validation, and a complete
+  checkpoint after every 16 persisted incrementals.
 - Install the client with Homebrew on macOS and Linux:
   `brew install wojciechpolak/dud/dud`. The formula builds from the release tag
   with the flags release binaries use, and installs `age`, `git`, and `qrencode`

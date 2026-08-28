@@ -301,6 +301,6 @@ test('a V2 service without a legacy store still answers every granular route', a
   assert.equal(capabilities.status, 200);
   assert.deepEqual(
     (await decodeResponse(capabilities)).get(2),
-    [2, 3, 5, 9, 10, 11],
+    [2, 3, 5, 6, 9, 10, 11],
   );
 });

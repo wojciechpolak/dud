@@ -539,7 +539,7 @@ func (transport *stubV2Transport) Do(_ context.Context, request v2Request) (*v2R
 	}
 	body, err := v2EncMode.Marshal(map[int]any{
 		1: []uint64{1, 2},
-		2: []uint64{2, 3, 5, 9, 10, 11},
+		2: []uint64{2, 3, 5, 6, 9, 10, 11},
 		3: map[uint64]uint64{
 			1: 104857600,
 			2: 262144,

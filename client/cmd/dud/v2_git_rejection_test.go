@@ -148,7 +148,7 @@ func TestV2GitRefusalIsDurableBeforeItIsSent(t *testing.T) {
 	if result["received"] != false || result["rejected"] != true || result["sequence"] != float64(1) {
 		t.Fatalf("refusal result = %#v", result)
 	}
-	if reason, _ := result["reason"].(string); !strings.Contains(reason, "prerequisites") {
+	if reason, _ := result["reason"].(string); !strings.Contains(reason, "base sequence") {
 		t.Fatalf("refusal reason = %#v", result["reason"])
 	}
 
@@ -308,7 +308,7 @@ func TestV2TypeMetadataFollowsTheDescriptorExtensionRule(t *testing.T) {
 	}
 
 	if _, err := decodeV2GitMetadata(clone(func(metadata map[int]any) {
-		metadata[kPeerFeatures] = []any{uint64(5)}
+		metadata[129] = []any{uint64(5)}
 	})); err != nil {
 		t.Fatalf("extension key was refused: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestV2PeerFeaturesAreAdvertisedAndParsed(t *testing.T) {
 			"out:data": {}, "out:control": {}, "in:data": {}, "in:control": {},
 		},
 	}}
-	metadata := runtime.acknowledgementMetadata(1, bytes.Repeat([]byte{0x01}, 32), make([]byte, 32), 1, nil)
+	metadata := runtime.acknowledgementMetadata(1, bytes.Repeat([]byte{0x01}, 32), make([]byte, 32), 1, nil, nil)
 	if metadata[3] != uint64(1) {
 		t.Fatalf("acknowledgement result = %#v, want 1", metadata[3])
 	}
@@ -356,18 +356,20 @@ func TestV2PeerFeaturesAreAdvertisedAndParsed(t *testing.T) {
 			t.Fatalf("advertised features = %#v, want %#v", features, v2LocalPeerFeatures)
 		}
 	}
-	// Feature 6 is git-incremental. Advertising it would say this client can
-	// apply an incremental checkpoint, which it cannot.
-	for _, id := range features {
-		if id == 6 {
-			t.Fatal("2.0 advertised git-incremental to its peer")
-		}
+	if len(features) != 2 || features[0] != 5 || features[1] != 6 {
+		t.Fatalf("incremental peer features = %#v", features)
 	}
 	if v2MetadataFeatures(map[int]any{1: uint64(1)}) != nil {
 		t.Fatal("absent feature list produced features")
 	}
 	if v2MetadataFeatures(map[int]any{kPeerFeatures: []any{"five"}}) != nil {
 		t.Fatal("malformed feature list produced features")
+	}
+	if v2MetadataFeatures(map[int]any{kPeerFeatures: []any{uint64(6), uint64(5)}}) != nil {
+		t.Fatal("unsorted feature list produced features")
+	}
+	if v2MetadataFeatures(map[int]any{kPeerFeatures: []any{uint64(5), uint64(5)}}) != nil {
+		t.Fatal("duplicate feature list produced features")
 	}
 }
 
