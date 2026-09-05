@@ -14,6 +14,7 @@ SERVER="$RUN_ID-server"
 CADDY="$RUN_ID-caddy"
 DOH="$RUN_ID-doh"
 INVITER="$RUN_ID-inviter"
+CHUNK_SENDER="$RUN_ID-chunk-sender"
 TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/dud-v2-e2e.XXXXXX")
 DESKTOP_STATE="$TEMP_ROOT/desktop"
 LAPTOP_STATE="$TEMP_ROOT/laptop"
@@ -32,7 +33,7 @@ DROP_SECRET=v2-e2e-drop-secret
 E2E_SUBNET=${DUD_E2E_SUBNET:-11.254.0.0/24}
 
 cleanup() {
-  docker rm -f "$INVITER" "$DOH" "$CADDY" "$SERVER" >/dev/null 2>&1 || true
+  docker rm -f "$CHUNK_SENDER" "$INVITER" "$DOH" "$CADDY" "$SERVER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
 
   # Caddy owns its private PKI directory, so restore the invoking user's
@@ -285,6 +286,54 @@ state_file_matches "$DESKTOP_STATE" /state/received/send-file.txt '^file-payload
 run_client "$LAPTOP_STATE" send desktop --file /state/send-file.txt
 run_client "$DESKTOP_STATE" receive laptop --wait 30s --out-dir /state/received
 
+# Kill a chunked send after its first durable part checkpoint. The next process
+# must retain that checkpoint, upload only the missing chunks, commit the
+# delivery, and leave the receiver with one atomic output equal to the source.
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$LAPTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'dd if=/dev/zero of=/state/resume-large.bin bs=1048576 count=48 2>/dev/null && printf x >> /state/resume-large.bin'
+docker run -d --name "$CHUNK_SENDER" --network "$NETWORK" \
+  --add-host "dud.local.test:$CADDY_IP" \
+  --add-host "doh.local.test:$CADDY_IP" \
+  -e DUD_HOME=/state/dud \
+  -e DUD_CA_BUNDLE=/cert/root.crt \
+  -v "$LAPTOP_STATE:/state" \
+  -v "$ROOT_CERT:/cert/root.crt:ro" \
+  "$CLIENT_IMAGE" send desktop --file /state/resume-large.bin >/dev/null
+
+attempt=0
+while ! docker logs "$CHUNK_SENDER" 2>&1 | grep -q '^Uploaded chunk 1/4 '; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 200 ]; then
+    docker logs "$CHUNK_SENDER" >&2 || true
+    echo "large peer send did not checkpoint its first chunk" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+docker kill "$CHUNK_SENDER" >/dev/null
+docker wait "$CHUNK_SENDER" >/dev/null
+
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$LAPTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'grep -q '"'"'"uploaded"[[:space:]]*:[[:space:]]*true'"'"' /state/dud/default/state/deliveries/*.json &&
+   grep -q '"'"'"uploaded"[[:space:]]*:[[:space:]]*false'"'"' /state/dud/default/state/deliveries/*.json' || {
+  docker logs "$CHUNK_SENDER" >&2 || true
+  echo "interrupted peer send did not retain mixed chunk progress" >&2
+  exit 1
+}
+docker rm "$CHUNK_SENDER" >/dev/null
+
+run_client "$LAPTOP_STATE" sync desktop
+run_client "$DESKTOP_STATE" receive laptop --wait 30s --out-dir /state/received
+docker run --rm --user 1000 --entrypoint /usr/bin/cmp \
+  -v "$LAPTOP_STATE:/laptop:ro" \
+  -v "$DESKTOP_STATE:/desktop:ro" \
+  "$CLIENT_IMAGE" /laptop/resume-large.bin /desktop/received/resume-large.bin || {
+  echo "resumed large peer transfer did not round-trip exactly" >&2
+  exit 1
+}
+
 # Two sends, then one receive. Draining the whole queue in a single invocation
 # is the behaviour operators actually depend on, and it cannot be observed from
 # the one-delivery-at-a-time path the checks above take.
@@ -496,4 +545,4 @@ if docker run --rm --entrypoint /bin/sh "$CLIENT_IMAGE" -c \
   exit 1
 fi
 
-echo "V2 Docker pairing, bidirectional delivery, incremental Git, shallow-repository rejection, and dead drop transport passed."
+echo "V2 Docker pairing, resumable delivery, incremental Git, shallow-repository rejection, and dead drop transport passed."

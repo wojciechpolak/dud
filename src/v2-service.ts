@@ -18,7 +18,7 @@ import {
 import { createV2PairingHandlers } from './v2-pairing.js';
 import type { V2PairingRepository } from './v2-d1-pairing-repository.js';
 import { createV2ReissueHandler } from './v2-reissue.js';
-import { V2_SERVER_FEATURES } from './v2-contract.js';
+import { V2_CHUNK_LIMITS, V2_SERVER_FEATURES } from './v2-contract.js';
 import {
   createV2DeliveryHandler,
   type V2RejectionObserver,
@@ -223,6 +223,10 @@ function v2Capabilities(
     [7, limits.maxRequestsPerMinute],
     [8, limits.maxStagedBytes],
     [9, limits.maxPairingEnvelopeBytes],
+    [10, V2_CHUNK_LIMITS.maxChunkCiphertextBytes],
+    [11, V2_CHUNK_LIMITS.maxChunksPerDelivery],
+    [12, V2_CHUNK_LIMITS.maxChunkedPlaintextBytes],
+    [13, V2_CHUNK_LIMITS.maxUploadLeaseSeconds],
   ]);
   return v2CborResponse(
     new Map<number, CborValue>([

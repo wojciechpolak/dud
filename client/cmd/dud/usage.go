@@ -36,6 +36,7 @@ Peer commands (addressed by the local alias of a paired device):
   dud peer show NAME [--json]
   dud peer rename OLD NEW [--json]
   dud peer resume NAME [--yes] [--json]
+  dud peer abandon NAME --id DIGEST --yes [--json]
   dud peer revoke NAME --yes [--json]
   dud peer remove NAME --yes [--json]
   dud peer enrollment-key [--json]

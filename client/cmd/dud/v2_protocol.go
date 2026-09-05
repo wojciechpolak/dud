@@ -25,12 +25,16 @@ import (
 )
 
 const (
-	v2ProtocolVersion     = 2
-	v2KEMAlgorithm        = 1
-	v2SignatureAlgorithm  = 1
-	v2MaxDescriptorBytes  = 262144
-	v2MaxTextOrBytes      = 65536
-	v2DescriptorSigPrefix = "dud/v2/descriptor\x00"
+	v2ProtocolVersion               = 2
+	v2KEMAlgorithm                  = 1
+	v2SignatureAlgorithm            = 1
+	v2MaxDescriptorBytes            = 262144
+	v2MaxTextOrBytes                = 65536
+	v2DescriptorSigPrefix           = "dud/v2/descriptor\x00"
+	v2MaximumChunkCount             = 1024
+	v2MaximumChunkedBytes           = 1024 * 1024 * 1024
+	v2MaximumChunkCiphertextBytes   = 16782955
+	v2MaximumChunkedCiphertextBytes = 1075686400
 )
 
 const (
@@ -151,6 +155,8 @@ type v2Descriptor struct {
 	TransportPolicy   v2TransportPolicy
 	PayloadHash       []byte
 	ChunkHashes       [][]byte
+	ChunkSize         *uint64
+	ChunkIDs          [][]byte
 	DisplayName       string
 	ArchiveFormat     *uint64
 	PlaintextSize     *uint64
@@ -348,6 +354,12 @@ func descriptorMap(desc v2Descriptor, signingKey ed25519.PrivateKey) (map[int]an
 	if desc.TypeMetadata != nil {
 		result[kTypeMetadata] = desc.TypeMetadata
 	}
+	if desc.ChunkSize != nil {
+		result[kChunkSize] = *desc.ChunkSize
+	}
+	if desc.ChunkIDs != nil {
+		result[kChunkIDs] = cloneByteSlices(desc.ChunkIDs)
+	}
 	if err := validateV2DescriptorMap(result); err != nil {
 		return nil, err
 	}
@@ -509,8 +521,8 @@ func validateV2DescriptorMap(desc map[int]any) error {
 	}
 	for key := range desc {
 		switch {
-		case key >= 0 && key <= kTypeMetadata:
-		case key == kChunkSize || key == kChunkIDs || key == kIncrementalBase:
+		case key >= 0 && key <= kChunkIDs:
+		case key == kIncrementalBase:
 			return fmt.Errorf("descriptor uses deferred core key %d, unsupported in DUD 2.0", key)
 		case key < 128:
 			return fmt.Errorf("descriptor contains unknown core key %d", key)
@@ -603,12 +615,50 @@ func validateV2DescriptorMap(desc map[int]any) error {
 			return errors.New("descriptor chunk_hashes must be an array")
 		}
 	}
-	if len(chunks) != 1 {
-		return errors.New("DUD 2.0 descriptors must contain exactly one chunk hash")
+	for _, rawHash := range chunks {
+		hash, valid := rawHash.([]byte)
+		if !valid || len(hash) != 32 {
+			return errors.New("descriptor chunk hash must be exactly 32 bytes")
+		}
 	}
-	hash, ok := chunks[0].([]byte)
-	if !ok || len(hash) != 32 {
-		return errors.New("descriptor chunk hash must be exactly 32 bytes")
+	chunkSizeRaw, hasChunkSize := desc[kChunkSize]
+	chunkIDsRaw, hasChunkIDs := desc[kChunkIDs]
+	if hasChunkSize != hasChunkIDs {
+		return errors.New("descriptor uses deferred core key 24 or 25 without its chunked-transfer pair")
+	}
+	if !hasChunkSize {
+		if len(chunks) != 1 {
+			return errors.New("baseline descriptors must contain exactly one chunk hash")
+		}
+	} else {
+		if payloadType > 4 || chain != 0 {
+			return errors.New("chunked descriptor must be on the data chain")
+		}
+		chunkSize, valid := asV2Uint(chunkSizeRaw)
+		if !valid || !validV2ChunkSize(chunkSize) {
+			return errors.New("descriptor chunk size is not registered")
+		}
+		chunkIDs, valid := v2ByteArray(chunkIDsRaw)
+		if !valid || len(chunkIDs) < 2 || len(chunkIDs) > v2MaximumChunkCount || len(chunkIDs) != len(chunks) {
+			return errors.New("descriptor chunk IDs must match 2..1024 chunk hashes")
+		}
+		seen := make(map[string]struct{}, len(chunkIDs))
+		for _, id := range chunkIDs {
+			if len(id) != 16 {
+				return errors.New("descriptor chunk ID must be exactly 16 bytes")
+			}
+			key := string(id)
+			if _, exists := seen[key]; exists {
+				return errors.New("descriptor chunk IDs must be unique")
+			}
+			seen[key] = struct{}{}
+		}
+		plaintextSize, valid := asV2Uint(desc[kPlaintextSize])
+		minimum := uint64(len(chunkIDs)-1)*chunkSize + 1
+		maximum := uint64(len(chunkIDs)) * chunkSize
+		if !valid || plaintextSize < minimum || plaintextSize > maximum || plaintextSize > v2MaximumChunkedBytes {
+			return errors.New("descriptor chunk layout does not match plaintext size")
+		}
 	}
 	if value, ok := desc[kDisplayName]; ok {
 		name, ok := value.(string)
@@ -617,6 +667,29 @@ func validateV2DescriptorMap(desc map[int]any) error {
 		}
 	}
 	return nil
+}
+
+func validV2ChunkSize(size uint64) bool {
+	return size == 1024*1024 || size == 4*1024*1024 || size == 16*1024*1024
+}
+
+func v2ByteArray(value any) ([][]byte, bool) {
+	switch typed := value.(type) {
+	case [][]byte:
+		return typed, true
+	case []any:
+		result := make([][]byte, len(typed))
+		for index, entry := range typed {
+			bytes, ok := entry.([]byte)
+			if !ok {
+				return nil, false
+			}
+			result[index] = bytes
+		}
+		return result, true
+	default:
+		return nil, false
+	}
 }
 
 func validateV2TransportPolicy(value any) error {

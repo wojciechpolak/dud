@@ -5,6 +5,7 @@ declare module 'node:fs' {
 
 declare module 'node:fs/promises' {
   export const mkdir: (...args: any[]) => Promise<any>;
+  export const link: (...args: any[]) => Promise<any>;
   export const open: (...args: any[]) => Promise<any>;
   export const opendir: (...args: any[]) => Promise<AsyncIterable<any>>;
   export const readdir: (...args: any[]) => Promise<any[]>;

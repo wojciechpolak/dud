@@ -25,6 +25,9 @@ name. For one-off sharing, use a dead drop addressed by an opaque ID.
 - Synchronizes Git repositories over both paths: by opaque ID as a bundle in a
   dead drop, or to a peer with complete and incremental authenticated
   checkpoints.
+- Resumes large peer file transfers from verified encrypted chunks after a
+  connection failure or process restart, with support negotiated by the server
+  and both devices.
 - Opportunistically cleans up expired or consumed objects during normal traffic,
   on both the R2 and filesystem backends.
 - Verifies secure transport from the client with in-process DoH, exactly TLS
@@ -250,11 +253,13 @@ npx wrangler d1 migrations apply dud-v2 --remote
 npx wrangler d1 migrations list dud-v2 --remote
 ```
 
-`migrations_dir` in `wrangler.toml` points at `migrations/d1`, which holds a
-single idempotent schema file. Wrangler records what it applied, so the second
-command reports no unapplied migrations once the schema is in place. Add
-`--local` instead of `--remote` to prepare the local database that
-`npx wrangler dev` uses.
+`migrations_dir` in `wrangler.toml` points at `migrations/d1`, which holds
+ordered, numbered migrations. Wrangler records what it applied, so the second
+command reports no unapplied migrations once the schema is in place. Run these
+commands before deploying an upgrade too; `0002_chunk_uploads.sql` adds
+resumable upload storage to an existing database and preserves paired
+relationships. Use `--local` instead of `--remote` to prepare the local database
+that `npx wrangler dev` uses.
 
 7. Verify the repository and deploy:
 
@@ -470,6 +475,36 @@ second deployment, need `DUD_PROFILE`. See
 Running `dud` with no command in a terminal opens an interactive menu that
 covers both modes.
 
+### Resumable peer files
+
+`dud send PEER --file PATH` automatically splits a regular file larger than 16
+MiB into independently encrypted chunks when both the server and the paired peer
+advertise support. The client streams the file into a private encrypted spool
+under the selected profile's state directory. Once staging finishes, resuming
+the upload does not need the source file.
+
+After an interrupted upload, run this on the sender:
+
+```sh
+dud sync laptop
+```
+
+After an interrupted download, repeat the receive command on the recipient:
+
+```sh
+dud receive desktop --out-dir /work/received
+```
+
+Retries reuse verified chunks. The receiver verifies the complete plaintext
+before atomically installing the file, so an interrupted download leaves the
+destination unchanged. `dud peer show PEER` and `dud doctor` report resumable
+transfers, descriptor digests, and bytes remaining. To discard a saved transfer,
+use `dud peer abandon PEER --id DESCRIPTOR_DIGEST --yes`. Abandoning a download
+only clears local progress; the next receive downloads it again. Upload
+abandonment is limited to the newest outbound sequence. See
+[`docs/recovery-v2.md`](docs/recovery-v2.md#an-interrupted-large-transfer) for
+lease expiry and recovery when a commit response is lost.
+
 ## DUD server
 
 ```sh
@@ -574,8 +609,13 @@ by `npm run check:pins`.
 
 ## Notes
 
-- Both modes carry files up to 100 MB by default, which keeps the transfer path
-  compatible with common Cloudflare request body limits.
+- Dead drops and peer deliveries sent in a single request have a default
+  ciphertext limit of 100 MiB. Chunked peer files allow up to 1 GiB of
+  plaintext, subject to the server's staged-byte quota. The default quota is 200
+  MiB of ciphertext per capability, reserved for the whole upload before any
+  chunk is accepted. Self-hosted operators can raise
+  `DUD_PEER_MAX_STAGED_BYTES`; the Worker uses the compiled default. See
+  [`docs/server-v2.md`](docs/server-v2.md#resumable-peer-upload-storage).
 - Public-key mode is the preferred way to make a dead drop, because it avoids
   relying on a human-memorable passphrase for file encryption. A peer transfer
   always encrypts to a key.

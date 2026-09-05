@@ -9,6 +9,7 @@ export const V2_FEATURE = {
   pairing: 3,
   gitFull: 5,
   gitIncremental: 6,
+  chunkedUpload: 7,
   atomicDelivery: 9,
   batchedInbox: 10,
   inlineControl: 11,
@@ -23,6 +24,7 @@ export const V2_SERVER_FEATURES = [
   V2_FEATURE.pairing,
   V2_FEATURE.gitFull,
   V2_FEATURE.gitIncremental,
+  V2_FEATURE.chunkedUpload,
   V2_FEATURE.atomicDelivery,
   V2_FEATURE.batchedInbox,
   V2_FEATURE.inlineControl,
@@ -50,6 +52,15 @@ export const V2_ENDPOINT = {
   capabilityReissue: '/v2/capabilities/reissue',
 } as const;
 
+/** Fixed ceilings for the feature-7 wire and storage contract. */
+export const V2_CHUNK_LIMITS = {
+  maxChunkCiphertextBytes: 16_782_955,
+  maxChunksPerDelivery: 1_024,
+  maxChunkedPlaintextBytes: 1_073_741_824,
+  maxChunkedCiphertextBytes: 1_075_686_400,
+  maxUploadLeaseSeconds: 3_600,
+} as const;
+
 export function v2CompletionEndpoint(deliveryId: string): string {
   if (!/^[a-f0-9]{32}$/.test(deliveryId)) {
     throw new Error('V2 delivery ID is invalid.');
@@ -68,6 +79,10 @@ export const V2_LIMIT = {
   maxProofsPerMinute: 7,
   maxStagedBytes: 8,
   maxPairingEnvelopeBytes: 9,
+  maxChunkCiphertextBytes: 10,
+  maxChunksPerDelivery: 11,
+  maxChunkedPlaintextBytes: 12,
+  maxChunkUploadLeaseSeconds: 13,
 } as const;
 
 /** Stable, redaction-safe error codes shared by every V2 endpoint. */

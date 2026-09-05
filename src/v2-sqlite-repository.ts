@@ -176,6 +176,7 @@ export class SQLiteV2Repository
 
   async reserveStagedBody(input: {
     id: string;
+    capabilityId: string;
     expiresAt: number;
     now: number;
     reservedBytes: number;
@@ -184,6 +185,7 @@ export class SQLiteV2Repository
   }): Promise<string> {
     return this.database.reserveStagedBody(
       input.id,
+      input.capabilityId,
       input.expiresAt,
       input.now,
       input.reservedBytes,
@@ -194,6 +196,66 @@ export class SQLiteV2Repository
 
   async releaseStagedBody(id: string): Promise<void> {
     this.database.releaseStagedBody(id);
+  }
+
+  async createChunkUpload(
+    input: Parameters<V2Repository['createChunkUpload']>[0],
+  ) {
+    return this.database.createChunkUpload(input);
+  }
+
+  async findChunkUpload(input: Parameters<V2Repository['findChunkUpload']>[0]) {
+    return this.database.findChunkUpload(
+      input.id,
+      input.capabilityId,
+      input.now,
+    );
+  }
+
+  async authorizeChunkUpload(
+    input: Parameters<V2Repository['authorizeChunkUpload']>[0],
+  ) {
+    return this.database.authorizeChunkUpload(input);
+  }
+
+  async findChunkUploadForCommit(
+    input: Parameters<V2Repository['findChunkUploadForCommit']>[0],
+  ) {
+    return this.database.findChunkUploadForCommit(
+      input.id,
+      input.capabilityId,
+      input.now,
+    );
+  }
+
+  async prepareChunkUploadPart(
+    input: Parameters<V2Repository['prepareChunkUploadPart']>[0],
+  ) {
+    return this.database.prepareChunkUploadPart(input);
+  }
+
+  async completeChunkUploadPart(
+    input: Parameters<V2Repository['completeChunkUploadPart']>[0],
+  ) {
+    return this.database.completeChunkUploadPart(input);
+  }
+
+  async abortChunkUploadPart(
+    input: Parameters<V2Repository['abortChunkUploadPart']>[0],
+  ) {
+    return this.database.abortChunkUploadPart(input);
+  }
+
+  async renewChunkUpload(
+    input: Parameters<V2Repository['renewChunkUpload']>[0],
+  ) {
+    return this.database.renewChunkUpload(input);
+  }
+
+  async abandonChunkUpload(
+    input: Parameters<V2Repository['abandonChunkUpload']>[0],
+  ): Promise<void> {
+    this.database.abandonChunkUpload(input);
   }
 
   async reserveDelivery(input: Parameters<V2Repository['reserveDelivery']>[0]) {
@@ -209,12 +271,11 @@ export class SQLiteV2Repository
       input.consumeControlEvents,
       input.maximumPendingDeliveries,
       input.maximumObjectsPerCapability,
+      input.chunkUploadId,
     );
   }
 
-  async publishDelivery(
-    input: Omit<V2RepositoryDelivery, 'state' | 'sequence'>,
-  ) {
+  async publishDelivery(input: Parameters<V2Repository['publishDelivery']>[0]) {
     const existing = this.database.findDeliveryById(input.id);
     if (existing) {
       if (
@@ -230,6 +291,7 @@ export class SQLiteV2Repository
       direction: directionNumber(input.direction),
       slot: input.slot,
       epoch: input.epoch,
+      chain: input.chain,
       descriptor: input.encryptedDescriptor,
       requestedPolicy: input.requestedPolicy,
       effectivePolicy: input.effectivePolicy,
@@ -241,6 +303,8 @@ export class SQLiteV2Repository
       operationDigest: input.operationDigest,
       createdAt: input.createdAt,
       expiresAt: input.expiresAt,
+      chunkUploadId: input.chunkUploadId,
+      parts: input.parts,
     });
     const delivery = this.database.findDeliveryById(input.id);
     if (!delivery) {

@@ -14,6 +14,12 @@ type v2QuarantinedChain struct {
 	Reason string `json:"reason"`
 }
 
+type v2ResumableTransfer struct {
+	Direction        string `json:"direction"`
+	DescriptorDigest string `json:"descriptor_digest"`
+	RemainingBytes   uint64 `json:"remaining_bytes"`
+}
+
 // v2DeliveryStatus is the single summary of durable local relationship state
 // that every peer-facing command reports. Queued work, undrained control
 // events, quarantined chains, and a halted relationship are operator-visible
@@ -21,6 +27,11 @@ type v2QuarantinedChain struct {
 // from per-command ad-hoc maps.
 type v2DeliveryStatus struct {
 	PendingDeliveries          int
+	PendingChunkTransfers      int
+	PendingChunkBytes          uint64
+	InboundChunkTransfers      int
+	InboundChunkBytes          uint64
+	ResumableTransfers         []v2ResumableTransfer
 	PendingCompletions         int
 	PendingControlPublications int
 	UnacknowledgedDeliveries   int
@@ -36,8 +47,51 @@ type v2DeliveryStatus struct {
 }
 
 func v2DeliveryStatusOf(state *v2PeerDeliveryState) v2DeliveryStatus {
+	pendingChunkBytes := uint64(0)
+	resumableTransfers := make([]v2ResumableTransfer, 0, len(state.PendingChunkDeliveries)+len(state.InboundTransfers))
+	for _, transfer := range state.PendingChunkDeliveries {
+		remaining := uint64(0)
+		for _, part := range transfer.Parts {
+			if !part.Uploaded {
+				pendingChunkBytes += part.CiphertextLength
+				remaining += part.CiphertextLength
+			}
+		}
+		resumableTransfers = append(resumableTransfers, v2ResumableTransfer{
+			Direction: "upload", DescriptorDigest: transfer.DescriptorDigest, RemainingBytes: remaining,
+		})
+	}
+	inboundChunkTransfers := 0
+	inboundChunkBytes := uint64(0)
+	for _, transfer := range state.InboundTransfers {
+		if len(transfer.Chunks) == 0 {
+			continue
+		}
+		inboundChunkTransfers++
+		remaining := uint64(0)
+		for _, part := range transfer.Chunks {
+			if !part.Downloaded {
+				inboundChunkBytes += part.CiphertextLength
+				remaining += part.CiphertextLength
+			}
+		}
+		resumableTransfers = append(resumableTransfers, v2ResumableTransfer{
+			Direction: "download", DescriptorDigest: transfer.DescriptorDigest, RemainingBytes: remaining,
+		})
+	}
+	sort.Slice(resumableTransfers, func(left, right int) bool {
+		if resumableTransfers[left].Direction != resumableTransfers[right].Direction {
+			return resumableTransfers[left].Direction < resumableTransfers[right].Direction
+		}
+		return resumableTransfers[left].DescriptorDigest < resumableTransfers[right].DescriptorDigest
+	})
 	status := v2DeliveryStatus{
-		PendingDeliveries:          len(state.PendingGranularDeliveries),
+		PendingDeliveries:          len(state.PendingGranularDeliveries) + len(state.PendingChunkDeliveries),
+		PendingChunkTransfers:      len(state.PendingChunkDeliveries),
+		PendingChunkBytes:          pendingChunkBytes,
+		InboundChunkTransfers:      inboundChunkTransfers,
+		InboundChunkBytes:          inboundChunkBytes,
+		ResumableTransfers:         resumableTransfers,
 		PendingCompletions:         len(state.PendingCompletions),
 		PendingControlPublications: len(state.PendingControlPublications),
 		UnacknowledgedDeliveries:   unacknowledgedV2Deliveries(state),
@@ -80,6 +134,11 @@ func unacknowledgedV2Deliveries(state *v2PeerDeliveryState) int {
 func (status v2DeliveryStatus) fields() map[string]any {
 	return map[string]any{
 		"pending_deliveries":           status.PendingDeliveries,
+		"pending_chunk_transfers":      status.PendingChunkTransfers,
+		"pending_chunk_bytes":          status.PendingChunkBytes,
+		"inbound_chunk_transfers":      status.InboundChunkTransfers,
+		"inbound_chunk_bytes":          status.InboundChunkBytes,
+		"resumable_transfers":          status.ResumableTransfers,
 		"pending_completions":          status.PendingCompletions,
 		"pending_control_publications": status.PendingControlPublications,
 		"unacknowledged_deliveries":    status.UnacknowledgedDeliveries,
@@ -106,6 +165,7 @@ func (status v2DeliveryStatus) merge(target map[string]any) map[string]any {
 // raise the block during ordinary progress.
 func (status v2DeliveryStatus) needsAttention() bool {
 	return status.PendingDeliveries != 0 ||
+		status.InboundChunkTransfers != 0 ||
 		status.PendingCompletions != 0 ||
 		status.PendingControlPublications != 0 ||
 		status.UndrainedControl ||
@@ -121,6 +181,16 @@ func (status v2DeliveryStatus) needsAttention() bool {
 // than a queue being empty. Whether an action command prints the block in the
 // first place is a separate decision, made by reportWhen.
 func (status v2DeliveryStatus) rows() []textRow {
+	uploads := textRow{Label: "resumable uploads", Value: strconv.Itoa(status.PendingChunkTransfers)}
+	downloads := textRow{Label: "resumable downloads", Value: strconv.Itoa(status.InboundChunkTransfers)}
+	for _, transfer := range status.ResumableTransfers {
+		item := fmt.Sprintf("%s (%d bytes remaining)", transfer.DescriptorDigest, transfer.RemainingBytes)
+		if transfer.Direction == "upload" {
+			uploads.Items = append(uploads.Items, item)
+		} else {
+			downloads.Items = append(downloads.Items, item)
+		}
+	}
 	quarantined := textRow{Label: "quarantined chains", Value: "none"}
 	if len(status.QuarantinedChains) != 0 {
 		items := make([]string, 0, len(status.QuarantinedChains))
@@ -139,6 +209,10 @@ func (status v2DeliveryStatus) rows() []textRow {
 	}
 	return []textRow{
 		{Label: "queued deliveries", Value: strconv.Itoa(status.PendingDeliveries)},
+		uploads,
+		{Label: "resumable upload bytes", Value: strconv.FormatUint(status.PendingChunkBytes, 10)},
+		downloads,
+		{Label: "resumable download bytes", Value: strconv.FormatUint(status.InboundChunkBytes, 10)},
 		{Label: "queued completions", Value: strconv.Itoa(status.PendingCompletions)},
 		{Label: "queued control events", Value: strconv.Itoa(status.PendingControlPublications)},
 		{Label: "unacknowledged deliveries", Value: strconv.Itoa(status.UnacknowledgedDeliveries)},

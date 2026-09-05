@@ -67,6 +67,7 @@ type v2Request struct {
 type v2Response struct {
 	StatusCode  int
 	ContentType string
+	Headers     http.Header
 	Body        []byte
 	// Stream is set only when the request asked for a streamed response. The
 	// caller owns it and must close it, which also releases the request.
@@ -421,6 +422,7 @@ func (transport *productionV2Transport) doTarget(
 	result := &v2Response{
 		StatusCode:  response.StatusCode,
 		ContentType: response.Header.Get("Content-Type"),
+		Headers:     response.Header.Clone(),
 		TLS:         v2ConnectionInfoFrom(response.TLS, resolution.ECHConfig),
 	}
 	if request.StreamResponse {

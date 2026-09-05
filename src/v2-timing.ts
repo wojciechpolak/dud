@@ -25,6 +25,7 @@ export const V2_TIMED_OPERATIONS = [
   'delivery-publish',
   'delivery-inbox',
   'delivery-complete',
+  'delivery-chunk',
   'control-event',
   'admin',
   'unknown',
@@ -111,6 +112,8 @@ export function startV2Timing(
 }
 
 const COMPLETION_PATH = /^\/v2\/deliveries\/[a-f0-9]{32}\/complete$/;
+const CHUNK_PATH =
+  /^\/v2\/deliveries\/(?:uploads(?:\/|$)|[a-f0-9]{32}\/chunks\/)/;
 
 /**
  * Maps a request to its timing label. The label set is fixed and public, so it
@@ -120,6 +123,9 @@ export function classifyV2Operation(
   method: string,
   pathname: string,
 ): V2TimedOperation {
+  if (CHUNK_PATH.test(pathname)) {
+    return 'delivery-chunk';
+  }
   if (method === 'GET' && pathname === '/v2/capabilities') {
     return 'capabilities';
   }

@@ -3,9 +3,15 @@
 
 import { bytesEqual } from './cbor.js';
 import { runMemoryV2Maintenance } from './v2-memory-maintenance.js';
+import {
+  v2DeliveryChunkKey,
+  v2StagedChunkKey,
+  validateV2BodyPartDeclarations,
+} from './v2-body-keys.js';
 import { V2OperationConflictError } from './v2-repository.js';
 import type {
   V2CapabilityRegistration,
+  V2ChunkUpload,
   V2DeliveryReservation,
   V2Repository,
   V2RepositoryCapability,
@@ -58,7 +64,16 @@ export class MemoryV2Repository
   private readonly reservations = new Map<string, V2DeliveryReservation>();
   private readonly stagedBodies = new Map<
     string,
-    { expiresAt: number; reservedBytes: number }
+    { capabilityId: string; expiresAt: number; reservedBytes: number }
+  >();
+  private readonly chunkUploads = new Map<string, V2ChunkUpload>();
+  private readonly chunkUploadOperations = new Map<
+    string,
+    { digest: Uint8Array; uploadId: string }
+  >();
+  private readonly chunkRenewals = new Map<
+    string,
+    { operationId: Uint8Array; operationDigest: Uint8Array }
   >();
   private readonly reservationBytes = new Map<string, number>();
   private readonly reservationObjects = new Set<string>();
@@ -195,6 +210,7 @@ export class MemoryV2Repository
 
   async reserveStagedBody(input: {
     id: string;
+    capabilityId: string;
     expiresAt: number;
     now: number;
     reservedBytes: number;
@@ -203,6 +219,7 @@ export class MemoryV2Repository
   }): Promise<string> {
     if (
       !/^[a-f0-9]{32}$/.test(input.id) ||
+      input.capabilityId.length === 0 ||
       input.expiresAt < input.now ||
       !Number.isSafeInteger(input.reservedBytes) ||
       input.reservedBytes < 0
@@ -214,16 +231,27 @@ export class MemoryV2Repository
         this.stagedBodies.delete(id);
       }
     }
-    const active = Array.from(this.stagedBodies.values());
+    const active = Array.from(this.stagedBodies.values()).filter(
+      (staged) => staged.capabilityId === input.capabilityId,
+    );
+    const activeBytes =
+      active.reduce((total, staged) => total + staged.reservedBytes, 0) +
+      Array.from(this.chunkUploads.values())
+        .filter(
+          (upload) =>
+            upload.capabilityId === input.capabilityId &&
+            upload.committedAt === undefined &&
+            upload.expiresAt > input.now,
+        )
+        .reduce((total, upload) => total + upload.totalLength, 0);
     if (
       active.length >= input.maximumConcurrentUploads ||
-      active.reduce((total, staged) => total + staged.reservedBytes, 0) +
-        input.reservedBytes >
-        input.maximumStagedBytes
+      activeBytes + input.reservedBytes > input.maximumStagedBytes
     ) {
       throw new Error('Staging quota is exhausted.');
     }
     this.stagedBodies.set(input.id, {
+      capabilityId: input.capabilityId,
       expiresAt: input.expiresAt,
       reservedBytes: input.reservedBytes,
     });
@@ -232,6 +260,410 @@ export class MemoryV2Repository
 
   async releaseStagedBody(id: string): Promise<void> {
     this.stagedBodies.delete(id);
+  }
+
+  async createChunkUpload(
+    input: Parameters<V2Repository['createChunkUpload']>[0],
+  ): Promise<{ upload: V2ChunkUpload; idempotent: boolean }> {
+    validateV2BodyPartDeclarations(input.parts, input.totalLength);
+    if (input.operationDigest.byteLength !== 32) {
+      throw new Error('Chunk upload operation is invalid.');
+    }
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    if (capability.scope !== 'write') {
+      throw new Error('Chunk upload capability is invalid.');
+    }
+    if (
+      input.expiresAt <= input.now ||
+      input.expiresAt > capability.expiresAt ||
+      !Number.isSafeInteger(input.chain) ||
+      input.chain < 0 ||
+      input.slot.byteLength !== 16 ||
+      !Number.isSafeInteger(input.epoch) ||
+      input.epoch < 0 ||
+      !Number.isSafeInteger(input.maximumConcurrentUploads) ||
+      input.maximumConcurrentUploads < 1 ||
+      !Number.isSafeInteger(input.maximumStagedBytes) ||
+      input.maximumStagedBytes < input.totalLength
+    ) {
+      throw new Error('Chunk upload lease is invalid.');
+    }
+    const claims = this.validateDeliveryAuthorization(
+      input.authorization,
+      input.now,
+    );
+    const operation = operationKey(input.operationId);
+    const prior = this.chunkUploadOperations.get(operation);
+    if (prior) {
+      if (!bytesEqual(prior.digest, input.operationDigest)) {
+        throw new V2OperationConflictError(
+          'Operation ID conflicts with a chunk upload.',
+        );
+      }
+      const upload = this.chunkUploads.get(prior.uploadId);
+      if (!upload) {
+        throw new Error('Chunk upload operation is incomplete.');
+      }
+      this.commitDeliveryAuthorization(
+        input.authorization,
+        claims.nonceKeys,
+        claims.rateCounts,
+        input.now,
+      );
+      return { upload: clone(upload), idempotent: true };
+    }
+    const active = Array.from(this.chunkUploads.values()).filter(
+      (upload) =>
+        upload.committedAt === undefined && upload.expiresAt > input.now,
+    );
+    const activeForCapability = active.filter(
+      (upload) => upload.capabilityId === input.capabilityId,
+    );
+    const activeBytes =
+      activeForCapability.reduce(
+        (total, upload) => total + upload.totalLength,
+        0,
+      ) +
+      Array.from(this.stagedBodies.values())
+        .filter(
+          (staged) =>
+            staged.capabilityId === input.capabilityId &&
+            staged.expiresAt > input.now,
+        )
+        .reduce((total, staged) => total + staged.reservedBytes, 0);
+    if (
+      activeForCapability.length >= input.maximumConcurrentUploads ||
+      activeBytes + input.totalLength > input.maximumStagedBytes
+    ) {
+      throw new Error('Chunk upload staging quota is exhausted.');
+    }
+    const id = crypto.randomUUID().replaceAll('-', '');
+    const upload: V2ChunkUpload = {
+      id,
+      deliveryId: crypto.randomUUID().replaceAll('-', ''),
+      capabilityId: input.capabilityId,
+      chain: input.chain,
+      slot: Uint8Array.from(input.slot),
+      epoch: input.epoch,
+      totalLength: input.totalLength,
+      createdAt: input.now,
+      expiresAt: input.expiresAt,
+      operationId: Uint8Array.from(input.operationId),
+      operationDigest: Uint8Array.from(input.operationDigest),
+      parts: input.parts.map((part, ordinal) => ({
+        ...clone(part),
+        ordinal,
+      })),
+    };
+    this.commitDeliveryAuthorization(
+      input.authorization,
+      claims.nonceKeys,
+      claims.rateCounts,
+      input.now,
+    );
+    this.chunkUploads.set(id, upload);
+    this.chunkUploadOperations.set(operation, {
+      digest: Uint8Array.from(input.operationDigest),
+      uploadId: id,
+    });
+    return { upload: clone(upload), idempotent: false };
+  }
+
+  async findChunkUpload(
+    input: Parameters<V2Repository['findChunkUpload']>[0],
+  ): Promise<V2ChunkUpload | null> {
+    const upload = this.chunkUploads.get(input.id);
+    if (
+      !upload ||
+      upload.committedAt !== undefined ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now
+    ) {
+      return null;
+    }
+    const capability = this.capabilities.get(input.capabilityId);
+    return !capability ||
+      capability.scope !== 'write' ||
+      capability.expiresAt <= input.now ||
+      capability.revokedAt !== undefined
+      ? null
+      : clone(upload);
+  }
+
+  async findChunkUploadForCommit(
+    input: Parameters<V2Repository['findChunkUploadForCommit']>[0],
+  ): Promise<V2ChunkUpload | null> {
+    const upload = this.chunkUploads.get(input.id);
+    const capability = this.capabilities.get(input.capabilityId);
+    return !upload ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now ||
+      !capability ||
+      capability.scope !== 'write' ||
+      capability.expiresAt <= input.now ||
+      capability.revokedAt !== undefined
+      ? null
+      : clone(upload);
+  }
+
+  async authorizeChunkUpload(
+    input: Parameters<V2Repository['authorizeChunkUpload']>[0],
+  ): Promise<V2ChunkUpload> {
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    const upload = this.chunkUploads.get(input.id);
+    if (
+      capability.scope !== 'write' ||
+      !upload ||
+      upload.committedAt !== undefined ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now
+    ) {
+      throw new Error('Chunk upload is unavailable.');
+    }
+    const claims = this.validateDeliveryAuthorization(
+      input.authorization,
+      input.now,
+    );
+    this.commitDeliveryAuthorization(
+      input.authorization,
+      claims.nonceKeys,
+      claims.rateCounts,
+      input.now,
+    );
+    return clone(upload);
+  }
+
+  async prepareChunkUploadPart(
+    input: Parameters<V2Repository['prepareChunkUploadPart']>[0],
+  ): Promise<{ upload: V2ChunkUpload; idempotent: boolean }> {
+    operationKey(input.operationId);
+    if (
+      input.operationDigest.byteLength !== 32 ||
+      !/^[a-f0-9]{32}$/.test(input.writeToken) ||
+      !Number.isSafeInteger(input.writeExpiresAt) ||
+      input.writeExpiresAt <= input.now
+    ) {
+      throw new Error('Chunk upload part write lease is invalid.');
+    }
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    const upload = this.chunkUploads.get(input.id);
+    const part = upload?.parts.find(
+      (candidate) => candidate.id === input.partId,
+    );
+    if (
+      capability.scope !== 'write' ||
+      !upload ||
+      upload.committedAt !== undefined ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now ||
+      !part
+    ) {
+      throw new Error('Chunk upload part is unavailable.');
+    }
+    const claims = this.validateDeliveryAuthorization(
+      input.authorization,
+      input.now,
+    );
+    if (part.bodyKey !== undefined) {
+      if (
+        !part.operationId ||
+        !bytesEqual(part.operationId, input.operationId) ||
+        !bytesEqual(part.operationDigest!, input.operationDigest)
+      ) {
+        throw new V2OperationConflictError(
+          'Chunk upload part conflicts with existing bytes.',
+        );
+      }
+      this.commitDeliveryAuthorization(
+        input.authorization,
+        claims.nonceKeys,
+        claims.rateCounts,
+        input.now,
+      );
+      return { upload: clone(upload), idempotent: true };
+    }
+    if (
+      part.operationId &&
+      (!bytesEqual(part.operationId, input.operationId) ||
+        !bytesEqual(part.operationDigest!, input.operationDigest))
+    ) {
+      throw new V2OperationConflictError(
+        'Chunk upload part conflicts with an in-flight write.',
+      );
+    }
+    if (
+      part.writeToken !== undefined &&
+      part.writeExpiresAt !== undefined &&
+      part.writeExpiresAt > input.now
+    ) {
+      throw new Error('Chunk upload part write is unavailable.');
+    }
+    part.operationId = Uint8Array.from(input.operationId);
+    part.operationDigest = Uint8Array.from(input.operationDigest);
+    part.writeToken = input.writeToken;
+    part.writeExpiresAt = input.writeExpiresAt;
+    this.commitDeliveryAuthorization(
+      input.authorization,
+      claims.nonceKeys,
+      claims.rateCounts,
+      input.now,
+    );
+    return { upload: clone(upload), idempotent: false };
+  }
+
+  async completeChunkUploadPart(
+    input: Parameters<V2Repository['completeChunkUploadPart']>[0],
+  ): Promise<V2ChunkUpload> {
+    if (
+      !/^[a-f0-9]{32}$/.test(input.writeToken) ||
+      input.bodyKey !== v2StagedChunkKey(input.id, input.partId)
+    ) {
+      throw new Error('Chunk upload part completion is invalid.');
+    }
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    const upload = this.chunkUploads.get(input.id);
+    const part = upload?.parts.find(
+      (candidate) => candidate.id === input.partId,
+    );
+    if (
+      capability.scope !== 'write' ||
+      !upload ||
+      upload.committedAt !== undefined ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now ||
+      !part ||
+      part.bodyKey !== undefined ||
+      part.writeToken !== input.writeToken
+    ) {
+      throw new Error('Chunk upload part write is unavailable.');
+    }
+    part.bodyKey = input.bodyKey;
+    part.receivedAt = input.now;
+    delete part.writeToken;
+    delete part.writeExpiresAt;
+    return clone(upload);
+  }
+
+  async abortChunkUploadPart(
+    input: Parameters<V2Repository['abortChunkUploadPart']>[0],
+  ): Promise<boolean> {
+    if (!/^[a-f0-9]{32}$/.test(input.writeToken)) {
+      throw new Error('Chunk upload part write token is invalid.');
+    }
+    const part = this.chunkUploads
+      .get(input.id)
+      ?.parts.find((candidate) => candidate.id === input.partId);
+    if (!part) {
+      return true;
+    }
+    if (part.bodyKey !== undefined || part.writeToken !== input.writeToken) {
+      return false;
+    }
+    delete part.writeToken;
+    delete part.writeExpiresAt;
+    delete part.operationId;
+    delete part.operationDigest;
+    return true;
+  }
+
+  async renewChunkUpload(
+    input: Parameters<V2Repository['renewChunkUpload']>[0],
+  ): Promise<{ upload: V2ChunkUpload; idempotent: boolean }> {
+    operationKey(input.operationId);
+    if (input.operationDigest.byteLength !== 32) {
+      throw new Error('Chunk upload operation is invalid.');
+    }
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    const upload = this.chunkUploads.get(input.id);
+    if (
+      capability.scope !== 'write' ||
+      !upload ||
+      upload.committedAt !== undefined ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now ||
+      input.expiresAt > capability.expiresAt
+    ) {
+      throw new Error('Chunk upload lease cannot be renewed.');
+    }
+    const claims = this.validateDeliveryAuthorization(
+      input.authorization,
+      input.now,
+    );
+    const prior = this.chunkRenewals.get(input.id);
+    if (prior && bytesEqual(prior.operationId, input.operationId)) {
+      if (!bytesEqual(prior.operationDigest, input.operationDigest)) {
+        throw new V2OperationConflictError(
+          'Chunk upload renewal operation conflicts.',
+        );
+      }
+      this.commitDeliveryAuthorization(
+        input.authorization,
+        claims.nonceKeys,
+        claims.rateCounts,
+        input.now,
+      );
+      return { upload: clone(upload), idempotent: true };
+    }
+    if (input.expiresAt <= upload.expiresAt) {
+      throw new Error('Chunk upload lease cannot be renewed.');
+    }
+    upload.expiresAt = input.expiresAt;
+    this.chunkRenewals.set(input.id, {
+      operationId: Uint8Array.from(input.operationId),
+      operationDigest: Uint8Array.from(input.operationDigest),
+    });
+    this.commitDeliveryAuthorization(
+      input.authorization,
+      claims.nonceKeys,
+      claims.rateCounts,
+      input.now,
+    );
+    return { upload: clone(upload), idempotent: false };
+  }
+
+  async abandonChunkUpload(
+    input: Parameters<V2Repository['abandonChunkUpload']>[0],
+  ): Promise<void> {
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    const upload = this.chunkUploads.get(input.id);
+    if (
+      capability.scope !== 'write' ||
+      !upload ||
+      upload.committedAt !== undefined ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now
+    ) {
+      throw new Error('Chunk upload is unavailable.');
+    }
+    const claims = this.validateDeliveryAuthorization(
+      input.authorization,
+      input.now,
+    );
+    upload.expiresAt = input.now;
+    this.commitDeliveryAuthorization(
+      input.authorization,
+      claims.nonceKeys,
+      claims.rateCounts,
+      input.now,
+    );
   }
 
   private activeDeliveryCapability(
@@ -388,10 +820,27 @@ export class MemoryV2Repository
       claims.rateCounts,
       input.now,
     );
-    const deliveryId = crypto.randomUUID().replaceAll('-', '');
+    const upload = input.chunkUploadId
+      ? this.chunkUploads.get(input.chunkUploadId)
+      : undefined;
+    if (
+      input.chunkUploadId &&
+      (!upload ||
+        upload.committedAt !== undefined ||
+        upload.capabilityId !== input.capabilityId ||
+        upload.expiresAt <= input.now ||
+        upload.totalLength !== input.payloadLength ||
+        upload.parts.some((part) => part.bodyKey === undefined))
+    ) {
+      throw new Error('Chunk upload cannot be committed.');
+    }
+    const deliveryId =
+      upload?.deliveryId ?? crypto.randomUUID().replaceAll('-', '');
     const reservation = {
       deliveryId,
-      payloadKey: `deliveries/${deliveryId}.bin`,
+      payloadKey: upload
+        ? v2DeliveryChunkKey(deliveryId, upload.parts[0]!.id)
+        : `deliveries/${deliveryId}.bin`,
       expiresAt: input.expiresAt,
     };
     this.reservations.set(deliveryId, reservation);
@@ -455,7 +904,7 @@ export class MemoryV2Repository
   }
 
   async publishDelivery(
-    input: Omit<V2RepositoryDelivery, 'state' | 'sequence'>,
+    input: Parameters<V2Repository['publishDelivery']>[0],
   ): Promise<{ delivery: V2RepositoryDelivery; idempotent: boolean }> {
     const key = operationKey(input.operationId);
     const operation = this.operations.get(key);
@@ -471,10 +920,32 @@ export class MemoryV2Repository
     if (existing) {
       return { delivery: clone(existing), idempotent: true };
     }
+    const chunkUpload = input.chunkUploadId
+      ? this.chunkUploads.get(input.chunkUploadId)
+      : undefined;
+    if (
+      input.chunkUploadId &&
+      (!chunkUpload ||
+        chunkUpload.deliveryId !== input.id ||
+        !input.parts ||
+        input.parts.length !== chunkUpload.parts.length ||
+        input.parts.some((committed, index) => {
+          const part = chunkUpload.parts[index]!;
+          return (
+            committed.id !== part.id ||
+            committed.length !== part.length ||
+            !bytesEqual(committed.digest, part.digest) ||
+            committed.key !== v2DeliveryChunkKey(input.id, part.id)
+          );
+        }))
+    ) {
+      throw new Error('Chunk delivery publication is invalid.');
+    }
     const sequenceKey = `${input.relationshipId}|${input.direction}`;
     const sequence = (this.deliverySequences.get(sequenceKey) ?? 0) + 1;
     this.deliverySequences.set(sequenceKey, sequence);
     const delivery = { ...clone(input), state: 'published' as const, sequence };
+    delete (delivery as Partial<typeof delivery>).chunkUploadId;
     this.deliveries.set(delivery.id, delivery);
     this.reservations.delete(delivery.id);
     this.reservationRelationships.delete(delivery.id);
@@ -490,6 +961,13 @@ export class MemoryV2Repository
         account.committedBytes += reservedBytes;
       }
       this.reservationBytes.delete(delivery.id);
+    }
+    if (chunkUpload) {
+      chunkUpload.committedAt = input.createdAt;
+      chunkUpload.expiresAt = input.expiresAt;
+      for (const part of chunkUpload.parts) {
+        part.bodyKey = undefined;
+      }
     }
     return { delivery: clone(delivery), idempotent: false };
   }
@@ -904,6 +1382,9 @@ export class MemoryV2Repository
         deliveries: this.deliveries,
         reservations: this.reservations,
         stagedBodies: this.stagedBodies,
+        chunkUploads: this.chunkUploads,
+        chunkUploadOperations: this.chunkUploadOperations,
+        chunkRenewals: this.chunkRenewals,
         reservationBytes: this.reservationBytes,
         reservationObjects: this.reservationObjects,
         deliveryObjects: this.deliveryObjects,
@@ -923,7 +1404,7 @@ export class MemoryV2Repository
 
   /** Reconciliation-only bounded lookups; no request path calls these. */
   async filterKnownBodyKeys(keys: readonly string[]): Promise<string[]> {
-    const known = new Set(this.metadataBodyKeys());
+    const known = new Set(this.metadataBodyKeys(true));
     return keys.filter((key) => known.has(key));
   }
 
@@ -934,7 +1415,7 @@ export class MemoryV2Repository
     if (!Number.isSafeInteger(input.limit) || input.limit < 1) {
       throw new Error('Body key page limit is invalid.');
     }
-    const keys = this.metadataBodyKeys()
+    const keys = this.metadataBodyKeys(false)
       .filter((key) => input.cursor === undefined || key > input.cursor)
       .sort()
       .slice(0, input.limit);
@@ -944,10 +1425,27 @@ export class MemoryV2Repository
     };
   }
 
-  private metadataBodyKeys(): string[] {
+  private metadataBodyKeys(protectUnwrittenChunkParts: boolean): string[] {
     return [
       ...Array.from(this.deliveries.values(), (value) => value.payloadKey),
+      ...Array.from(this.deliveries.values()).flatMap(
+        (delivery) => delivery.parts?.map((part) => part.key) ?? [],
+      ),
       ...Array.from(this.reservations.values(), (value) => value.payloadKey),
+      ...Array.from(this.chunkUploads.values()).flatMap((upload) =>
+        upload.parts.flatMap((part) => {
+          if (part.bodyKey !== undefined) {
+            return [part.bodyKey];
+          }
+          if (
+            upload.committedAt === undefined &&
+            (protectUnwrittenChunkParts || part.writeToken !== undefined)
+          ) {
+            return [v2StagedChunkKey(upload.id, part.id)];
+          }
+          return [];
+        }),
+      ),
     ];
   }
 

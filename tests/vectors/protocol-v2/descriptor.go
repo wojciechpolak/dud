@@ -192,6 +192,50 @@ func decodeDescriptor(body []byte) (map[int]any, error) {
 	return desc, nil
 }
 
+func validateChunkedDescriptorMap(desc map[int]any) error {
+	baseline := make(map[int]any, len(desc)-1)
+	for key, value := range desc {
+		if key != kChunkSize && key != kChunkIDs {
+			baseline[key] = value
+		}
+	}
+	hashes, ok := desc[kChunkHashes].([]any)
+	if !ok || len(hashes) < 2 || len(hashes) > 1024 {
+		return fmt.Errorf("chunk_hashes must contain 2..1024 entries")
+	}
+	baseline[kChunkHashes] = []any{hashes[0]}
+	if err := validateDescriptorMap(baseline); err != nil {
+		return err
+	}
+	size, ok := desc[kChunkSize].(uint64)
+	if !ok || size != 1048576 && size != 4194304 && size != 16777216 {
+		return fmt.Errorf("chunk_size is not registered")
+	}
+	ids, ok := desc[kChunkIDs].([]any)
+	if !ok || len(ids) != len(hashes) {
+		return fmt.Errorf("chunk_ids and chunk_hashes differ in length")
+	}
+	seen := map[string]bool{}
+	for index := range hashes {
+		id, idOK := ids[index].([]byte)
+		hash, hashOK := hashes[index].([]byte)
+		if !idOK || len(id) != 16 || seen[string(id)] {
+			return fmt.Errorf("chunk ID %d is invalid or repeated", index)
+		}
+		if !hashOK || len(hash) != 32 {
+			return fmt.Errorf("chunk hash %d is invalid", index)
+		}
+		seen[string(id)] = true
+	}
+	plaintextSize, ok := desc[kPlaintextSize].(uint64)
+	minimum := uint64(len(hashes)-1)*size + 1
+	maximum := uint64(len(hashes)) * size
+	if !ok || plaintextSize < minimum || plaintextSize > maximum || plaintextSize > 1073741824 {
+		return fmt.Errorf("chunked plaintext size is inconsistent")
+	}
+	return nil
+}
+
 // canonicalOrigin normalizes an origin for binding. Two implementations that
 // normalize differently would silently fail to interoperate, so the rules are
 // fixed here and exercised by a vector.
@@ -410,7 +454,35 @@ func descriptorVectors() {
 	d2[kKeyEpoch] = uint64(1)
 	fmt.Printf("key_epoch=1 -> REJECT (%v)\n", validateDescriptorMap(d2))
 
-	fmt.Printf("\n### Vector 10 — extension criticality (deterministic)\n")
+	chunked := make(map[int]any, len(desc)+2)
+	for key, value := range desc {
+		chunked[key] = value
+	}
+	chunked[kPlaintextSize] = uint64(1048577)
+	chunked[kChunkSize] = uint64(1048576)
+	chunked[kChunkIDs] = []any{fixedBytes(0xc0, 16), fixedBytes(0xd0, 16)}
+	chunked[kChunkHashes] = []any{fixedBytes(0x80, 32), fixedBytes(0xa0, 32)}
+	must(validateChunkedDescriptorMap(chunked))
+	chunkedBytes, err := em.Marshal(chunked)
+	must(err)
+	chunkedDigest := sha256.Sum256(chunkedBytes)
+	chunkedSignature := ed25519.Sign(priv, append([]byte("dud/v2/descriptor\x00"), chunkedDigest[:]...))
+	fmt.Printf("\n### Vector 10 — chunked descriptor (deterministic)\n")
+	fmt.Printf("chunk_size          = %d\n", chunked[kChunkSize])
+	fmt.Printf("chunk_ids           = %s, %s\n", h(chunked[kChunkIDs].([]any)[0].([]byte)), h(chunked[kChunkIDs].([]any)[1].([]byte)))
+	fmt.Printf("chunk_hashes        = %s, %s\n", h(chunked[kChunkHashes].([]any)[0].([]byte)), h(chunked[kChunkHashes].([]any)[1].([]byte)))
+	fmt.Printf("plaintext_size      = %d\n", chunked[kPlaintextSize])
+	fmt.Printf("descriptor_cbor_len = %d bytes\n", len(chunkedBytes))
+	fmt.Printf("descriptor_cbor     = %s\n", h(chunkedBytes))
+	fmt.Printf("descriptor_digest   = %s\n", h(chunkedDigest[:]))
+	fmt.Printf("signature           = %s\n", h(chunkedSignature))
+	fmt.Println("PASS: feature-7 decoder accepts the chunked descriptor")
+	if err := validateDescriptorMap(chunked); err == nil {
+		panic("baseline decoder accepted chunked descriptor")
+	}
+	fmt.Println("baseline decoder    -> REJECT (keys 24 and 25 are unsupported)")
+
+	fmt.Printf("\n### Vector 11 — extension criticality (deterministic)\n")
 	for _, tc := range []struct {
 		name string
 		key  int

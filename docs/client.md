@@ -231,6 +231,45 @@ Repeating those flags by hand is what the shell wrapper in §6 exists to avoid.
 
 Use `dud --version` to print the client version.
 
+### Resumable peer files
+
+When both the server and the paired peer advertise resumable chunk support,
+`dud send PEER --file PATH` uses independent encrypted chunks for a regular file
+larger than 16 MiB. The source streams into a private spool under the selected
+world's `state/uploads` directory. Publication records each successful chunk, so
+`dud sync PEER` skips it after a connection failure or process restart. The
+source file is not needed once the encrypted spool is complete.
+
+`dud receive PEER` stores verified encrypted chunks under `state/transfers` and
+skips them on retry. It decrypts and assembles the payload into a private
+temporary file, verifies the complete plaintext, and renames it into place.
+Until that rename succeeds, the destination and the receive watermark remain
+unchanged.
+
+Progress is written to stderr, leaving payload or JSON output on stdout:
+
+```text
+Uploaded chunk 2/5 (16782955 bytes).
+Downloaded chunk 3/5 (16782955 bytes).
+```
+
+`dud peer show PEER` and `dud doctor` report resumable upload and download
+counts, bytes remaining, and each descriptor digest. JSON output includes the
+same entries under `resumable_transfers`. To discard one explicitly:
+
+```sh
+dud peer abandon PEER --id DESCRIPTOR_DIGEST --yes
+```
+
+Abandoning an upload deletes its active server lease when reachable, removes the
+private spool, and rolls back the unpublished sequence. It is allowed only for
+the newest outbound sequence. A lost commit response leaves publication
+ambiguous. Retrying the send resolves the same idempotent commit; abandoning it
+deletes the local spool but retains the signed sequence and digest so a
+different descriptor can never reuse that sequence. Abandoning a download
+removes its local staged chunks; the published delivery stays on the server, so
+a later receive starts it from the first chunk.
+
 ## 5. JSON output
 
 Every command that reports a result accepts `--json`: `test`, `upload`,

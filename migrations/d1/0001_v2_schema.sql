@@ -2,10 +2,8 @@
 -- live exclusively in the FILES R2 binding; every column here is either opaque
 -- ciphertext or bounded accounting.
 --
--- Wrangler records this file in `d1_migrations` and never reruns it, and every
--- statement below is `IF NOT EXISTS`, so editing it changes nothing on a
--- database that already has it. A schema change means recreating each database
--- — see "Recreating the database" in docs/server-v2.md.
+-- Wrangler records each numbered file in `d1_migrations` and never reruns it.
+-- This bootstrap stays immutable; schema extensions use higher-numbered files.
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS relationships (

@@ -40,6 +40,7 @@ import type {
   V2RepositoryCapability,
 } from './v2-repository.js';
 import { sha256 } from './sha256.js';
+import { createV2ChunkHandler } from './v2-chunk-service.js';
 import {
   classifyV2Operation,
   startV2Timing,
@@ -382,6 +383,22 @@ export function createV2DeliveryHandler(
   dependencies: V2DeliveryHandlerDependencies,
 ) {
   const now = dependencies.now ?? (() => Date.now());
+  const chunks = createV2ChunkHandler({
+    repository: dependencies.repository,
+    bodyStore: dependencies.bodyStore,
+    deploymentKey: dependencies.deploymentKey,
+    now,
+    maximumRequestsPerMinute: dependencies.maximumRequestsPerMinute ?? 60,
+    maximumConcurrentUploads: dependencies.maximumConcurrentUploads ?? 4,
+    maximumStagedBytes: dependencies.maximumStagedBytes ?? 200 * 1024 * 1024,
+    maximumDescriptorBytes: dependencies.maximumDescriptorBytes ?? 262_144,
+    maximumTtlSeconds:
+      dependencies.maximumTtlSeconds ?? MAX_DELIVERY_TTL_SECONDS,
+    maximumTotalBytes: dependencies.maximumTotalBytes,
+    maximumPendingDeliveries: dependencies.maximumPendingDeliveries,
+    maximumObjectsPerCapability: dependencies.maximumObjectsPerCapability,
+    observeRejection: dependencies.observeRejection,
+  });
 
   async function publish(
     request: Request,
@@ -436,6 +453,7 @@ export function createV2DeliveryHandler(
       stagedKey = await timing.measure('metadata', () =>
         dependencies.repository.reserveStagedBody({
           id: stagingId!,
+          capabilityId: capability.id,
           expiresAt: current + MAX_PROOF_LIFETIME_SECONDS,
           now: current,
           reservedBytes: payloadLength,
@@ -813,12 +831,6 @@ export function createV2DeliveryHandler(
       ]);
       let payload = emptyPayload();
       if (result.delivery) {
-        const body = await timing.measure('body', () =>
-          dependencies.bodyStore.get(result.delivery!.payloadKey),
-        );
-        if (!body || body.size !== result.delivery.payloadLength) {
-          return v2ErrorResponse(13, 'Inbox payload is unavailable.');
-        }
         header.set(
           V2_INBOX_RESPONSE_KEYS.deliveryId,
           idBytes(result.delivery.id),
@@ -838,16 +850,41 @@ export function createV2DeliveryHandler(
           throw new Error('Stored delivery policy is invalid.');
         }
         header.set(V2_INBOX_RESPONSE_KEYS.effectivePolicy, effectivePolicy);
-        header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, body.size);
-        header.set(
-          V2_INBOX_RESPONSE_KEYS.payloadDigest,
-          result.delivery.payloadDigest,
-        );
+        if (result.delivery.parts) {
+          header.set(
+            V2_INBOX_RESPONSE_KEYS.chunkManifest,
+            result.delivery.parts.map(
+              (part) =>
+                new Map<number, CborValue>([
+                  [1, idBytes(part.id)],
+                  [2, part.length],
+                  [3, part.digest],
+                ]),
+            ),
+          );
+          header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, 0);
+          header.set(
+            V2_INBOX_RESPONSE_KEYS.payloadDigest,
+            sha256(new Uint8Array()),
+          );
+        } else {
+          const body = await timing.measure('body', () =>
+            dependencies.bodyStore.get(result.delivery!.payloadKey),
+          );
+          if (!body || body.size !== result.delivery.payloadLength) {
+            return v2ErrorResponse(13, 'Inbox payload is unavailable.');
+          }
+          header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, body.size);
+          header.set(
+            V2_INBOX_RESPONSE_KEYS.payloadDigest,
+            result.delivery.payloadDigest,
+          );
+          payload = body.body;
+        }
         header.set(
           V2_INBOX_RESPONSE_KEYS.moreDeliveries,
           Array.from(result.pendingEpochs, (epoch) => epoch),
         );
-        payload = body.body;
       } else {
         header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, 0);
         header.set(
@@ -1278,13 +1315,6 @@ export function createV2DeliveryHandler(
       pathname: string,
       timing?: V2TimingRecorder,
     ): Promise<Response | null> {
-      if (request.method !== 'POST') {
-        return null;
-      }
-      const run = resolve(pathname);
-      if (!run) {
-        return null;
-      }
       const owned = timing === undefined;
       const recorder =
         timing ??
@@ -1293,7 +1323,17 @@ export function createV2DeliveryHandler(
           dependencies.observeTiming,
           dependencies.monotonicMs,
         );
-      const response = await run(request, origin, recorder);
+      const chunkResponse = await chunks.route(
+        request,
+        origin,
+        pathname,
+        recorder,
+      );
+      const run = request.method === 'POST' ? resolve(pathname) : null;
+      if (!chunkResponse && !run) {
+        return null;
+      }
+      const response = chunkResponse ?? (await run!(request, origin, recorder));
       if (owned) {
         recorder.finish(response.status);
       }

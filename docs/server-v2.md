@@ -184,7 +184,7 @@ them:
 - `FILES` is the R2 bucket holding v1 objects and v2 delivery bodies.
 - `DB` is the D1 database holding all v2 metadata.
 
-Schema management is a single idempotent migration:
+Schema management uses ordered, idempotent migrations:
 
 ```sh
 npx wrangler d1 migrations apply dud-v2 --remote
@@ -195,14 +195,10 @@ Use `--local` to prepare the database that `npx wrangler dev` uses.
 
 ### Recreating the database
 
-The schema is one file that is edited in place, so a schema change does not
-migrate a database that already applied it; recreate each one. Wrangler recorded
-the file in `d1_migrations` and skips it on the next apply, and every statement
-in it is `IF NOT EXISTS`, so a database left alone keeps its old columns and
-fails the affected routes with `D1_ERROR: … SQLITE_ERROR` while
-`migrations list` still reports nothing pending.
-
-Recreating drops every relationship, so each paired device has to pair again.
+Recreating the database is a destructive recovery operation, not a schema
+upgrade. Normal upgrades apply every pending numbered migration with the command
+above. A reset drops every relationship, so each paired device has to pair
+again.
 
 ```sh
 npx wrangler d1 execute dud-v2 --remote --file migrations/reset-d1.sql
@@ -286,6 +282,27 @@ entry under `[vars]` changes nothing. The defaults are:
 Limits are published in the discovery document, so clients check their own
 requests before sending. Staged bytes must permit at least one maximum-sized
 object; the service refuses to start with a configuration that cannot.
+
+### Resumable peer upload storage
+
+Resumable uploads reserve their complete declared ciphertext size against
+`DUD_PEER_MAX_STAGED_BYTES` before the server accepts a part. The wire contract
+permits up to 1 GiB of plaintext, but the default 200 MiB staged-byte quota is
+the effective per-capability ceiling unless the operator raises it. Chunk wire
+limits are fixed protocol ceilings rather than environment settings: 16782955
+ciphertext bytes per part, 1024 parts, 1 GiB plaintext, and a one-hour lease.
+
+The self-hosted deployment keeps upload manifests and lease state in SQLite and
+each immutable part in the body directory. Cloudflare keeps the same metadata in
+D1 and each part in a separate R2 object. Back up each pair as one logical unit.
+A restore that captures only one side needs the reconciliation procedure in §7
+and `recovery-v2.md` §7.
+
+Lease expiry and explicit abandonment make an unpublished upload eligible for
+bounded maintenance. Maintenance deletes its part keys and then releases the
+staged-byte reservation; the reservation remains charged while any recorded part
+still needs cleanup. Committed parts follow the delivery lifetime and are
+retired only through delivery completion or expiry.
 
 Rate and storage accounting is shared wherever the deployment keeps a
 whole-state ledger to share. The self-hosted server keeps one, so with v2

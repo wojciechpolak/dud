@@ -8,6 +8,31 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add resumable chunked peer transfers, negotiated through server capabilities
+  and signed peer acknowledgements. Regular files larger than 16 MiB stream into
+  a private encrypted spool, and `dud sync PEER` resumes queued uploads after a
+  connection failure or process restart.
+- Resume downloads from verified encrypted chunks when repeating
+  `dud receive PEER`. The receiver verifies the complete plaintext and installs
+  the output atomically before advancing its receive watermark.
+- Report chunk progress on stderr and resumable transfers with descriptor
+  digests and bytes remaining in `dud peer show`, `dud doctor`, and JSON output.
+  Add `dud peer abandon PEER --id DIGEST --yes` to discard a saved transfer.
+- Add durable upload leases, chunk storage, retry-safe commits, and cleanup
+  across the memory, SQLite/filesystem, and D1/R2 backends. Uploads reserve
+  their full ciphertext size and stay out of the inbox until commit.
+
+### Changed
+
+- Support up to 1 GiB of plaintext per chunked peer delivery, bounded by the
+  server's staged-byte quota, which defaults to 200 MiB per capability.
+- Add numbered D1 migration `0002_chunk_uploads.sql` for resumable upload
+  storage. Apply pending migrations before deploying the Worker; existing
+  relationships are preserved. The self-hosted server applies its SQLite schema
+  migration on startup.
+
 ## [2.1.0] - 2026-08-28
 
 ### Added

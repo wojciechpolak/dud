@@ -157,6 +157,7 @@ for (const [name, createRepository] of V2_REPOSITORY_BACKENDS) {
     });
     await fixture.repository.reserveStagedBody({
       id: 'a'.repeat(32),
+      capabilityId: 'write-capability',
       expiresAt: V2_NOW + 60,
       now: V2_NOW,
       reservedBytes: 3,

@@ -8,6 +8,7 @@ import {
   type CborValue,
 } from './cbor.js';
 import { sha256, StreamingSha256 } from './sha256.js';
+import { V2_CHUNK_LIMITS } from './v2-contract.js';
 
 /** The wire prefix shared by delivery requests and inbox responses. */
 export const V2_DELIVERY_FRAME_MAGIC = Uint8Array.of(0x44, 0x55, 0x44, 0x32);
@@ -47,6 +48,7 @@ export const V2_INBOX_RESPONSE_KEYS = {
   payloadLength: 7,
   payloadDigest: 8,
   moreDeliveries: 9,
+  chunkManifest: 10,
 } as const;
 
 /** Numeric keys in a bounded POST /v2/inbox request body. */
@@ -503,6 +505,7 @@ export function decodeV2InboxResponseFrame(frame: Uint8Array): V2DeliveryFrame {
     V2_INBOX_RESPONSE_KEYS.slot,
     V2_INBOX_RESPONSE_KEYS.encryptedDescriptor,
     V2_INBOX_RESPONSE_KEYS.effectivePolicy,
+    V2_INBOX_RESPONSE_KEYS.chunkManifest,
   ];
   if (deliveryId === undefined) {
     if (
@@ -530,6 +533,31 @@ export function decodeV2InboxResponseFrame(frame: Uint8Array): V2DeliveryFrame {
   }
   if (!(header.get(V2_INBOX_RESPONSE_KEYS.effectivePolicy) instanceof Map)) {
     throw new Error('Inbox effective policy is invalid.');
+  }
+  const chunkManifest = header.get(V2_INBOX_RESPONSE_KEYS.chunkManifest);
+  if (
+    chunkManifest !== undefined &&
+    (!Array.isArray(chunkManifest) ||
+      chunkManifest.length < 2 ||
+      chunkManifest.length > V2_CHUNK_LIMITS.maxChunksPerDelivery ||
+      chunkManifest.some((raw) => {
+        try {
+          const part = requireCborMap(raw, [1, 2, 3], [1, 2, 3]);
+          requireBytes(part.get(1), 16, 'Inbox chunk ID');
+          requireUnsigned(
+            part.get(2),
+            V2_CHUNK_LIMITS.maxChunkCiphertextBytes,
+            'Inbox chunk length',
+          );
+          requireBytes(part.get(3), 32, 'Inbox chunk digest');
+          return false;
+        } catch {
+          return true;
+        }
+      }) ||
+      decoded.payload.byteLength !== 0)
+  ) {
+    throw new Error('Inbox chunk manifest is invalid.');
   }
   return decoded;
 }

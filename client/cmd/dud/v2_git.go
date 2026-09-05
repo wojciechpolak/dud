@@ -1430,7 +1430,7 @@ func (runtime *v2PeerRuntime) publishV2PeerPayload(ctx context.Context, plaintex
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return 0, "", err
 	}
-	if err := runtime.flushPendingGranularDeliveries(ctx); err != nil {
+	if err := runtime.flushPendingDeliveries(ctx); err != nil {
 		return descriptor.Sequence, key, fmt.Errorf("delivery committed locally and will retry publication: %w", err)
 	}
 	return descriptor.Sequence, key, nil
@@ -1466,7 +1466,7 @@ func (a *app) cmdV2GitPush(args []string) error {
 		if err := runtime.flushPendingCompletions(ctx); err != nil {
 			fmt.Fprintf(a.errOut, "WARNING: queued peer completions remain pending: %v\n", err)
 		}
-		if err := runtime.flushPendingGranularDeliveries(ctx); err != nil {
+		if err := runtime.flushPendingDeliveries(ctx); err != nil {
 			return fmt.Errorf("retry pending peer publication: %w", err)
 		}
 		state, err := repository.loadPeerState(repositoryID, runtime.peer.PeerPseudonymousID)
@@ -1658,7 +1658,7 @@ func (a *app) validateV2GitIncrementalBase(repository *v2GitRepository, state *v
 	return nil
 }
 
-func v2GitAvailableBytes(path string) (uint64, error) {
+func v2AvailableBytes(path string) (uint64, error) {
 	var stats unix.Statfs_t
 	if err := unix.Statfs(path, &stats); err != nil {
 		return 0, err
@@ -1771,7 +1771,7 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 	if !info.Mode().IsRegular() || info.Size() <= 0 || uint64(info.Size()) > repository.Limits.BundleBytes {
 		return "", rejectV2Git(fmt.Errorf("Git bundle violates the local limit of %d bytes", repository.Limits.BundleBytes))
 	}
-	available, err := v2GitAvailableBytes(repository.DUDDir)
+	available, err := v2AvailableBytes(repository.DUDDir)
 	if err != nil {
 		return "", err
 	}

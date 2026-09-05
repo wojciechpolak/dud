@@ -504,6 +504,7 @@ test('D1/R2 reconciliation walks both body prefixes against D1 metadata', async 
   );
   const stagedKey = await repository.reserveStagedBody({
     id: 'a'.repeat(32),
+    capabilityId: 'staged-writer',
     expiresAt: 100_000,
     now: 0,
     reservedBytes: 3,

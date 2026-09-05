@@ -176,8 +176,9 @@ powered-off disk.
 ### 3.11 Traffic Analysis
 
 Timing, frequency, ciphertext size, and polling behaviour remain observable.
-Fixed-size chunking reduces individual-file size leakage; final-chunk padding is
-optional because it costs bandwidth and storage.
+Fixed-size chunking limits each non-final plaintext chunk to one of three public
+sizes. It still reveals chunk count, ciphertext lengths, and the shorter final
+chunk. Final-chunk padding is optional because it costs bandwidth and storage.
 
 A user who needs unlinkability of a device's traffic in general needs a
 network-level anonymity layer that DUD does not provide. No protocol decision
@@ -185,9 +186,15 @@ here substitutes for one.
 
 ### 3.12 Denial of Service
 
-Bounded by quotas, rate limits, request-size enforcement, and receiver-side
-budgets for ciphertext bytes, plaintext bytes, chunks, files, Git objects, CPU,
-memory, time, and disk. Capability failures are rate-limited.
+Bounded by quotas, rate limits, request-size enforcement, one-hour upload
+leases, and receiver-side budgets for ciphertext bytes, plaintext bytes, chunks,
+files, Git objects, CPU, memory, time, and disk. A chunked payload is at most 1
+GiB of plaintext and 1024 chunks. The server reserves its complete declared
+ciphertext size before accepting a part and reclaims abandoned reservations
+through bounded maintenance. The client checks available disk before creating an
+encrypted send spool or receiving missing chunks. Every reused staged part must
+still match its signed length and hash, and assembly writes through a private
+temporary file so interruption does not expose a partial output.
 
 Not defended: an operator can deny service to its own users at will.
 
@@ -195,9 +202,10 @@ Not defended: an operator can deny service to its own users at will.
 
 Descriptors are deterministic CBOR with duplicate-key rejection,
 indefinite-length rejection, and hard limits enforced before allocation.
-Archives are bounded by the sender's own **signed** plaintext size with a 1 GB
-cap, plus entry-count and path-depth limits. Descriptor and invitation parsing
-are fuzzed.
+Archives are bounded by the sender's own **signed** plaintext size with a 1 GiB
+cap, plus entry-count and path-depth limits. A chunked descriptor uses the same
+cap, so assembly cannot create an archive larger than extraction permits.
+Descriptor and invitation parsing are fuzzed.
 
 ### 3.14 Malicious Server, Code Substitution, and Relay
 

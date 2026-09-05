@@ -7,6 +7,11 @@ import { join } from 'node:path';
 
 import { bytesEqual } from './cbor.js';
 import {
+  v2DeliveryChunkKey,
+  v2StagedChunkKey,
+  validateV2BodyPartDeclarations,
+} from './v2-body-keys.js';
+import {
   applyV2SQLiteMigrations,
   type V2SQLiteDatabase,
 } from './v2-sqlite-schema.js';
@@ -15,11 +20,14 @@ import type {
   V2CapabilityRegistration,
   V2CapabilityReissueInput,
   V2CapabilityReissueOutcome,
+  V2ChunkUpload,
+  V2CommittedBodyPart,
   V2DeliveryReservation,
   V2MaintenanceResult,
   V2RepositoryCapability,
   V2RepositoryControlEvent,
   V2RepositoryDelivery,
+  V2RepositoryAuthorization,
 } from './v2-repository.js';
 import type {
   D1PairingRecord,
@@ -252,6 +260,7 @@ export class SQLiteV2Database {
 
   reserveStagedBody(
     id: string,
+    capabilityId: string,
     expiresAt: number,
     now: number,
     reservedBytes: number,
@@ -260,6 +269,7 @@ export class SQLiteV2Database {
   ): string {
     if (
       !/^[a-f0-9]{32}$/.test(id) ||
+      capabilityId.length === 0 ||
       !Number.isSafeInteger(expiresAt) ||
       !Number.isSafeInteger(now) ||
       !Number.isSafeInteger(reservedBytes) ||
@@ -270,9 +280,15 @@ export class SQLiteV2Database {
     const database = this.requireDatabase();
     const active = database
       .prepare(
-        'SELECT COUNT(*) AS count, COALESCE(SUM(reserved_bytes), 0) AS bytes FROM staged_bodies WHERE expires_at > ?',
+        `SELECT
+           (SELECT COUNT(*) FROM staged_bodies WHERE (capability_id = ? OR capability_id IS NULL) AND expires_at > ?) AS count,
+           (SELECT COALESCE(SUM(reserved_bytes), 0) FROM staged_bodies WHERE (capability_id = ? OR capability_id IS NULL) AND expires_at > ?) +
+           (SELECT COALESCE(SUM(total_length), 0) FROM chunk_uploads WHERE capability_id = ? AND committed_at IS NULL AND expires_at > ?) AS bytes`,
       )
-      .get(now) as { count: number; bytes: number };
+      .get(capabilityId, now, capabilityId, now, capabilityId, now) as {
+      count: number;
+      bytes: number;
+    };
     if (
       Number(active.count) >= maximumConcurrentUploads ||
       Number(active.bytes) + reservedBytes > maximumStagedBytes
@@ -282,9 +298,9 @@ export class SQLiteV2Database {
     const key = `staging/${id}.bin`;
     database
       .prepare(
-        'INSERT INTO staged_bodies(id, body_key, expires_at, reserved_bytes) VALUES (?, ?, ?, ?)',
+        'INSERT INTO staged_bodies(id, capability_id, body_key, expires_at, reserved_bytes) VALUES (?, ?, ?, ?, ?)',
       )
-      .run(id, key, expiresAt, reservedBytes);
+      .run(id, capabilityId, key, expiresAt, reservedBytes);
     return key;
   }
 
@@ -292,6 +308,446 @@ export class SQLiteV2Database {
     this.requireDatabase()
       .prepare('DELETE FROM staged_bodies WHERE id = ?')
       .run(id);
+  }
+
+  createChunkUpload(input: {
+    capabilityId: string;
+    operationId: Uint8Array;
+    operationDigest: Uint8Array;
+    chain: number;
+    slot: Uint8Array;
+    epoch: number;
+    parts: Parameters<typeof validateV2BodyPartDeclarations>[0];
+    totalLength: number;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+    expiresAt: number;
+    maximumConcurrentUploads: number;
+    maximumStagedBytes: number;
+  }): { upload: V2ChunkUpload; idempotent: boolean } {
+    validateV2BodyPartDeclarations(input.parts, input.totalLength);
+    this.validateChunkOperation(input.operationId, input.operationDigest);
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const capability = database
+        .prepare(
+          "SELECT expires_at FROM capabilities WHERE id = ? AND scope = 'write' AND expires_at > ? AND revoked_at IS NULL",
+        )
+        .get(input.capabilityId, input.now) as
+        | { expires_at: number }
+        | undefined;
+      if (
+        !capability ||
+        input.expiresAt <= input.now ||
+        input.expiresAt > Number(capability.expires_at) ||
+        !Number.isSafeInteger(input.chain) ||
+        input.chain < 0 ||
+        input.slot.byteLength !== 16 ||
+        !Number.isSafeInteger(input.epoch) ||
+        input.epoch < 0 ||
+        !Number.isSafeInteger(input.maximumConcurrentUploads) ||
+        input.maximumConcurrentUploads < 1 ||
+        !Number.isSafeInteger(input.maximumStagedBytes) ||
+        input.maximumStagedBytes < input.totalLength
+      ) {
+        throw new Error('Chunk upload lease is invalid.');
+      }
+      this.authorizeChunkRequest(
+        database,
+        input.capabilityId,
+        input.authorization,
+        input.now,
+      );
+      const prior = database
+        .prepare(
+          'SELECT id, operation_digest FROM chunk_uploads WHERE operation_id = ?',
+        )
+        .get(input.operationId) as Record<string, unknown> | undefined;
+      if (prior) {
+        if (
+          !bytesEqual(
+            prior.operation_digest as Uint8Array,
+            input.operationDigest,
+          )
+        ) {
+          throw new V2OperationConflictError(
+            'Operation ID conflicts with a chunk upload.',
+          );
+        }
+        const upload = this.requireChunkUpload(String(prior.id));
+        database.exec('COMMIT');
+        return { upload, idempotent: true };
+      }
+      const usage = database
+        .prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM chunk_uploads WHERE capability_id = ? AND committed_at IS NULL AND expires_at > ?) AS uploads,
+             (SELECT COALESCE(SUM(total_length), 0) FROM chunk_uploads WHERE capability_id = ? AND committed_at IS NULL AND expires_at > ?) +
+             (SELECT COALESCE(SUM(reserved_bytes), 0) FROM staged_bodies WHERE (capability_id = ? OR capability_id IS NULL) AND expires_at > ?) AS bytes`,
+        )
+        .get(
+          input.capabilityId,
+          input.now,
+          input.capabilityId,
+          input.now,
+          input.capabilityId,
+          input.now,
+        ) as {
+        uploads: number;
+        bytes: number;
+      };
+      if (
+        Number(usage.uploads) >= input.maximumConcurrentUploads ||
+        Number(usage.bytes) + input.totalLength > input.maximumStagedBytes
+      ) {
+        throw new Error('Chunk upload staging quota is exhausted.');
+      }
+      const id = randomRecordId();
+      database
+        .prepare(
+          'INSERT INTO chunk_uploads(id, delivery_id, capability_id, chain, slot, epoch, total_length, created_at, expires_at, operation_id, operation_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(
+          id,
+          randomRecordId(),
+          input.capabilityId,
+          input.chain,
+          input.slot,
+          input.epoch,
+          input.totalLength,
+          input.now,
+          input.expiresAt,
+          input.operationId,
+          input.operationDigest,
+        );
+      const insertPart = database.prepare(
+        'INSERT INTO chunk_upload_parts(upload_id, part_id, ordinal, length, digest) VALUES (?, ?, ?, ?, ?)',
+      );
+      for (const [ordinal, part] of input.parts.entries()) {
+        insertPart.run(id, part.id, ordinal, part.length, part.digest);
+      }
+      const upload = this.requireChunkUpload(id);
+      database.exec('COMMIT');
+      return { upload, idempotent: false };
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  findChunkUpload(
+    id: string,
+    capabilityId: string,
+    now: number,
+  ): V2ChunkUpload | null {
+    const active = this.requireDatabase()
+      .prepare(
+        "SELECT 1 FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL",
+      )
+      .get(id, capabilityId, now, now);
+    return active ? this.requireChunkUpload(id) : null;
+  }
+
+  findChunkUploadForCommit(
+    id: string,
+    capabilityId: string,
+    now: number,
+  ): V2ChunkUpload | null {
+    const active = this.requireDatabase()
+      .prepare(
+        "SELECT 1 FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL",
+      )
+      .get(id, capabilityId, now, now);
+    return active ? this.requireChunkUpload(id) : null;
+  }
+
+  authorizeChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+  }): V2ChunkUpload {
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
+      this.authorizeChunkRequest(
+        database,
+        input.capabilityId,
+        input.authorization,
+        input.now,
+      );
+      const upload = this.requireChunkUpload(input.id);
+      database.exec('COMMIT');
+      return upload;
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  prepareChunkUploadPart(input: {
+    id: string;
+    capabilityId: string;
+    partId: string;
+    writeToken: string;
+    writeExpiresAt: number;
+    operationId: Uint8Array;
+    operationDigest: Uint8Array;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+  }): { upload: V2ChunkUpload; idempotent: boolean } {
+    this.validateChunkOperation(input.operationId, input.operationDigest);
+    if (
+      !/^[a-f0-9]{32}$/.test(input.writeToken) ||
+      !Number.isSafeInteger(input.writeExpiresAt) ||
+      input.writeExpiresAt <= input.now
+    ) {
+      throw new Error('Chunk upload part write lease is invalid.');
+    }
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
+      this.authorizeChunkRequest(
+        database,
+        input.capabilityId,
+        input.authorization,
+        input.now,
+      );
+      const part = database
+        .prepare(
+          'SELECT body_key, operation_id, operation_digest, write_token, write_expires_at FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
+        )
+        .get(input.id, input.partId) as Record<string, unknown> | undefined;
+      if (!part) {
+        throw new Error('Chunk upload part is unavailable.');
+      }
+      if (part.body_key !== null) {
+        if (
+          part.operation_id === null ||
+          !bytesEqual(part.operation_id as Uint8Array, input.operationId) ||
+          !bytesEqual(
+            part.operation_digest as Uint8Array,
+            input.operationDigest,
+          )
+        ) {
+          throw new V2OperationConflictError(
+            'Chunk upload part conflicts with existing bytes.',
+          );
+        }
+        const upload = this.requireChunkUpload(input.id);
+        database.exec('COMMIT');
+        return { upload, idempotent: true };
+      }
+      if (
+        part.operation_id !== null &&
+        (!bytesEqual(part.operation_id as Uint8Array, input.operationId) ||
+          !bytesEqual(
+            part.operation_digest as Uint8Array,
+            input.operationDigest,
+          ))
+      ) {
+        throw new V2OperationConflictError(
+          'Chunk upload part conflicts with an in-flight write.',
+        );
+      }
+      if (
+        part.write_token !== null &&
+        Number(part.write_expires_at) > input.now
+      ) {
+        throw new Error('Chunk upload part write is unavailable.');
+      }
+      database
+        .prepare(
+          'UPDATE chunk_upload_parts SET write_token = ?, write_expires_at = ?, operation_id = ?, operation_digest = ? WHERE upload_id = ? AND part_id = ? AND body_key IS NULL',
+        )
+        .run(
+          input.writeToken,
+          input.writeExpiresAt,
+          input.operationId,
+          input.operationDigest,
+          input.id,
+          input.partId,
+        );
+      const upload = this.requireChunkUpload(input.id);
+      database.exec('COMMIT');
+      return { upload, idempotent: false };
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  completeChunkUploadPart(input: {
+    id: string;
+    capabilityId: string;
+    partId: string;
+    writeToken: string;
+    bodyKey: string;
+    now: number;
+  }): V2ChunkUpload {
+    if (
+      !/^[a-f0-9]{32}$/.test(input.writeToken) ||
+      input.bodyKey !== v2StagedChunkKey(input.id, input.partId)
+    ) {
+      throw new Error('Chunk upload part completion is invalid.');
+    }
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
+      const result = database
+        .prepare(
+          'UPDATE chunk_upload_parts SET body_key = ?, received_at = ?, write_token = NULL, write_expires_at = NULL WHERE upload_id = ? AND part_id = ? AND body_key IS NULL AND write_token = ?',
+        )
+        .run(
+          input.bodyKey,
+          input.now,
+          input.id,
+          input.partId,
+          input.writeToken,
+        ) as { changes: number };
+      if (result.changes !== 1) {
+        throw new Error('Chunk upload part write is unavailable.');
+      }
+      const upload = this.requireChunkUpload(input.id);
+      database.exec('COMMIT');
+      return upload;
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  abortChunkUploadPart(input: {
+    id: string;
+    partId: string;
+    writeToken: string;
+  }): boolean {
+    if (!/^[a-f0-9]{32}$/.test(input.writeToken)) {
+      throw new Error('Chunk upload part write token is invalid.');
+    }
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = database
+        .prepare(
+          'UPDATE chunk_upload_parts SET write_token = NULL, write_expires_at = NULL, operation_id = NULL, operation_digest = NULL WHERE upload_id = ? AND part_id = ? AND body_key IS NULL AND write_token = ?',
+        )
+        .run(input.id, input.partId, input.writeToken) as { changes: number };
+      const missing =
+        result.changes === 0 &&
+        database
+          .prepare(
+            'SELECT 1 FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
+          )
+          .get(input.id, input.partId) === undefined;
+      database.exec('COMMIT');
+      return result.changes === 1 || missing;
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  renewChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    operationId: Uint8Array;
+    operationDigest: Uint8Array;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+    expiresAt: number;
+  }): { upload: V2ChunkUpload; idempotent: boolean } {
+    this.validateChunkOperation(input.operationId, input.operationDigest);
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const row = database
+        .prepare(
+          "SELECT u.expires_at, u.renewal_operation_id, u.renewal_operation_digest, c.expires_at AS capability_expires_at FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL",
+        )
+        .get(input.id, input.capabilityId, input.now, input.now) as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) {
+        throw new Error('Chunk upload lease cannot be renewed.');
+      }
+      this.authorizeChunkRequest(
+        database,
+        input.capabilityId,
+        input.authorization,
+        input.now,
+      );
+      if (
+        row.renewal_operation_id !== null &&
+        bytesEqual(row.renewal_operation_id as Uint8Array, input.operationId)
+      ) {
+        if (
+          !bytesEqual(
+            row.renewal_operation_digest as Uint8Array,
+            input.operationDigest,
+          )
+        ) {
+          throw new V2OperationConflictError(
+            'Chunk upload renewal operation conflicts.',
+          );
+        }
+        const upload = this.requireChunkUpload(input.id);
+        database.exec('COMMIT');
+        return { upload, idempotent: true };
+      }
+      if (
+        input.expiresAt <= Number(row.expires_at) ||
+        input.expiresAt > Number(row.capability_expires_at)
+      ) {
+        throw new Error('Chunk upload lease cannot be renewed.');
+      }
+      database
+        .prepare(
+          'UPDATE chunk_uploads SET expires_at = ?, renewal_operation_id = ?, renewal_operation_digest = ? WHERE id = ?',
+        )
+        .run(
+          input.expiresAt,
+          input.operationId,
+          input.operationDigest,
+          input.id,
+        );
+      const upload = this.requireChunkUpload(input.id);
+      database.exec('COMMIT');
+      return { upload, idempotent: false };
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  abandonChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+  }): void {
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
+      this.authorizeChunkRequest(
+        database,
+        input.capabilityId,
+        input.authorization,
+        input.now,
+      );
+      database
+        .prepare('UPDATE chunk_uploads SET expires_at = ? WHERE id = ?')
+        .run(input.now, input.id);
+      database.exec('COMMIT');
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   createRelationship(input: {
@@ -974,6 +1430,7 @@ export class SQLiteV2Database {
     },
     maximumPendingDeliveries?: number,
     maximumObjectsPerCapability?: number,
+    chunkUploadId?: string,
   ): V2DeliveryReservation | { existing: V2RepositoryDelivery } {
     const database = this.requireDatabase();
     database.exec('BEGIN IMMEDIATE');
@@ -1099,8 +1556,30 @@ export class SQLiteV2Database {
           expiresAt,
         };
       }
-      const deliveryId = crypto.randomUUID().replaceAll('-', '');
-      const payloadKey = `deliveries/${deliveryId}.bin`;
+      const upload = chunkUploadId
+        ? (database
+            .prepare(
+              'SELECT delivery_id, total_length FROM chunk_uploads WHERE id = ? AND capability_id = ? AND committed_at IS NULL AND expires_at > ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts WHERE upload_id = ? AND body_key IS NULL)',
+            )
+            .get(chunkUploadId, capabilityId, now, chunkUploadId) as
+            | { delivery_id: string; total_length: number }
+            | undefined)
+        : undefined;
+      if (chunkUploadId && Number(upload?.total_length) !== reservedBytes) {
+        throw new Error('Chunk upload cannot be committed.');
+      }
+      const deliveryId =
+        upload?.delivery_id ?? crypto.randomUUID().replaceAll('-', '');
+      const firstPart = chunkUploadId
+        ? (database
+            .prepare(
+              'SELECT part_id FROM chunk_upload_parts WHERE upload_id = ? ORDER BY ordinal LIMIT 1',
+            )
+            .get(chunkUploadId) as { part_id: string } | undefined)
+        : undefined;
+      const payloadKey = firstPart
+        ? v2DeliveryChunkKey(deliveryId, firstPart.part_id)
+        : `deliveries/${deliveryId}.bin`;
       if (maximumPendingDeliveries !== undefined) {
         const pending = database
           .prepare(
@@ -1179,6 +1658,7 @@ export class SQLiteV2Database {
       direction: 0 | 1;
       slot: Uint8Array;
       epoch: number;
+      chain?: number;
       descriptor: Uint8Array;
       requestedPolicy: Uint8Array;
       effectivePolicy: Uint8Array;
@@ -1190,6 +1670,8 @@ export class SQLiteV2Database {
       operationDigest: Uint8Array;
       createdAt: number;
       expiresAt: number;
+      chunkUploadId?: string;
+      parts?: readonly V2CommittedBodyPart[];
     },
   ): void {
     const database = this.requireDatabase();
@@ -1232,7 +1714,7 @@ export class SQLiteV2Database {
       );
       database
         .prepare(
-          'INSERT INTO deliveries(id, relationship_id, direction, slot, epoch, encrypted_descriptor, requested_policy, effective_policy, policy_digest, payload_key, payload_length, payload_digest, operation_id, operation_digest, state, sequence, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO deliveries(id, relationship_id, direction, slot, epoch, authorization_chain, encrypted_descriptor, requested_policy, effective_policy, policy_digest, payload_key, payload_length, payload_digest, operation_id, operation_digest, state, sequence, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           deliveryId,
@@ -1240,6 +1722,7 @@ export class SQLiteV2Database {
           values.direction,
           values.slot,
           values.epoch,
+          values.chain ?? null,
           values.descriptor,
           values.requestedPolicy,
           values.effectivePolicy,
@@ -1254,6 +1737,48 @@ export class SQLiteV2Database {
           values.createdAt,
           values.expiresAt,
         );
+      if (values.chunkUploadId) {
+        const upload = this.requireChunkUpload(values.chunkUploadId);
+        if (
+          upload.deliveryId !== deliveryId ||
+          !values.parts ||
+          values.parts.length !== upload.parts.length
+        ) {
+          throw new Error('Chunk delivery publication is invalid.');
+        }
+        const insert = database.prepare(
+          'INSERT INTO delivery_chunks(delivery_id, part_id, ordinal, length, digest, body_key) VALUES (?, ?, ?, ?, ?, ?)',
+        );
+        for (const [index, part] of values.parts.entries()) {
+          const declared = upload.parts[index]!;
+          if (
+            part.id !== declared.id ||
+            part.length !== declared.length ||
+            !bytesEqual(part.digest, declared.digest) ||
+            part.key !== v2DeliveryChunkKey(deliveryId, part.id)
+          ) {
+            throw new Error('Chunk delivery publication is invalid.');
+          }
+          insert.run(
+            deliveryId,
+            part.id,
+            index,
+            part.length,
+            part.digest,
+            part.key,
+          );
+        }
+        database
+          .prepare(
+            'UPDATE chunk_uploads SET committed_at = ?, expires_at = ? WHERE id = ? AND committed_at IS NULL',
+          )
+          .run(values.createdAt, values.expiresAt, values.chunkUploadId);
+        database
+          .prepare(
+            'UPDATE chunk_upload_parts SET body_key = NULL WHERE upload_id = ?',
+          )
+          .run(values.chunkUploadId);
+      }
       database
         .prepare('DELETE FROM reservations WHERE delivery_id = ?')
         .run(deliveryId);
@@ -1730,9 +2255,21 @@ export class SQLiteV2Database {
     try {
       const expired = database
         .prepare(
-          'SELECT id, payload_key FROM deliveries WHERE expires_at <= ? ORDER BY expires_at, id LIMIT ?',
+          'SELECT id, payload_key, EXISTS (SELECT 1 FROM chunk_uploads u WHERE u.delivery_id = deliveries.id) AS chunked FROM deliveries WHERE expires_at <= ? AND NOT EXISTS (SELECT 1 FROM delivery_chunks p WHERE p.delivery_id = deliveries.id) ORDER BY expires_at, id LIMIT ?',
         )
         .all(now, limit) as Record<string, unknown>[];
+      const expiredDeliveryParts = database
+        .prepare(
+          'SELECT p.delivery_id, p.part_id, p.body_key FROM delivery_chunks p JOIN deliveries d ON d.id = p.delivery_id WHERE d.expires_at <= ? ORDER BY d.expires_at, p.delivery_id, p.ordinal LIMIT ?',
+        )
+        .all(now, limit) as Record<string, unknown>[];
+      for (const row of expiredDeliveryParts) {
+        database
+          .prepare(
+            'DELETE FROM delivery_chunks WHERE delivery_id = ? AND part_id = ?',
+          )
+          .run(row.delivery_id, row.part_id);
+      }
       for (const row of expired) {
         database.prepare('DELETE FROM deliveries WHERE id = ?').run(row.id);
       }
@@ -1789,6 +2326,26 @@ export class SQLiteV2Database {
           .prepare('DELETE FROM staged_bodies WHERE body_key = ?')
           .run(row.body_key);
       }
+      const chunkParts = database
+        .prepare(
+          'SELECT p.upload_id, p.part_id, p.body_key, u.committed_at FROM chunk_upload_parts p JOIN chunk_uploads u ON u.id = p.upload_id WHERE u.expires_at <= ? ORDER BY u.expires_at, p.upload_id, p.ordinal LIMIT ?',
+        )
+        .all(now, limit) as Record<string, unknown>[];
+      const chunkUploads = database
+        .prepare(
+          'SELECT id FROM chunk_uploads WHERE expires_at <= ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts p WHERE p.upload_id = chunk_uploads.id) ORDER BY expires_at, id LIMIT ?',
+        )
+        .all(now, limit) as Record<string, unknown>[];
+      for (const row of chunkParts) {
+        database
+          .prepare(
+            'DELETE FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
+          )
+          .run(row.upload_id, row.part_id);
+      }
+      for (const row of chunkUploads) {
+        database.prepare('DELETE FROM chunk_uploads WHERE id = ?').run(row.id);
+      }
       const invitationResult = database
         .prepare(
           'DELETE FROM invitations WHERE id IN (SELECT id FROM invitations WHERE expires_at <= ? ORDER BY expires_at, id LIMIT ?)',
@@ -1804,10 +2361,28 @@ export class SQLiteV2Database {
       const deletedInvitations = Number(invitationResult.changes);
       return {
         expiredDeliveryIds: expired.map((row) => String(row.id)),
-        expiredBodyKeys: [
-          ...[...expired, ...abandoned].map((row) => String(row.payload_key)),
-          ...staged.map((row) => String(row.body_key)),
-        ],
+        expiredBodyKeys: Array.from(
+          new Set([
+            ...expired.flatMap((row) =>
+              Number(row.chunked) === 1 ? [] : [String(row.payload_key)],
+            ),
+            ...abandoned.map((row) => String(row.payload_key)),
+            ...expiredDeliveryParts.map((row) => String(row.body_key)),
+            ...staged.map((row) => String(row.body_key)),
+            ...chunkParts.flatMap((row) =>
+              row.body_key === null
+                ? row.committed_at === null
+                  ? [
+                      v2StagedChunkKey(
+                        String(row.upload_id),
+                        String(row.part_id),
+                      ),
+                    ]
+                  : []
+                : [String(row.body_key)],
+            ),
+          ]),
+        ),
         deletedNonces,
         deletedControlEvents: controls.length,
         deletedRateWindows,
@@ -1817,6 +2392,9 @@ export class SQLiteV2Database {
           abandoned.length < limit &&
           controls.length < limit &&
           staged.length < limit &&
+          expiredDeliveryParts.length < limit &&
+          chunkParts.length < limit &&
+          chunkUploads.length < limit &&
           nonceResult.changes < limit &&
           relationshipNonceResult.changes < limit &&
           rateResult.changes < limit &&
@@ -1848,9 +2426,19 @@ export class SQLiteV2Database {
       .prepare(
         `SELECT payload_key AS key FROM deliveries WHERE payload_key IN (${placeholders})
          UNION SELECT payload_key AS key FROM reservations WHERE payload_key IN (${placeholders})
-         UNION SELECT body_key AS key FROM staged_bodies WHERE body_key IN (${placeholders})`,
+         UNION SELECT body_key AS key FROM staged_bodies WHERE body_key IN (${placeholders})
+         UNION SELECT body_key AS key FROM chunk_upload_parts WHERE body_key IN (${placeholders})
+         UNION SELECT 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' AS key
+           FROM chunk_upload_parts AS part
+           JOIN chunk_uploads AS upload ON upload.id = part.upload_id
+           WHERE part.body_key IS NULL AND upload.committed_at IS NULL
+             AND 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' IN (${placeholders})
+         UNION SELECT body_key AS key FROM delivery_chunks WHERE body_key IN (${placeholders})`,
       )
-      .all(...keys, ...keys, ...keys) as Record<string, unknown>[];
+      .all(...keys, ...keys, ...keys, ...keys, ...keys, ...keys) as Record<
+      string,
+      unknown
+    >[];
     const known = new Set(rows.map((row) => String(row.key)));
     return keys.filter((key) => known.has(key));
   }
@@ -1874,9 +2462,24 @@ export class SQLiteV2Database {
            SELECT payload_key AS key FROM deliveries WHERE payload_key > ?
            UNION SELECT payload_key AS key FROM reservations WHERE payload_key > ?
            UNION SELECT body_key AS key FROM staged_bodies WHERE body_key > ?
+           UNION SELECT body_key AS key FROM chunk_upload_parts WHERE body_key > ?
+           UNION SELECT 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' AS key
+             FROM chunk_upload_parts AS part
+             JOIN chunk_uploads AS upload ON upload.id = part.upload_id
+             WHERE part.body_key IS NULL AND part.write_token IS NOT NULL AND upload.committed_at IS NULL
+               AND 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' > ?
+           UNION SELECT body_key AS key FROM delivery_chunks WHERE body_key > ?
          ) ORDER BY key LIMIT ?`,
       )
-      .all(cursor, cursor, cursor, input.limit) as Record<string, unknown>[];
+      .all(
+        cursor,
+        cursor,
+        cursor,
+        cursor,
+        cursor,
+        cursor,
+        input.limit,
+      ) as Record<string, unknown>[];
     const keys = rows.map((row) => String(row.key));
     return {
       keys,
@@ -1907,6 +2510,11 @@ export class SQLiteV2Database {
   }
 
   private deliveryFromRow(row: Record<string, unknown>): V2RepositoryDelivery {
+    const parts = this.requireDatabase()
+      .prepare(
+        'SELECT part_id, length, digest, body_key FROM delivery_chunks WHERE delivery_id = ? ORDER BY ordinal',
+      )
+      .all(row.id) as Record<string, unknown>[];
     return {
       id: String(row.id),
       relationshipId: String(row.relationship_id),
@@ -1914,6 +2522,9 @@ export class SQLiteV2Database {
         Number(row.direction) === 0 ? 'inviter->invitee' : 'invitee->inviter',
       slot: Uint8Array.from(row.slot as Uint8Array),
       epoch: Number(row.epoch),
+      ...(row.authorization_chain === null
+        ? {}
+        : { chain: Number(row.authorization_chain) }),
       encryptedDescriptor: Uint8Array.from(
         row.encrypted_descriptor as Uint8Array,
       ),
@@ -1923,6 +2534,16 @@ export class SQLiteV2Database {
       payloadKey: String(row.payload_key),
       payloadLength: Number(row.payload_length),
       payloadDigest: Uint8Array.from(row.payload_digest as Uint8Array),
+      ...(parts.length === 0
+        ? {}
+        : {
+            parts: parts.map((part) => ({
+              id: String(part.part_id),
+              length: Number(part.length),
+              digest: Uint8Array.from(part.digest as Uint8Array),
+              key: String(part.body_key),
+            })),
+          }),
       operationId: Uint8Array.from(row.operation_id as Uint8Array),
       operationDigest: Uint8Array.from(row.operation_digest as Uint8Array),
       state: row.state as V2RepositoryDelivery['state'],
@@ -1956,6 +2577,131 @@ export class SQLiteV2Database {
       ...(row.completion_result === null
         ? {}
         : { completionResult: Number(row.completion_result) as 0 | 1 }),
+    };
+  }
+
+  private validateChunkOperation(
+    operationId: Uint8Array,
+    operationDigest: Uint8Array,
+  ): void {
+    if (operationId.byteLength !== 16 || operationDigest.byteLength !== 32) {
+      throw new Error('Chunk upload operation is invalid.');
+    }
+  }
+
+  private authorizeChunkRequest(
+    database: any,
+    capabilityId: string,
+    authorization: V2RepositoryAuthorization,
+    now: number,
+  ): void {
+    if (
+      authorization.claims.length !== 1 ||
+      authorization.claims[0]!.capabilityId !== capabilityId ||
+      !Number.isSafeInteger(authorization.maximumRequestsPerMinute) ||
+      authorization.maximumRequestsPerMinute < 1
+    ) {
+      throw new Error('Chunk upload authorization is invalid.');
+    }
+    const claim = authorization.claims[0]!;
+    const active = database
+      .prepare(
+        "SELECT 1 FROM capabilities WHERE id = ? AND scope = 'write' AND expires_at > ? AND revoked_at IS NULL",
+      )
+      .get(claim.capabilityId, now);
+    const replay = database
+      .prepare(
+        'SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?',
+      )
+      .get(claim.capabilityId, claim.nonce, now);
+    const minute = Math.floor(now / 60);
+    const window = database
+      .prepare(
+        'SELECT count FROM rate_windows WHERE capability_id = ? AND minute = ?',
+      )
+      .get(claim.capabilityId, minute) as { count: number } | undefined;
+    if (
+      !active ||
+      replay ||
+      (window?.count ?? 0) + 1 > authorization.maximumRequestsPerMinute
+    ) {
+      throw new Error('Chunk upload authorization is unavailable.');
+    }
+    database
+      .prepare(
+        'INSERT INTO nonces(capability_id, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?',
+      )
+      .run(claim.capabilityId, claim.nonce, claim.expiresAt, now);
+    database
+      .prepare(
+        'INSERT INTO rate_windows(capability_id, minute, count) VALUES (?, ?, 1) ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + 1',
+      )
+      .run(claim.capabilityId, minute);
+  }
+
+  private requireActiveChunkUpload(
+    id: string,
+    capabilityId: string,
+    now: number,
+  ): void {
+    const active = this.requireDatabase()
+      .prepare(
+        "SELECT 1 FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL",
+      )
+      .get(id, capabilityId, now, now);
+    if (!active) {
+      throw new Error('Chunk upload is unavailable.');
+    }
+  }
+
+  private requireChunkUpload(id: string): V2ChunkUpload {
+    const database = this.requireDatabase();
+    const row = database
+      .prepare(
+        'SELECT id, delivery_id, capability_id, chain, slot, epoch, total_length, created_at, expires_at, operation_id, operation_digest, committed_at FROM chunk_uploads WHERE id = ?',
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new Error('Chunk upload is unavailable.');
+    }
+    const parts = database
+      .prepare(
+        'SELECT part_id, ordinal, length, digest, body_key, received_at, operation_id, operation_digest FROM chunk_upload_parts WHERE upload_id = ? ORDER BY ordinal',
+      )
+      .all(id) as Record<string, unknown>[];
+    return {
+      id: String(row.id),
+      deliveryId: String(row.delivery_id),
+      capabilityId: String(row.capability_id),
+      chain: Number(row.chain),
+      slot: Uint8Array.from(row.slot as Uint8Array),
+      epoch: Number(row.epoch),
+      totalLength: Number(row.total_length),
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+      operationId: Uint8Array.from(row.operation_id as Uint8Array),
+      operationDigest: Uint8Array.from(row.operation_digest as Uint8Array),
+      ...(row.committed_at === null
+        ? {}
+        : { committedAt: Number(row.committed_at) }),
+      parts: parts.map((part) => ({
+        id: String(part.part_id),
+        ordinal: Number(part.ordinal),
+        length: Number(part.length),
+        digest: Uint8Array.from(part.digest as Uint8Array),
+        ...(part.body_key === null ? {} : { bodyKey: String(part.body_key) }),
+        ...(part.received_at === null
+          ? {}
+          : { receivedAt: Number(part.received_at) }),
+        ...(part.operation_id === null
+          ? {}
+          : {
+              operationId: Uint8Array.from(part.operation_id as Uint8Array),
+              operationDigest: Uint8Array.from(
+                part.operation_digest as Uint8Array,
+              ),
+            }),
+      })),
     };
   }
 

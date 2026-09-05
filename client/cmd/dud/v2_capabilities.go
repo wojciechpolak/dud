@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -58,7 +59,7 @@ var v2FeatureNames = map[uint64]string{
 // the server feature list: a server feature says what the relay will carry,
 // while this says what the peer at the far end can actually process. Only
 // features with peer-visible behaviour belong here.
-var v2LocalPeerFeatures = []uint64{5, 6}
+var v2LocalPeerFeatures = []uint64{5, 6, 7}
 
 func v2LocalPeerFeatureList() []any {
 	features := make([]any, 0, len(v2LocalPeerFeatures))
@@ -71,15 +72,28 @@ func v2LocalPeerFeatureList() []any {
 // v2LimitNames spells the registered limit IDs of protocol-v2.md §"Limit IDs".
 // Reporting a bare numeric key would make the operator look the table up.
 var v2LimitNames = map[uint64]string{
-	1: "maximum object bytes",
-	2: "maximum descriptor bytes",
-	3: "maximum TTL seconds",
-	4: "pending deliveries per slot",
-	5: "objects per capability per slot epoch",
-	6: "concurrent uploads per capability",
-	7: "requests per capability per minute",
-	8: "staged bytes per capability",
-	9: "pairing envelope bytes",
+	1:  "maximum object bytes",
+	2:  "maximum descriptor bytes",
+	3:  "maximum TTL seconds",
+	4:  "pending deliveries per slot",
+	5:  "objects per capability per slot epoch",
+	6:  "concurrent uploads per capability",
+	7:  "requests per capability per minute",
+	8:  "staged bytes per capability",
+	9:  "pairing envelope bytes",
+	10: "maximum chunk ciphertext bytes",
+	11: "chunks per delivery",
+	12: "chunked plaintext bytes",
+	13: "chunk upload lease seconds",
+}
+
+func hasV2Feature(features []uint64, wanted uint64) bool {
+	for _, feature := range features {
+		if feature == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // v2LimitName falls back to the numeric ID, because an unregistered limit is an
@@ -98,6 +112,67 @@ func v2LimitName(id uint64) string {
 		return name
 	}
 	return "limit " + strconv.FormatUint(id, 10)
+}
+
+func formatV2ByteCount(value uint64) string {
+	for _, unit := range []struct {
+		bytes uint64
+		name  string
+	}{
+		{1024 * 1024 * 1024, "GiB"},
+		{1024 * 1024, "MiB"},
+		{1024, "KiB"},
+	} {
+		if value < unit.bytes {
+			continue
+		}
+		if value%unit.bytes == 0 {
+			return fmt.Sprintf("%d %s", value/unit.bytes, unit.name)
+		}
+		converted := strconv.FormatFloat(float64(value)/float64(unit.bytes), 'f', 2, 64)
+		return strings.TrimRight(strings.TrimRight(converted, "0"), ".") + " " + unit.name
+	}
+	return fmt.Sprintf("%d B", value)
+}
+
+func formatV2Seconds(value uint64) string {
+	parts := make([]string, 0, 4)
+	for _, unit := range []struct {
+		seconds uint64
+		name    string
+	}{
+		{24 * 60 * 60, "day"},
+		{60 * 60, "hour"},
+		{60, "minute"},
+		{1, "second"},
+	} {
+		count := value / unit.seconds
+		if count == 0 {
+			continue
+		}
+		name := unit.name
+		if count != 1 {
+			name += "s"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", count, name))
+		value %= unit.seconds
+	}
+	if len(parts) == 0 {
+		return "0 seconds"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatV2LimitValue(id, value uint64) string {
+	raw := strconv.FormatUint(value, 10)
+	switch id {
+	case 1, 2, 8, 9, 10, 12:
+		return fmt.Sprintf("%s (%s)", raw, formatV2ByteCount(value))
+	case 3, 13:
+		return fmt.Sprintf("%s (%s)", raw, formatV2Seconds(value))
+	default:
+		return raw
+	}
 }
 
 func decodeV2Capabilities(body []byte) (*v2Capabilities, error) {
@@ -147,6 +222,13 @@ func decodeV2Capabilities(body []byte) (*v2Capabilities, error) {
 	for id := uint64(1); id <= 9; id++ {
 		if result.Limits[id] == 0 {
 			return nil, fmt.Errorf("capability response omits required limit %d", id)
+		}
+	}
+	if hasV2Feature(result.Features, 7) {
+		for id := uint64(10); id <= 13; id++ {
+			if result.Limits[id] == 0 {
+				return nil, fmt.Errorf("capability response omits chunked-transfer limit %d", id)
+			}
 		}
 	}
 	for _, id := range []uint64{1, 2} {
@@ -404,7 +486,7 @@ func (a *app) cmdCapabilities(args []string) error {
 	}
 	sort.Slice(ids, func(left, right int) bool { return ids[left] < ids[right] })
 	for _, id := range ids {
-		limits.addf(v2LimitName(id), "%d", capabilities.Limits[id])
+		limits.add(v2LimitName(id), formatV2LimitValue(id, capabilities.Limits[id]))
 	}
 	return out.write(a.out)
 }

@@ -126,6 +126,7 @@ func ensureV2Directories(paths v2Paths) error {
 		paths.StateDir,
 		filepath.Join(paths.StateDir, "deliveries"),
 		filepath.Join(paths.StateDir, "transfers"),
+		filepath.Join(paths.StateDir, "uploads"),
 	} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return err

@@ -1,12 +1,13 @@
 # DUD v2 protocol
 
-Normative specification of the v2 wire protocol as released in DUD 2.0.0. It
-describes what two implementations have to agree on, not how either is built.
-The threat model behind it is [`threat-model-v2.md`](threat-model-v2.md).
+Normative specification of the v2 wire protocol. It describes what two
+implementations have to agree on, not how either is built. The threat model
+behind it is [`threat-model-v2.md`](threat-model-v2.md).
 
-Everything below is implemented and served, apart from chunked transfer. Its
-descriptor keys and feature IDs are reserved, and a server does not advertise
-them.
+Resumable chunked transfer is optional feature 7. A sender uses it only when the
+server advertises feature 7 and the receiving peer has advertised feature 7 in a
+valid signed acknowledgement. Silence on either channel selects the baseline
+single-payload delivery.
 
 ## 1. Conventions
 
@@ -522,13 +523,13 @@ sorts by encoded key bytes, which for small unsigned integers is numeric order.
 |  16 | `created_at`          | uint  | Unix seconds                                              |
 |  17 | `transport_policy`    | map   | signed requested policy; see [§7.4](#74-transport-policy) |
 |  18 | `payload_hash`        | bytes | 32, of the plaintext                                      |
-|  19 | `chunk_hashes`        | array | ordered ciphertext hashes; exactly one entry in 2.0.0     |
+|  19 | `chunk_hashes`        | array | ordered ciphertext hashes                                 |
 |  20 | `display_name`        | text  | optional                                                  |
 |  21 | `archive_format`      | uint  | optional; 0 = none, 1 = tar                               |
 |  22 | `plaintext_size`      | uint  | optional; bounds extraction                               |
 |  23 | `type_meta`           | map   | optional; payload-type-specific metadata                  |
-|  24 | `chunk_size`          | uint  | **2.0.0 rejects on presence**                             |
-|  25 | `chunk_ids`           | array | **2.0.0 rejects on presence**                             |
+|  24 | `chunk_size`          | uint  | plaintext bytes in each non-final chunk                   |
+|  25 | `chunk_ids`           | array | ordered random 16-byte identifiers                        |
 |  26 | `incremental_base`    | bytes | **2.0.0 rejects on presence**                             |
 
 `expires_at` is not a top-level descriptor field. It lives once inside the
@@ -634,11 +635,10 @@ A receiver `MUST` reject, before payload processing, any descriptor that is
 duplicate, stale, forked, gapped, wrong-direction, wrong-recipient,
 wrong-origin, or wrong-relationship.
 
-A 2.0.0 receiver `MUST` also reject on the **presence** of key 24
+A receiver without feature 7 `MUST` reject on the **presence** of key 24
 (`chunk_size`), key 25 (`chunk_ids`), or key 26 (`incremental_base`), regardless
-of value. Those keys are reserved for chunked transfer and incremental Git.
-Their presence means the sender expects behaviour this release does not
-implement, and processing such a delivery partially is worse than refusing it.
+of value. Keys 24 and 25 signal chunked transfer. Key 26 stays reserved.
+Processing such a delivery partially is worse than refusing it.
 
 These rejections all concern the descriptor itself. A descriptor that is valid
 but describes payload behaviour this release does not implement is not rejected
@@ -646,10 +646,58 @@ here; it is refused by its payload-type handler under
 [§7.6](#76-refusing-a-delivery), which is what allows the sender to be told and
 the chain to advance.
 
-A 2.0.0 receiver also rejects any descriptor whose `key_epoch` is not zero.
+A receiver also rejects any descriptor whose `key_epoch` is not zero.
 
-`chunk_hashes` (key 19) is not such a signal: 2.0.0 uses it with exactly one
-entry. A receiver `MUST` reject a `chunk_hashes` array with more than one entry.
+`chunk_hashes` (key 19) is not a feature signal because baseline descriptors use
+it with one entry. A receiver without feature 7 `MUST` reject an array with more
+than one entry. A sender therefore `MUST NOT` create a chunked descriptor until
+both the relay and the peer have proved feature 7 support. A signed peer
+advertisement is required even when the sender and receiver run the same build.
+
+#### 7.3.1 Chunked transfer encoding
+
+A chunked descriptor contains keys 24 and 25, requires `plaintext_size`, and has
+between 2 and 1024 entries in both `chunk_ids` and `chunk_hashes`. The three
+arrays are positional. Each chunk ID is a random 16-byte value unique within the
+descriptor. Each chunk hash is SHA-256 of that chunk's complete `age` ciphertext
+file.
+
+`chunk_size` is one of 1048576, 4194304, or 16777216 plaintext bytes. Every
+decrypted chunk except the last is exactly `chunk_size` bytes. The last is from
+1 through `chunk_size` bytes. Their concatenated length equals `plaintext_size`,
+which cannot exceed 1073741824 bytes. The receiver hashes the concatenated
+plaintext while assembling it and compares the result with `payload_hash`. A
+mismatch commits no output and advances no receive watermark.
+
+Each chunk is an independent one-recipient hybrid `age` file. Independent files
+let a receiver authenticate and retry one chunk without decrypting its
+predecessors. For plaintext length `n > 0`, the pinned `age` file format adds
+`1659 + 16 * floor((n - 1) / 65536)` bytes. A full 16777216-byte chunk is
+16782955 ciphertext bytes. A 1073741824-byte payload split into 1048576-byte
+chunks is at most 1075686400 ciphertext bytes. The chunk count, ciphertext
+lengths, and final-chunk length remain visible to the relay.
+
+The sender stages all encrypted chunks before it assigns the descriptor
+sequence. Publication atomically commits the descriptor and its complete chunk
+manifest. A staged upload has no inbox record, publication order, delivery
+sequence, or slot position. Lease expiry or explicit abandonment deletes its
+parts and releases its staged-byte reservation.
+
+The sender persists the immutable descriptor, manifest, operation IDs, and
+private chunk paths before creating an upload. It checkpoints the returned
+upload ID and expiry and every successful part before attempting the next
+transition. A retry queries or recreates the same manifest, skips parts whose
+recorded ciphertext still matches the signed length and hash, renews a lease
+before it expires, and uses a fresh upload after expiry. Commit is the only
+transition that removes the private spool and makes the delivery server-visible.
+
+The receiver persists the relationship, direction, chain, sequence, descriptor
+digest, manifest, and each verified part before reuse. A disagreement between
+that binding and an inbox result discards the staged parts. Assembly decrypts
+each independent chunk into a private temporary output, verifies the signed
+aggregate plaintext length and hash, and atomically installs the output. An
+interruption before that install consumes no sequence and sends no completion.
+The receive watermark advances only after the durable output commit.
 
 ### 7.4 Transport Policy
 
@@ -748,11 +796,15 @@ descriptors, so an acknowledgement is the only place this can travel. A receiver
 that does not implement the key ignores it. A sender that does not see a clean
 list `MUST` assume the 2.0.0 baseline and `MUST NOT` infer support from silence:
 an absent, empty, duplicate, unsorted, or malformed list means the peer said
-nothing. A later signed acknowledgement with no clean list clears a retained
-feature 6 advertisement. A device that accepts incremental Git checkpoints
-advertises `[5, 6]`. Acknowledgements apply to data-chain deliveries;
-acknowledgement and peer-control descriptors are never themselves acknowledged,
-preventing an acknowledgement loop.
+nothing. A later signed acknowledgement with no clean list clears every retained
+peer-feature advertisement. A device that accepts incremental Git checkpoints
+and chunked transfers advertises `[5, 6, 7]`. Acknowledgements apply to
+data-chain deliveries; acknowledgement and peer-control descriptors are never
+themselves acknowledged, preventing an acknowledgement loop.
+
+A device advertises feature 7 only when its send and receive paths implement the
+durable checkpoints in §7.3.1. Merely parsing chunked descriptors or downloading
+a complete chunked payload in one process is not feature support.
 
 The four watermark fields are present on every acknowledgement and every
 `peer-control` message. They are relative to the control-message sender and
@@ -1150,12 +1202,13 @@ DUD-Authorization: DUD2 <base64url-no-padding(auth_cbor)>
 
 where `auth_cbor` is deterministic CBOR:
 
-| Key | Field    | Type      |
-| --: | -------- | --------- |
-|   1 | `cap_id` | bytes, 16 |
-|   2 | `nonce`  | bytes, 16 |
-|   3 | `exp`    | uint      |
-|   4 | `mac`    | bytes, 32 |
+| Key | Field             | Type      |
+| --: | ----------------- | --------- |
+|   1 | `cap_id`          | bytes, 16 |
+|   2 | `nonce`           | bytes, 16 |
+|   3 | `exp`             | uint      |
+|   4 | `operation_index` | uint      |
+|   5 | `mac`             | bytes, 32 |
 
 The decoded header is limited to 128 bytes and the encoded header value to 256
 ASCII characters. `exp` must be no earlier than `now - 300`, no later than
@@ -1234,21 +1287,32 @@ Feature IDs:
 |  11 | inline-control  |
 
 A server `MUST NOT` advertise a feature unless that feature and its backend
-conformance suite are present. DUD servers advertise `[2, 3, 5, 6, 9, 10, 11]`.
+conformance suite are present. A server with resumable chunk storage advertises
+`[2, 3, 5, 6, 7, 9, 10, 11]`; one without it omits 7.
 
-Limit IDs and 2.0 defaults:
+Limit 8 still bounds a feature-7 upload: create reserves the complete declared
+ciphertext length, so a deployment can advertise limit 12 while accepting only
+payloads whose encrypted manifest fits its staged-byte quota. Clients treat a
+quota refusal as a failed publication and retain their private spool for retry
+or explicit abandonment.
 
-|  ID | Limit                                 |   Default |
-| --: | ------------------------------------- | --------: |
-|   1 | maximum object bytes                  | 104857600 |
-|   2 | maximum descriptor bytes              |    262144 |
-|   3 | maximum TTL seconds                   |   2592000 |
-|   4 | pending deliveries per slot           |        64 |
-|   5 | objects per capability per slot epoch |       256 |
-|   6 | concurrent uploads per capability     |         4 |
-|   7 | requests per capability per minute    |        60 |
-|   8 | staged bytes per capability           | 209715200 |
-|   9 | pairing envelope bytes                |      4096 |
+Limit IDs and defaults:
+
+|  ID | Limit                                 |    Default |
+| --: | ------------------------------------- | ---------: |
+|   1 | maximum object bytes                  |  104857600 |
+|   2 | maximum descriptor bytes              |     262144 |
+|   3 | maximum TTL seconds                   |    2592000 |
+|   4 | pending deliveries per slot           |         64 |
+|   5 | objects per capability per slot epoch |        256 |
+|   6 | concurrent uploads per capability     |          4 |
+|   7 | requests per capability per minute    |         60 |
+|   8 | staged bytes per capability           |  209715200 |
+|   9 | pairing envelope bytes                |       4096 |
+|  10 | maximum chunk ciphertext bytes        |   16782955 |
+|  11 | chunks per delivery                   |       1024 |
+|  12 | chunked plaintext bytes               | 1073741824 |
+|  13 | chunk upload lease seconds            |       3600 |
 
 Enforcement IDs:
 
@@ -1411,9 +1475,102 @@ expires.
 pending handshake material. Clients delete their pending code state after
 cancellation or expiry.
 
-### 11.4 Unserved Object and Slot Endpoints
+### 11.4 Delivery-scoped chunk storage and unserved object endpoints
 
-2.0 has no object or slot surface: `/v2/objects`, `/v2/objects/:id`,
+Feature 7 adds only delivery-scoped paths:
+
+```text
+POST   /v2/deliveries/uploads
+PUT    /v2/deliveries/uploads/:upload/chunks/:chunk
+HEAD   /v2/deliveries/uploads/:upload/chunks/:chunk
+POST   /v2/deliveries/uploads/:upload/renew
+POST   /v2/deliveries/uploads/:upload/commit
+DELETE /v2/deliveries/uploads/:upload
+GET    /v2/deliveries/:delivery/chunks/:chunk
+```
+
+Create records an ordered manifest of chunk IDs, ciphertext lengths, and
+ciphertext hashes and reserves the complete ciphertext byte count. Every create,
+part, renewal, commit, and delete request requires the same `write` capability
+tuple and uses the normal request proof. Create and part retries with identical
+operation IDs and bytes are idempotent; changed bytes conflict. A part whose
+length or hash differs from its manifest is rejected and not recorded.
+
+Chunk requests carry the proof in `DUD-Authorization`. The create request is a
+deterministic CBOR map:
+
+| Key | Field                     | Type                            |
+| --: | ------------------------- | ------------------------------- |
+|   1 | `operation_id`            | bytes, 16                       |
+|   2 | `chain`                   | uint                            |
+|   3 | `slot`                    | bytes, 16                       |
+|   4 | `slot_epoch`              | uint                            |
+|   5 | `parts`                   | ordered array of part maps      |
+|   6 | `total_ciphertext_length` | uint, exact sum of part lengths |
+
+Each part map has key 1 `chunk_id`, key 2 `ciphertext_length`, and key 3
+`ciphertext_sha256`. The ID is 16 bytes and the digest is 32 bytes. The response
+has key 1 `upload_id`, key 2 `expires_at`, key 3 `missing_chunk_ids`, and key 4
+`idempotent`. `upload_id` and every entry in `missing_chunk_ids` are 16-byte
+values. A fresh upload returns `201`; an idempotent create returns `200` and
+reports only parts without a recorded body.
+
+Part `PUT` uses `application/octet-stream`, an exact `Content-Length`, and
+`DUD-Content-SHA256`. Its request proof commits to the declared ciphertext
+digest. The `chunk` path value is also the part operation ID. The server checks
+the length and digest against the immutable manifest before it records the part.
+Success returns `204`.
+
+Part `HEAD` and upload `DELETE` have no request body, so their proof input uses
+the all-zero no-body digest from §9.3. `HEAD` returns `200` only for a recorded
+part and includes `Content-Length` plus `DUD-Content-SHA256`; an absent part is
+`unavailable`. `DELETE` returns `204` after marking the lease expired. Bounded
+maintenance removes the manifest and its recorded staged part keys.
+
+Renewal carries `{1: operation_id}` as deterministic CBOR. Its response is
+`{1: expires_at, 2: idempotent}`. The server fixes the chain, slot, and epoch at
+create and reuses them for every part, status, renewal, commit, and abandonment
+proof. A lease ends at the earliest of limit 13, the write capability expiry, or
+the end of that slot epoch.
+
+The lease lasts at most limit 13 and never beyond the write capability. Renewal
+extends the same reservation but cannot alter the manifest. Commit succeeds only
+when every manifest entry exists and still matches its length and digest. It
+then publishes one delivery and makes all chunk GET paths readable. A commit
+retry returns the same delivery ID. Expiry and DELETE remove the unpublished
+session through the bounded maintenance path.
+
+Commit carries deterministic CBOR and signs the SHA-256 digest of those exact
+bytes:
+
+| Key | Field                  | Type                       |
+| --: | ---------------------- | -------------------------- |
+|   1 | `operation_id`         | bytes, 16                  |
+|   2 | `encrypted_descriptor` | non-empty bytes, limit 2   |
+|   3 | `requested_policy`     | transport-policy map, §7.2 |
+
+The response is `{1: delivery_id, 2: idempotent}`, where `delivery_id` is 16
+bytes. Publication assigns the delivery sequence and commits the manifest,
+delivery metadata, upload state, and byte-accounting transition atomically. The
+committed upload record remains available until delivery expiry so the same
+operation can return its delivery ID after a process restart.
+
+Inbox returns the encrypted descriptor and committed chunk manifest without a
+payload body for a chunked delivery. Response-header key 10 is the ordered
+manifest; every entry is
+`{1: chunk_id, 2: ciphertext_length, 3: ciphertext_sha256}` with the same bounds
+as create. Header key 7 is zero, key 8 is SHA-256 of the empty byte string, and
+the framed payload is empty.
+
+Chunk GET requires the `read` capability for the delivery relationship,
+direction, chain, and slot. It has no request body, so the proof uses the §9.3
+no-body digest. Claiming that proof nonce and checking that the requested
+delivery is the oldest published delivery for the slot are atomic. The response
+is exactly one `application/octet-stream` `age` file with `Content-Length` and
+`DUD-Content-SHA256`. Completion remains the only operation that retires the
+delivery.
+
+The protocol has no object or slot surface: `/v2/objects`, `/v2/objects/:id`,
 `/v2/objects/:id/claim`, `/v2/objects/:id/ack`, `/v2/slots/:slot/objects`, and
 `/v2/slots/:slot/ack` are unserved paths a server answers with `unavailable`,
 and there is no `upload` capability scope. Every message, file, collection, Git,
@@ -1608,7 +1765,23 @@ that the signature verifies, that re-encoding is byte-stable, that
 the strict decoder of [§3](#3-encoding) accepts the result. The fixture uses the
 required SHA-256-derived sender-key ID.
 
-### 12.8 Extension Criticality
+### 12.8 Chunked descriptor
+
+```text
+chunk_size          = 1048576
+chunk_ids           = c0c1c2c3c4c5c6c7c8c9cacbcccdcecf,
+                      d0d1d2d3d4d5d6d7d8d9dadbdcdddedf
+plaintext_size      = 1048577
+descriptor_cbor_len = 351 bytes
+descriptor_digest   = 7efc32c447534e7fbc3e830c7fd35070dfb1589491693045e204d59c851e7d51
+signature           = ae9df29e2a831446d066c8536b1e315799a73a6ec6289694fe05193aa5ab5395
+                      0bb6d994b75d48b30b47acbc6b168e8cfa4f4b2eadb638153bfa5b9941f6ca08
+```
+
+The full vector includes the ordered chunk hashes and exact CBOR. The feature-7
+decoder accepts it, while the baseline decoder rejects key 25 on presence.
+
+### 12.9 Extension Criticality
 
 ```text
 unknown core key 27               -> REJECT
@@ -1619,7 +1792,7 @@ unknown critical extension 128    -> REJECT
 This exercises the core/extension split and key 0 `critical_extensions`
 semantics from [§3](#3-encoding).
 
-### 12.9 Capability Discovery
+### 12.10 Capability Discovery
 
 ```text
 capabilities_cbor   = a401820102028702030506090a0b03a9011a06400000021a00040000031a0027
@@ -1627,7 +1800,7 @@ capabilities_cbor   = a401820102028702030506090a0b03a9011a06400000021a0004000003
 capabilities_digest = c8f164f234ea97d92224484c7ba12963c681bb46d4579ef4ad7d6d6099e85700
 ```
 
-### 12.10 What Cannot Be Pinned
+### 12.11 What Cannot Be Pinned
 
 `filippo.io/hpke` v0.4.0 exports no deterministic-randomness variant of
 `NewSender`, so `enc_A` and `enc_B` cannot be fixed as vectors. Conformance for
@@ -1661,3 +1834,8 @@ reproduce the deterministic vectors above and `MUST` pass these properties.
 | Git wall time / memory / disk                     | 120 s / 1 GB / 3x bundle        |
 | extraction total bytes                            | signed plaintext size, cap 1 GB |
 | extraction entries / depth                        | 100000 / 64                     |
+| chunk plaintext sizes                             | 1 MiB, 4 MiB, or 16 MiB         |
+| chunk ciphertext bytes                            | 16782955 max                    |
+| chunks / chunked plaintext                        | 1024 / 1 GiB                    |
+| chunk upload lease                                | 1 h max                         |
+| staged ciphertext per capability                  | 200 MiB default                 |

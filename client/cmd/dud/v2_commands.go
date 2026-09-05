@@ -166,7 +166,7 @@ func (a *app) cmdMigrate(args []string) error {
 
 func (a *app) cmdPeer(args []string) error {
 	if len(args) == 0 {
-		return fatalError("Usage: dud peer invite|accept|list|show|rename|resume|revoke|remove|enrollment-key ...")
+		return fatalError("Usage: dud peer invite|accept|list|show|rename|resume|abandon|revoke|remove|enrollment-key ...")
 	}
 	switch args[0] {
 	case "enrollment-key":
@@ -185,6 +185,8 @@ func (a *app) cmdPeer(args []string) error {
 		return a.cmdPeerInvite(args[1:])
 	case "resume":
 		return a.cmdPeerResume(args[1:])
+	case "abandon":
+		return a.cmdPeerAbandon(args[1:])
 	case "revoke":
 		return a.cmdPeerRevoke(args[1:])
 	default:

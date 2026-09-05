@@ -149,6 +149,7 @@ export interface V2RepositoryDelivery {
   direction: V2Direction;
   slot: Uint8Array;
   epoch: number;
+  chain?: number;
   encryptedDescriptor: Uint8Array;
   requestedPolicy: Uint8Array;
   effectivePolicy: Uint8Array;
@@ -156,6 +157,7 @@ export interface V2RepositoryDelivery {
   payloadKey: string;
   payloadLength: number;
   payloadDigest: Uint8Array;
+  parts?: V2CommittedBodyPart[];
   operationId: Uint8Array;
   operationDigest: Uint8Array;
   state: V2DeliveryState;
@@ -196,6 +198,48 @@ export interface V2DeliveryReservation {
   expiresAt: number;
 }
 
+export interface V2RepositoryAuthorization {
+  claims: readonly {
+    capabilityId: string;
+    nonce: Uint8Array;
+    expiresAt: number;
+  }[];
+  maximumRequestsPerMinute: number;
+}
+
+export interface V2ChunkUploadPart extends V2BodyPartDeclaration {
+  ordinal: number;
+  bodyKey?: string;
+  receivedAt?: number;
+  operationId?: Uint8Array;
+  operationDigest?: Uint8Array;
+  writeToken?: string;
+  writeExpiresAt?: number;
+}
+
+export interface V2ChunkUpload {
+  id: string;
+  deliveryId: string;
+  capabilityId: string;
+  chain: number;
+  slot: Uint8Array;
+  epoch: number;
+  totalLength: number;
+  createdAt: number;
+  expiresAt: number;
+  operationId: Uint8Array;
+  operationDigest: Uint8Array;
+  parts: V2ChunkUploadPart[];
+  committedAt?: number;
+}
+
+export type V2DeliveryPublication = Omit<
+  V2RepositoryDelivery,
+  'state' | 'sequence'
+> & {
+  chunkUploadId?: string;
+};
+
 /** Opaque encrypted payload storage; metadata never contains payload bytes. */
 export interface V2BodyStore {
   stage(
@@ -204,6 +248,17 @@ export interface V2BodyStore {
     expectedDigest: Uint8Array,
   ): Promise<string>;
   promote(stagedKey: string, key: string): Promise<void>;
+  stagePart(
+    uploadId: string,
+    part: V2BodyPartDeclaration,
+    body: ReadableStream<Uint8Array>,
+  ): Promise<string>;
+  commitParts(input: {
+    uploadId: string;
+    deliveryId: string;
+    parts: readonly V2BodyPartDeclaration[];
+    expectedTotalLength: number;
+  }): Promise<V2CommittedBodyPart[]>;
   put(
     key: string,
     body: ReadableStream<Uint8Array>,
@@ -213,6 +268,16 @@ export interface V2BodyStore {
   get(key: string): Promise<BlobObject | null>;
   head(key: string): Promise<boolean>;
   delete(key: string): Promise<void>;
+}
+
+export interface V2BodyPartDeclaration {
+  id: string;
+  length: number;
+  digest: Uint8Array;
+}
+
+export interface V2CommittedBodyPart extends V2BodyPartDeclaration {
+  key: string;
 }
 
 export interface V2BodyInventoryEntry {
@@ -307,6 +372,7 @@ export interface V2Repository {
   ): Promise<boolean>;
   reserveStagedBody(input: {
     id: string;
+    capabilityId: string;
     expiresAt: number;
     now: number;
     reservedBytes: number;
@@ -314,11 +380,82 @@ export interface V2Repository {
     maximumStagedBytes: number;
   }): Promise<string>;
   releaseStagedBody(id: string): Promise<void>;
+  createChunkUpload(input: {
+    capabilityId: string;
+    chain: number;
+    slot: Uint8Array;
+    epoch: number;
+    operationId: Uint8Array;
+    operationDigest: Uint8Array;
+    parts: readonly V2BodyPartDeclaration[];
+    totalLength: number;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+    expiresAt: number;
+    maximumConcurrentUploads: number;
+    maximumStagedBytes: number;
+  }): Promise<{ upload: V2ChunkUpload; idempotent: boolean }>;
+  findChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    now: number;
+  }): Promise<V2ChunkUpload | null>;
+  findChunkUploadForCommit(input: {
+    id: string;
+    capabilityId: string;
+    now: number;
+  }): Promise<V2ChunkUpload | null>;
+  authorizeChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+  }): Promise<V2ChunkUpload>;
+  prepareChunkUploadPart(input: {
+    id: string;
+    capabilityId: string;
+    partId: string;
+    writeToken: string;
+    writeExpiresAt: number;
+    operationId: Uint8Array;
+    operationDigest: Uint8Array;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+  }): Promise<{ upload: V2ChunkUpload; idempotent: boolean }>;
+  completeChunkUploadPart(input: {
+    id: string;
+    capabilityId: string;
+    partId: string;
+    writeToken: string;
+    bodyKey: string;
+    now: number;
+  }): Promise<V2ChunkUpload>;
+  abortChunkUploadPart(input: {
+    id: string;
+    partId: string;
+    writeToken: string;
+  }): Promise<boolean>;
+  renewChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    operationId: Uint8Array;
+    operationDigest: Uint8Array;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+    expiresAt: number;
+  }): Promise<{ upload: V2ChunkUpload; idempotent: boolean }>;
+  abandonChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    authorization: V2RepositoryAuthorization;
+    now: number;
+  }): Promise<void>;
   reserveDelivery(input: {
     capabilityId: string;
     operationId: Uint8Array;
     operationDigest: Uint8Array;
     payloadLength: number;
+    chunkUploadId?: string;
     /** Maximum aggregate published plus in-flight bytes for the relationship. */
     maximumTotalBytes?: number;
     /** Maximum published-but-uncompleted deliveries for the relationship. */
@@ -344,9 +481,7 @@ export interface V2Repository {
     now: number;
     expiresAt: number;
   }): Promise<V2DeliveryReservation | { existing: V2RepositoryDelivery }>;
-  publishDelivery(
-    input: Omit<V2RepositoryDelivery, 'state' | 'sequence'>,
-  ): Promise<{
+  publishDelivery(input: V2DeliveryPublication): Promise<{
     delivery: V2RepositoryDelivery;
     idempotent: boolean;
   }>;

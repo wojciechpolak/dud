@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -1228,7 +1229,7 @@ func (a *app) cmdPeerRevoke(args []string) error {
 		if err := runtime.flushPendingCompletions(context.Background()); err != nil {
 			return fmt.Errorf("flush queued completions before revocation: %w", err)
 		}
-		if err := runtime.flushPendingGranularDeliveries(context.Background()); err != nil {
+		if err := runtime.flushPendingDeliveries(context.Background()); err != nil {
 			return fmt.Errorf("flush queued deliveries before revocation: %w", err)
 		}
 		if err := runtime.flushPendingControlPublications(context.Background()); err != nil {
@@ -1380,6 +1381,116 @@ func (a *app) cmdPeerResume(args []string) error {
 		}
 		fmt.Fprintf(a.out, "Resumed %d chain(s) for %q. Run dud receive %s to continue.\n",
 			len(quarantined), alias, alias)
+		return nil
+	})
+}
+
+func (a *app) cmdPeerAbandon(args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return fatalError("dud peer abandon requires NAME --id DIGEST --yes")
+	}
+	alias := args[0]
+	digest := ""
+	confirmed := false
+	jsonOutput := false
+	for args = args[1:]; len(args) != 0; {
+		switch args[0] {
+		case "--id":
+			if len(args) < 2 {
+				return fatalError("--id requires a descriptor digest")
+			}
+			digest, args = strings.ToLower(args[1]), args[2:]
+		case "--yes":
+			confirmed, args = true, args[1:]
+		case "--json":
+			if err := markJSONOption(&jsonOutput); err != nil {
+				return err
+			}
+			args = args[1:]
+		default:
+			return fatalError("Unknown peer abandon option: " + args[0])
+		}
+	}
+	decodedDigest, err := hex.DecodeString(digest)
+	if err != nil || len(decodedDigest) != 32 {
+		return errors.New("--id must be a 64-character descriptor digest")
+	}
+	if !confirmed {
+		return fatalError("dud peer abandon is destructive; rerun with --yes")
+	}
+	return a.withV2Peer(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
+		outboundIndex := -1
+		for index, transfer := range runtime.state.PendingChunkDeliveries {
+			if transfer.DescriptorDigest == digest {
+				outboundIndex = index
+				break
+			}
+		}
+		inbound, inboundExists := runtime.state.InboundTransfers[digest]
+		if outboundIndex < 0 && (!inboundExists || len(inbound.Chunks) == 0) {
+			return fmt.Errorf("peer %q has no resumable transfer %s", alias, digest)
+		}
+		kind := "download"
+		sequenceRetained := false
+		if outboundIndex >= 0 {
+			kind = "upload"
+			queued := runtime.state.PendingChunkDeliveries[outboundIndex]
+			chain := runtime.state.Chains["out:data"]
+			if outboundIndex != len(runtime.state.PendingChunkDeliveries)-1 || chain.SendSequence != queued.Sequence || chain.SendDigest != queued.DescriptorDigest {
+				return errors.New("resumable upload cannot be abandoned after a later data sequence")
+			}
+			sequenceRetained = queued.CommitState == v2ChunkCommitAmbiguous
+			if !sequenceRetained && queued.UploadID != "" && queued.LeaseExpiresAt > uint64(time.Now().Unix()) {
+				uploadID, uploadErr := hex.DecodeString(queued.UploadID)
+				slot, slotErr := hex.DecodeString(queued.DataSlot)
+				if uploadErr != nil || slotErr != nil {
+					return errors.New("resumable upload state is invalid")
+				}
+				proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
+				if proofErr != nil {
+					return proofErr
+				}
+				if abandonErr := abandonV2ChunkUpload(context.Background(), runtime.transport, runtime.origin, uploadID, proof); abandonErr != nil {
+					var protocolErr *v2ProtocolError
+					if !errors.As(abandonErr, &protocolErr) || (protocolErr.Code != 2 && protocolErr.Code != 4) {
+						return abandonErr
+					}
+				}
+			}
+			runtime.state.PendingChunkDeliveries = append(runtime.state.PendingChunkDeliveries[:outboundIndex], runtime.state.PendingChunkDeliveries[outboundIndex+1:]...)
+			if !sequenceRetained {
+				delete(runtime.state.Sent, digest)
+				chain.SendSequence = queued.Sequence - 1
+				chain.SendDigest = queued.PreviousDigest
+			}
+			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+				return err
+			}
+			for _, part := range queued.Parts {
+				if err := os.Remove(part.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			if len(queued.Parts) != 0 {
+				_ = os.Remove(filepath.Dir(queued.Parts[0].Path))
+			}
+		} else {
+			if err := discardV2InboundChunks(inbound); err != nil {
+				return err
+			}
+			delete(runtime.state.InboundTransfers, digest)
+			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+				return err
+			}
+		}
+		if jsonOutput {
+			return writeJSON(a.out, map[string]any{"peer": alias, "descriptor_digest": digest, "abandoned": true, "direction": kind, "sequence_retained": sequenceRetained})
+		}
+		if sequenceRetained {
+			fmt.Fprintf(a.out, "Abandoned resumable %s %s for peer %q; retained its signed sequence because publication may have succeeded.\n", kind, digest, alias)
+			return nil
+		}
+		fmt.Fprintf(a.out, "Abandoned resumable %s %s for peer %q.\n", kind, digest, alias)
 		return nil
 	})
 }

@@ -4,18 +4,32 @@
 import { R2BlobStore } from './cloudflare.js';
 import { bytesEqual } from './cbor.js';
 import { StreamingSha256 } from './sha256.js';
+import {
+  isV2BodyKey,
+  v2BodyKeyKind,
+  v2DeliveryChunkKey,
+  v2StagedChunkKey,
+  validateV2BodyPartDeclarations,
+} from './v2-body-keys.js';
 import type { BlobObject, R2BucketLike } from './types.js';
 import type {
   V2BodyInventory,
   V2BodyInventoryEntry,
+  V2BodyPartDeclaration,
   V2BodyStore,
+  V2CommittedBodyPart,
 } from './v2-repository.js';
 import { emptyV2State, type V2StoredState, type V2Store } from './v2-types.js';
 
+declare class FixedLengthStream extends TransformStream<
+  Uint8Array,
+  Uint8Array
+> {
+  constructor(expectedLength: number);
+}
+
 const STATE_KEY = 'v2/state.json';
 const NONCE_PREFIX = 'v2/nonces/';
-const BODY_KEY = /^deliveries\/([a-f0-9]{32})\.bin$/;
-const STAGING_KEY = /^staging\/([a-f0-9]{32})\.bin$/;
 
 function bytesToHex(value: Uint8Array): string {
   return Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join(
@@ -24,7 +38,12 @@ function bytesToHex(value: Uint8Array): string {
 }
 
 function requireBodyKey(key: string, staging: boolean): void {
-  if ((staging ? STAGING_KEY : BODY_KEY).test(key)) {
+  const kind = v2BodyKeyKind(key);
+  if (
+    staging
+      ? kind === 'staging' || kind === 'staged-chunk'
+      : kind === 'delivery' || kind === 'delivery-chunk'
+  ) {
     return;
   }
   throw new Error('R2 delivery body key is invalid.');
@@ -162,6 +181,132 @@ export class R2V2BodyStore implements V2BodyStore, V2BodyInventory {
     await this.blobStore.delete(stagedKey);
   }
 
+  async stagePart(
+    uploadId: string,
+    part: V2BodyPartDeclaration,
+    body: ReadableStream<Uint8Array>,
+  ): Promise<string> {
+    const key = v2StagedChunkKey(uploadId, part.id);
+    const digest = bytesToHex(part.digest);
+    const existing = await this.blobStore.head(key);
+    if (existing) {
+      if (
+        existing.size !== part.length ||
+        existing.customMetadata?.dudSha256 !== digest
+      ) {
+        throw new Error(
+          'Staged R2 delivery chunk conflicts with existing bytes.',
+        );
+      }
+      await verifiedBody(body, part.length, part.digest).pipeTo(
+        new WritableStream(),
+      );
+      return key;
+    }
+    const fixed = new FixedLengthStream(part.length);
+    const pipe = verifiedBody(body, part.length, part.digest).pipeTo(
+      fixed.writable,
+    );
+    let result;
+    try {
+      result = await this.bucket.put(key, fixed.readable, {
+        onlyIf: { etagDoesNotMatch: '*' },
+        httpMetadata: { contentType: 'application/octet-stream' },
+        customMetadata: { dudSha256: digest },
+      });
+      if (result !== null) {
+        await pipe;
+      }
+    } catch (error) {
+      await fixed.readable.cancel().catch(() => undefined);
+      await pipe.catch(() => undefined);
+      throw error;
+    }
+    if (result === null) {
+      await fixed.readable.cancel().catch(() => undefined);
+      await pipe.catch(() => undefined);
+      const winner = await this.blobStore.head(key);
+      if (
+        !winner ||
+        winner.size !== part.length ||
+        winner.customMetadata?.dudSha256 !== digest
+      ) {
+        throw new Error(
+          'Staged R2 delivery chunk conflicts with existing bytes.',
+        );
+      }
+      throw new Error('Staged R2 delivery chunk write must be retried.');
+    }
+    return key;
+  }
+
+  async commitParts(input: {
+    uploadId: string;
+    deliveryId: string;
+    parts: readonly V2BodyPartDeclaration[];
+    expectedTotalLength: number;
+  }): Promise<V2CommittedBodyPart[]> {
+    validateV2BodyPartDeclarations(input.parts, input.expectedTotalLength);
+    const parts = await Promise.all(
+      input.parts.map(async (part) => {
+        const stagedKey = v2StagedChunkKey(input.uploadId, part.id);
+        const key = v2DeliveryChunkKey(input.deliveryId, part.id);
+        const digest = bytesToHex(part.digest);
+        const [staged, destination] = await Promise.all([
+          this.blobStore.head(stagedKey),
+          this.blobStore.head(key),
+        ]);
+        const matches = (value: typeof staged) =>
+          value?.size === part.length &&
+          value.customMetadata?.dudSha256 === digest;
+        if (!matches(staged) && !matches(destination)) {
+          throw new Error(
+            'Staged R2 delivery chunk is unavailable or invalid.',
+          );
+        }
+        return {
+          ...part,
+          key,
+          stagedKey,
+          destinationExists: matches(destination),
+        };
+      }),
+    );
+    for (const part of parts) {
+      if (!part.destinationExists) {
+        const staged = await this.blobStore.get(part.stagedKey);
+        if (!staged) {
+          throw new Error('Staged R2 delivery chunk is unavailable.');
+        }
+        const digest = bytesToHex(part.digest);
+        const result = await this.bucket.put(part.key, staged.body, {
+          onlyIf: { etagDoesNotMatch: '*' },
+          httpMetadata: { contentType: 'application/octet-stream' },
+          customMetadata: { dudSha256: digest },
+        });
+        if (result === null) {
+          const existing = await this.blobStore.head(part.key);
+          if (
+            !existing ||
+            existing.size !== part.length ||
+            existing.customMetadata?.dudSha256 !== digest
+          ) {
+            throw new Error(
+              'R2 delivery chunk conflicts with an existing payload.',
+            );
+          }
+        }
+      }
+      await this.blobStore.delete(part.stagedKey);
+    }
+    return parts.map(({ id, length, digest, key }) => ({
+      id,
+      length,
+      digest: Uint8Array.from(digest),
+      key,
+    }));
+  }
+
   async put(
     key: string,
     body: ReadableStream<Uint8Array>,
@@ -226,9 +371,7 @@ export class R2V2BodyStore implements V2BodyStore, V2BodyInventory {
       ...(r2Cursor === undefined ? {} : { cursor: r2Cursor }),
     });
     const entries = result.objects
-      .filter(
-        (object) => BODY_KEY.test(object.key) || STAGING_KEY.test(object.key),
-      )
+      .filter((object) => isV2BodyKey(object.key))
       .map((object) => ({
         key: object.key,
         size: object.size ?? 0,

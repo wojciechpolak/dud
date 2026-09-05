@@ -134,7 +134,7 @@ func TestV2EnvelopeRejectsWrongSenderBeforeUse(t *testing.T) {
 	}
 }
 
-func TestV2DescriptorRejectsDeferredAndUnknownRequiredFields(t *testing.T) {
+func TestV2DescriptorRequiresCompleteChunkSignalAndKnownCoreFields(t *testing.T) {
 	signingKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x90}, 32))
 	desc, err := descriptorMap(validTestV2Descriptor(), signingKey)
 	if err != nil {
@@ -156,6 +156,41 @@ func TestV2DescriptorRejectsDeferredAndUnknownRequiredFields(t *testing.T) {
 	critical[kCriticalExtensions] = []any{uint64(128)}
 	if err := validateV2DescriptorMap(critical); err == nil {
 		t.Fatal("unknown critical extension accepted")
+	}
+}
+
+func TestV2ChunkedDescriptorLayout(t *testing.T) {
+	signingKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x90}, 32))
+	descriptor := validTestV2Descriptor()
+	chunkSize := uint64(1024 * 1024)
+	plaintextSize := chunkSize + 1
+	secondHash := sha256.Sum256([]byte("second chunk"))
+	descriptor.ChunkSize = &chunkSize
+	descriptor.ChunkIDs = [][]byte{bytes.Repeat([]byte{0x71}, 16), bytes.Repeat([]byte{0x72}, 16)}
+	descriptor.ChunkHashes = append(descriptor.ChunkHashes, secondHash[:])
+	descriptor.PlaintextSize = &plaintextSize
+	if _, err := descriptorMap(descriptor, signingKey); err != nil {
+		t.Fatalf("valid chunked descriptor rejected: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		change func(*v2Descriptor)
+	}{
+		{"unregistered size", func(value *v2Descriptor) { size := uint64(2 * 1024 * 1024); value.ChunkSize = &size }},
+		{"duplicate ID", func(value *v2Descriptor) { value.ChunkIDs[1] = append([]byte(nil), value.ChunkIDs[0]...) }},
+		{"missing hash", func(value *v2Descriptor) { value.ChunkHashes = value.ChunkHashes[:1] }},
+		{"short plaintext", func(value *v2Descriptor) { size := chunkSize; value.PlaintextSize = &size }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := descriptor
+			candidate.ChunkIDs = cloneByteSlices(descriptor.ChunkIDs)
+			candidate.ChunkHashes = cloneByteSlices(descriptor.ChunkHashes)
+			test.change(&candidate)
+			if _, err := descriptorMap(candidate, signingKey); err == nil {
+				t.Fatal("invalid chunk layout was accepted")
+			}
+		})
 	}
 }
 
