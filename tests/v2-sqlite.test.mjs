@@ -30,7 +30,7 @@ test('SQLite maintenance reclaims only metadata-named staged bodies', async () =
   const database = new SQLiteV2Database(root);
   await database.initialize();
   assert.equal(
-    database.reserveStagedBody('a'.repeat(32), 10, 0, 0, 1, 1),
+    database.reserveStagedBody('a'.repeat(32), 'staged-writer', 10, 0, 0, 1, 1),
     `staging/${'a'.repeat(32)}.bin`,
   );
   assert.deepEqual(database.runMaintenance(11, 8).expiredBodyKeys, [

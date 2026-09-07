@@ -10,9 +10,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,13 +90,15 @@ func newV2TestPeerCrypto(t *testing.T, paths v2Paths, state *v2PeerDeliveryState
 
 // stubbedV2Delivery is one published delivery as the server would hold it.
 type stubbedV2Delivery struct {
-	id         []byte
-	slot       []byte
-	epoch      uint64
-	descriptor []byte
-	payload    []byte
-	policy     map[int]any
-	digest     string
+	id          []byte
+	slot        []byte
+	epoch       uint64
+	descriptor  []byte
+	payload     []byte
+	policy      map[int]any
+	digest      string
+	chunks      []v2ChunkManifestPart
+	chunkBodies map[string][]byte
 }
 
 // buildInboundV2Delivery signs and encrypts one delivery in the peer's outbound
@@ -195,6 +200,68 @@ func buildInboundV2Delivery(t *testing.T, crypto v2TestPeerCrypto, sequence uint
 	}
 }
 
+func buildInboundV2ChunkedDelivery(t *testing.T, crypto v2TestPeerCrypto, plaintext []byte) stubbedV2Delivery {
+	t.Helper()
+	const chunkSize = uint64(1024 * 1024)
+	spool, err := spoolV2ChunkedPayload(bytes.NewReader(plaintext), filepath.Join(t.TempDir(), "chunks"), crypto.recipient, chunkSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunkIDs := make([][]byte, len(spool.Chunks))
+	chunkHashes := make([][]byte, len(spool.Chunks))
+	manifest := make([]v2ChunkManifestPart, len(spool.Chunks))
+	bodies := map[string][]byte{}
+	for index, chunk := range spool.Chunks {
+		body, readErr := os.ReadFile(chunk.Path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		id := hex.EncodeToString(chunk.ID)
+		chunkIDs[index] = chunk.ID
+		chunkHashes[index] = chunk.CiphertextHash
+		manifest[index] = v2ChunkManifestPart{ID: chunk.ID, Length: chunk.CiphertextLength, Digest: chunk.CiphertextHash}
+		bodies[id] = body
+	}
+	now := uint64(time.Now().Unix())
+	policy := v2TransportPolicy{ExpiresAt: now + 86_400, Consume: 0, ClaimLeaseSeconds: 300, AckMode: 1}
+	descriptorID, err := newV2DescriptorID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintextSize := uint64(len(plaintext))
+	descriptor := v2Descriptor{
+		DescriptorID: descriptorID, PayloadType: 2, RelationshipID: crypto.relationshipID,
+		Direction: v2InboundDirection(crypto.role), Chain: 0, KeyEpoch: 0, Sequence: 1,
+		PreviousDigest: mustDecodeHexV2(strings.Repeat("00", 32), 32), SenderDeviceID: crypto.peerID,
+		RecipientDeviceID: crypto.localID, CanonicalOrigin: crypto.origin, CreatedAt: now,
+		TransportPolicy: policy, PayloadHash: spool.PlaintextHash, ChunkHashes: chunkHashes,
+		ChunkSize: new(uint64), ChunkIDs: chunkIDs, DisplayName: "large.bin", PlaintextSize: &plaintextSize,
+	}
+	*descriptor.ChunkSize = chunkSize
+	descriptorCiphertext, err := encryptV2Envelope(descriptor, crypto.signingKey, crypto.recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedMap, err := descriptorMap(descriptor, crypto.signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedBytes, err := v2EncMode.Marshal(signedMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptorDigest := sha256.Sum256(signedBytes)
+	epoch := v2SlotEpoch(time.Now())
+	slot, err := deriveV2Slot(crypto.inboundSecret, "data", epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stubbedV2Delivery{
+		id: bytesRepeatV2(0x4d, 16), slot: slot, epoch: epoch, descriptor: descriptorCiphertext,
+		policy: v2TransportPolicyMap(policy), digest: hex.EncodeToString(descriptorDigest[:]), chunks: manifest, chunkBodies: bodies,
+	}
+}
+
 // drainingInboxTransport answers like the server: one inbox read returns the
 // oldest pending delivery and never consumes it, and only a completion retires
 // it. Draining N deliveries therefore costs N inbox reads and N completions.
@@ -204,10 +271,34 @@ type drainingInboxTransport struct {
 	completions   int
 	// holdHead keeps the head in the queue after its completion, which is how a
 	// delivery this device has already applied comes back on the next read.
-	holdHead bool
+	holdHead    bool
+	failChunkID string
+	chunkGets   map[string]int
 }
 
 func (transport *drainingInboxTransport) Do(_ context.Context, request v2Request) (*v2Response, error) {
+	if request.Method == "GET" {
+		id := filepath.Base(request.Path)
+		if transport.chunkGets == nil {
+			transport.chunkGets = map[string]int{}
+		}
+		transport.chunkGets[id]++
+		if id == transport.failChunkID {
+			transport.failChunkID = ""
+			return nil, errors.New("chunk connection interrupted")
+		}
+		if len(transport.queue) == 0 {
+			return &v2Response{StatusCode: http.StatusNotFound}, nil
+		}
+		body, ok := transport.queue[0].chunkBodies[id]
+		if !ok {
+			return &v2Response{StatusCode: http.StatusNotFound}, nil
+		}
+		digest := sha256.Sum256(body)
+		return &v2Response{StatusCode: http.StatusOK, ContentType: "application/octet-stream", Headers: http.Header{
+			"Content-Length": {strconv.Itoa(len(body))}, "Dud-Content-Sha256": {hex.EncodeToString(digest[:])},
+		}, Stream: io.NopCloser(bytes.NewReader(body))}, nil
+	}
 	if request.Method != "POST" {
 		return nil, errors.New("unexpected method " + request.Method)
 	}
@@ -275,6 +366,13 @@ func (transport *drainingInboxTransport) Do(_ context.Context, request v2Request
 		header[4] = head.slot
 		header[5] = head.descriptor
 		header[6] = head.policy
+		if len(head.chunks) != 0 {
+			rawParts := make([]any, len(head.chunks))
+			for index, part := range head.chunks {
+				rawParts[index] = map[int]any{1: part.ID, 2: part.Length, 3: part.Digest}
+			}
+			header[10] = rawParts
+		}
 	}
 	digest := sha256.Sum256(payload)
 	header[7] = uint64(len(payload))
@@ -308,6 +406,53 @@ func newDrainingV2TestApp(t *testing.T, transport v2Transport, stdout, stderr *b
 	a := newApp(strings.NewReader(""), stdout, stderr)
 	a.newV2Transport = func(v2TransportOptions) (v2Transport, error) { return transport, nil }
 	return a
+}
+
+func TestV2PeerReceiveResumesChunkDownloadWithoutConsumingSequence(t *testing.T) {
+	paths, state := newPairedV2TestPeer(t, "laptop")
+	if err := writeV2PeerDeliveryState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+	crypto := newV2TestPeerCrypto(t, paths, state, "laptop")
+	plaintext := append(bytes.Repeat([]byte("r"), 1024*1024), 's')
+	delivery := buildInboundV2ChunkedDelivery(t, crypto, plaintext)
+	secondID := hex.EncodeToString(delivery.chunks[1].ID)
+	transport := &drainingInboxTransport{queue: []stubbedV2Delivery{delivery}, failChunkID: secondID}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	a := newDrainingV2TestApp(t, transport, &stdout, &stderr)
+	destination := filepath.Join(t.TempDir(), "received.bin")
+	if err := a.run([]string{"receive", "laptop", "--out", destination}); err == nil {
+		t.Fatal("interrupted receive succeeded")
+	}
+	interrupted, err := loadV2PeerDeliveryState(paths, state.RelationshipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interrupted.Chains["in:data"].ReceiveWatermark != 0 {
+		t.Fatalf("interrupted receive consumed sequence %d", interrupted.Chains["in:data"].ReceiveWatermark)
+	}
+	transfer := interrupted.InboundTransfers[delivery.digest]
+	if len(transfer.Chunks) != 2 || !transfer.Chunks[0].Downloaded || transfer.Chunks[1].Downloaded {
+		t.Fatalf("interrupted receive progress = %#v", transfer)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := a.run([]string{"receive", "laptop", "--out", destination}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := loadV2PeerDeliveryState(paths, state.RelationshipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID := hex.EncodeToString(delivery.chunks[0].ID)
+	if !bytes.Equal(result, plaintext) || completed.Chains["in:data"].ReceiveWatermark != 1 || transport.completions != 1 || transport.chunkGets[firstID] != 1 || transport.chunkGets[secondID] != 2 {
+		t.Fatalf("resumed receive: bytes=%d watermark=%d completions=%d gets=%#v", len(result), completed.Chains["in:data"].ReceiveWatermark, transport.completions, transport.chunkGets)
+	}
 }
 
 // One receive has to empty the queue. Before this, two files meant three

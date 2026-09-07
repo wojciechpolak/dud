@@ -124,6 +124,7 @@ type v2GitPushOptions struct {
 	JSON     bool
 	Verbose  bool
 	Mode     v2GitCheckpointMode
+	Progress v2ProgressFlags
 }
 
 type v2GitFetchOptions struct {
@@ -132,6 +133,7 @@ type v2GitFetchOptions struct {
 	AllowRewrite bool
 	JSON         bool
 	Verbose      bool
+	Progress     v2ProgressFlags
 }
 
 type v2GitLimitedBuffer struct {
@@ -271,6 +273,11 @@ func parseV2GitPushOptions(args []string) (v2GitPushOptions, error) {
 				return opts, err
 			}
 			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.Progress.parse(args[0]); err != nil {
+				return opts, err
+			}
+			args = args[1:]
 		case "-v", "--verbose":
 			if err := markVerboseOption(&opts.Verbose); err != nil {
 				return opts, err
@@ -318,6 +325,11 @@ func parseV2GitFetchOptions(args []string) (v2GitFetchOptions, error) {
 			args = args[1:]
 		case "--json":
 			if err := markJSONOption(&opts.JSON); err != nil {
+				return opts, err
+			}
+			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.Progress.parse(args[0]); err != nil {
 				return opts, err
 			}
 			args = args[1:]
@@ -1344,7 +1356,14 @@ func (a *app) createV2GitBundle(repository *v2GitRepository, opts v2GitPushOptio
 }
 
 func (runtime *v2PeerRuntime) publishV2PeerPayload(ctx context.Context, plaintext []byte, payloadType uint64, typeMetadata map[int]any, ttl time.Duration) (uint64, string, error) {
-	payloadCiphertext, err := encryptV2Payload(plaintext, runtime.recipient)
+	if runtime.progress != nil {
+		runtime.progress.Phase("encrypting Git checkpoint", int64(len(plaintext)))
+	}
+	var observe func(int64, int64)
+	if runtime.progress != nil {
+		observe = runtime.progress.Set
+	}
+	payloadCiphertext, err := encryptV2PayloadObserved(plaintext, runtime.recipient, observe)
 	if err != nil {
 		return 0, "", err
 	}
@@ -1430,7 +1449,7 @@ func (runtime *v2PeerRuntime) publishV2PeerPayload(ctx context.Context, plaintex
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return 0, "", err
 	}
-	if err := runtime.flushPendingGranularDeliveries(ctx); err != nil {
+	if err := runtime.flushPendingDeliveries(ctx); err != nil {
 		return descriptor.Sequence, key, fmt.Errorf("delivery committed locally and will retry publication: %w", err)
 	}
 	return descriptor.Sequence, key, nil
@@ -1449,7 +1468,15 @@ func (a *app) cmdV2GitPush(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) error {
+	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) (resultErr error) {
+		runtime.progress = a.newV2ProgressReporter(opts.Alias, opts.JSON, opts.Progress)
+		defer func() {
+			if resultErr != nil {
+				runtime.progress.Fail()
+			} else {
+				runtime.progress.Complete()
+			}
+		}()
 		if err := runtime.requireGitFeatures(); err != nil {
 			return err
 		}
@@ -1464,9 +1491,10 @@ func (a *app) cmdV2GitPush(args []string) error {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
 		if err := runtime.flushPendingCompletions(ctx); err != nil {
+			runtime.progress.Clear()
 			fmt.Fprintf(a.errOut, "WARNING: queued peer completions remain pending: %v\n", err)
 		}
-		if err := runtime.flushPendingGranularDeliveries(ctx); err != nil {
+		if err := runtime.flushPendingDeliveries(ctx); err != nil {
 			return fmt.Errorf("retry pending peer publication: %w", err)
 		}
 		state, err := repository.loadPeerState(repositoryID, runtime.peer.PeerPseudonymousID)
@@ -1476,6 +1504,7 @@ func (a *app) cmdV2GitPush(args []string) error {
 		if err := reconcileV2GitAcknowledgements(runtime, repository, state); err != nil {
 			return err
 		}
+		runtime.progress.Phase("preparing Git checkpoint", 0)
 		bundlePath, metadata, checkpointMode, err := a.createV2GitCheckpoint(repository, opts, repositoryID, state, runtime.state.PeerFeatures)
 		if err != nil {
 			return err
@@ -1508,6 +1537,7 @@ func (a *app) cmdV2GitPush(args []string) error {
 		quarantined := quarantinedV2GitDeliveries(state)
 		rejected := rejectedV2GitDeliveries(runtime.state)
 		refused := refusedV2GitCheckpoints(state)
+		runtime.progress.Complete()
 		if opts.JSON {
 			result := status.merge(map[string]any{
 				"peer": opts.Alias, "repository_id": hex.EncodeToString(repositoryID),
@@ -1658,7 +1688,7 @@ func (a *app) validateV2GitIncrementalBase(repository *v2GitRepository, state *v
 	return nil
 }
 
-func v2GitAvailableBytes(path string) (uint64, error) {
+func v2AvailableBytes(path string) (uint64, error) {
 	var stats unix.Statfs_t
 	if err := unix.Statfs(path, &stats); err != nil {
 		return 0, err
@@ -1771,7 +1801,7 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 	if !info.Mode().IsRegular() || info.Size() <= 0 || uint64(info.Size()) > repository.Limits.BundleBytes {
 		return "", rejectV2Git(fmt.Errorf("Git bundle violates the local limit of %d bytes", repository.Limits.BundleBytes))
 	}
-	available, err := v2GitAvailableBytes(repository.DUDDir)
+	available, err := v2AvailableBytes(repository.DUDDir)
 	if err != nil {
 		return "", err
 	}
@@ -2240,6 +2270,9 @@ func reconcileV2GitAcknowledgements(runtime *v2PeerRuntime, repository *v2GitRep
 }
 
 func (runtime *v2PeerRuntime) receiveAvailableV2Git(ctx context.Context, a *app, repository *v2GitRepository, opts v2GitFetchOptions) (bool, error) {
+	if runtime.progress != nil {
+		runtime.progress.Phase("connecting", 0)
+	}
 	now := time.Now()
 	dataProofs, err := runtime.granularDataQueryProofs(now)
 	if err != nil {
@@ -2253,9 +2286,21 @@ func (runtime *v2PeerRuntime) receiveAvailableV2Git(ctx context.Context, a *app,
 	if err != nil {
 		return false, err
 	}
-	response, err := queryV2GranularInbox(ctx, runtime.transport, runtime.origin, dataProofs, controlProofs, processed)
+	downloading := false
+	response, err := queryV2GranularInboxObserved(ctx, runtime.transport, runtime.origin, dataProofs, controlProofs, processed, func(transferred, total int64) {
+		if runtime.progress != nil {
+			if !downloading {
+				runtime.progress.Phase("downloading", total)
+				downloading = true
+			}
+			runtime.progress.Set(transferred, total)
+		}
+	})
 	if err != nil {
 		return false, err
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("verification", 0)
 	}
 	rawControls, ok := response.Header[2].([]any)
 	if !ok {
@@ -2333,7 +2378,14 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 		return false, err
 	}
 	if err := runtime.flushPendingCompletions(ctx); err != nil {
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		fmt.Fprintf(a.errOut, "WARNING: Git checkpoint refused; refusal queued for automatic retry: %v\n", err)
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("completion", 0)
+		runtime.progress.Complete()
 	}
 	status := v2DeliveryStatusOf(runtime.state)
 	if opts.JSON {
@@ -2443,7 +2495,20 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	if !bytes.Equal(expectedCipherDigest, actualCipherDigest[:]) {
 		return false, errors.New("Git payload ciphertext does not match the signed descriptor")
 	}
-	plaintext, err := decryptV2Payload(payloadCiphertext, runtime.identity, v2MaximumObjectBytes)
+	plaintextTotal := int64(0)
+	if size, exists := envelope.Descriptor[kPlaintextSize]; exists {
+		if value, ok := asV2Uint(size); ok && value <= uint64(v2MaximumObjectBytes) {
+			plaintextTotal = int64(value)
+		}
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("decrypting and verifying Git checkpoint", plaintextTotal)
+	}
+	var observe func(int64, int64)
+	if runtime.progress != nil {
+		observe = runtime.progress.Set
+	}
+	plaintext, err := decryptV2PayloadObserved(payloadCiphertext, runtime.identity, v2MaximumObjectBytes, plaintextTotal, observe)
 	if err != nil {
 		return false, err
 	}
@@ -2611,6 +2676,9 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 		return false, err
 	}
 	if err := runtime.flushPendingCompletions(ctx); err != nil {
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		fmt.Fprintf(a.errOut, "WARNING: Git refs committed; atomic completion queued for automatic retry: %v\n", err)
 	}
 	remote := runtime.peer.GitRemote
@@ -2619,6 +2687,10 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	}
 	status := v2DeliveryStatusOf(runtime.state)
 	quarantined := quarantinedV2GitDeliveries(state)
+	if runtime.progress != nil {
+		runtime.progress.Phase("completion", 0)
+		runtime.progress.Complete()
+	}
 	if opts.JSON {
 		result := status.merge(map[string]any{
 			"peer": opts.Alias, "received": true, "repository_id": hex.EncodeToString(repositoryID),
@@ -2665,7 +2737,15 @@ func (a *app) cmdV2GitFetch(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) error {
+	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) (resultErr error) {
+		runtime.progress = a.newV2ProgressReporter(opts.Alias, opts.JSON, opts.Progress)
+		defer func() {
+			if resultErr != nil {
+				runtime.progress.Fail()
+			} else {
+				runtime.progress.Complete()
+			}
+		}()
 		if err := runtime.requireGitFeatures(); err != nil {
 			return err
 		}
@@ -2680,6 +2760,7 @@ func (a *app) cmdV2GitFetch(args []string) error {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
 		if err := runtime.flushPendingCompletions(ctx); err != nil {
+			runtime.progress.Clear()
 			fmt.Fprintf(a.errOut, "WARNING: queued peer completions remain pending: %v\n", err)
 		}
 		received, err := runtime.receiveAvailableV2Git(ctx, a, repository, opts)
@@ -2697,6 +2778,7 @@ func (a *app) cmdV2GitFetch(args []string) error {
 		}
 		status := v2DeliveryStatusOf(runtime.state)
 		rejected := rejectedV2GitDeliveries(runtime.state)
+		runtime.progress.Complete()
 		if opts.JSON {
 			return writeJSON(a.out, status.merge(map[string]any{
 				"peer": opts.Alias, "received": false,

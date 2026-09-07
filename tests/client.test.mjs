@@ -666,7 +666,7 @@ test('shell-init bash completion suggests subcommands and file arguments', async
     'bash',
     [
       '-c',
-      `eval "$(${CLIENT_BIN} shell-init)"; COMP_WORDS=(dud gi); COMP_CWORD=1; _dud_complete_bash; printf 'TOP:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud git ''); COMP_CWORD=2; _dud_complete_bash; printf 'GIT:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud peer ''); COMP_CWORD=2; _dud_complete_bash; printf 'PEER:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud download --identity ${path.basename(identityFile).slice(0, 2)}); COMP_CWORD=3; _dud_complete_bash; printf 'FILE:%s\n' "\${COMPREPLY[*]}"`,
+      `eval "$(${CLIENT_BIN} shell-init)"; COMP_WORDS=(dud gi); COMP_CWORD=1; _dud_complete_bash; printf 'TOP:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud git ''); COMP_CWORD=2; _dud_complete_bash; printf 'GIT:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud peer ''); COMP_CWORD=2; _dud_complete_bash; printf 'PEER:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud download --identity ${path.basename(identityFile).slice(0, 2)}); COMP_CWORD=3; _dud_complete_bash; printf 'FILE:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud send laptop ''); COMP_CWORD=3; _dud_complete_bash; printf 'PEER_SEND:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud upload ''); COMP_CWORD=2; _dud_complete_bash; printf 'DROP_UPLOAD:%s\n' "\${COMPREPLY[*]}"; COMP_WORDS=(dud git push laptop ''); COMP_CWORD=4; _dud_complete_bash; printf 'PEER_GIT:%s\n' "\${COMPREPLY[*]}"`,
     ],
     {},
     { cwd: tmpDir },
@@ -684,6 +684,10 @@ test('shell-init bash completion suggests subcommands and file arguments', async
   assert.match(result.stdout, /PEER:.*accept/);
   assert.doesNotMatch(result.stdout, /PEER:.*add/);
   assert.match(result.stdout, /FILE:.*identity\.txt/);
+  assert.match(result.stdout, /PEER_SEND:.*--progress/);
+  assert.match(result.stdout, /PEER_SEND:.*--no-progress/);
+  assert.doesNotMatch(result.stdout, /DROP_UPLOAD:.*--progress/);
+  assert.match(result.stdout, /PEER_GIT:.*--progress/);
 });
 
 test(

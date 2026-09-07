@@ -3,12 +3,18 @@
 
 import { bytesEqual } from './cbor.js';
 import { d1Bytes } from './v2-d1-values.js';
+import {
+  v2DeliveryChunkKey,
+  v2StagedChunkKey,
+  validateV2BodyPartDeclarations,
+} from './v2-body-keys.js';
 import type { D1DatabaseLike, D1RunResultLike } from './types.js';
 import { V2OperationConflictError } from './v2-repository.js';
 import type {
   V2CapabilityRegistration,
   V2CapabilityReissueInput,
   V2CapabilityReissueOutcome,
+  V2ChunkUpload,
   V2AdministrativeRepository,
   V2DeliveryReservation,
   V2MaintenanceResult,
@@ -16,6 +22,7 @@ import type {
   V2RepositoryCapability,
   V2RepositoryControlEvent,
   V2RepositoryDelivery,
+  V2RepositoryAuthorization,
   V2RelationshipRepository,
   V2ReconciliationRepository,
 } from './v2-repository.js';
@@ -171,7 +178,29 @@ export class D1V2Repository
       .prepare('SELECT * FROM deliveries WHERE id = ?')
       .bind(id)
       .first<Row>();
-    return row ? deliveryFromRow(row) : null;
+    if (!row) {
+      return null;
+    }
+    return this.deliveryWithParts(row);
+  }
+
+  private async deliveryWithParts(row: Row): Promise<V2RepositoryDelivery> {
+    const delivery = deliveryFromRow(row);
+    const parts = await this.selectRows(
+      'SELECT part_id, length, digest, body_key FROM delivery_chunks WHERE delivery_id = ? ORDER BY ordinal',
+      delivery.id,
+    );
+    return parts.length === 0
+      ? delivery
+      : {
+          ...delivery,
+          parts: parts.map((part) => ({
+            id: String(part.part_id),
+            length: Number(part.length),
+            digest: d1Bytes(part.digest),
+            key: String(part.body_key),
+          })),
+        };
   }
 
   async createRelationship(input: {
@@ -438,6 +467,7 @@ export class D1V2Repository
 
   async reserveStagedBody(input: {
     id: string;
+    capabilityId: string;
     expiresAt: number;
     now: number;
     reservedBytes: number;
@@ -446,6 +476,7 @@ export class D1V2Repository
   }): Promise<string> {
     if (
       !/^[a-f0-9]{32}$/.test(input.id) ||
+      input.capabilityId.length === 0 ||
       !Number.isSafeInteger(input.reservedBytes) ||
       input.reservedBytes < 0
     ) {
@@ -454,15 +485,20 @@ export class D1V2Repository
     const key = `staging/${input.id}.bin`;
     const result = await this.database
       .prepare(
-        'INSERT INTO staged_bodies(id, body_key, expires_at, reserved_bytes) SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM staged_bodies WHERE expires_at > ?) < ? AND (SELECT COALESCE(SUM(reserved_bytes), 0) FROM staged_bodies WHERE expires_at > ?) + ? <= ?',
+        'INSERT INTO staged_bodies(id, capability_id, body_key, expires_at, reserved_bytes) SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM staged_bodies WHERE (capability_id = ? OR capability_id IS NULL) AND expires_at > ?) < ? AND (SELECT COALESCE(SUM(reserved_bytes), 0) FROM staged_bodies WHERE (capability_id = ? OR capability_id IS NULL) AND expires_at > ?) + (SELECT COALESCE(SUM(total_length), 0) FROM chunk_uploads WHERE capability_id = ? AND committed_at IS NULL AND expires_at > ?) + ? <= ?',
       )
       .bind(
         input.id,
+        input.capabilityId,
         key,
         input.expiresAt,
         input.reservedBytes,
+        input.capabilityId,
         input.now,
         input.maximumConcurrentUploads,
+        input.capabilityId,
+        input.now,
+        input.capabilityId,
         input.now,
         input.reservedBytes,
         input.maximumStagedBytes,
@@ -481,11 +517,477 @@ export class D1V2Repository
       .run();
   }
 
+  async createChunkUpload(
+    input: Parameters<V2Repository['createChunkUpload']>[0],
+  ): Promise<{ upload: V2ChunkUpload; idempotent: boolean }> {
+    validateV2BodyPartDeclarations(input.parts, input.totalLength);
+    this.validateChunkOperation(input.operationId, input.operationDigest);
+    if (
+      input.expiresAt <= input.now ||
+      !Number.isSafeInteger(input.chain) ||
+      input.chain < 0 ||
+      input.slot.byteLength !== 16 ||
+      !Number.isSafeInteger(input.epoch) ||
+      input.epoch < 0 ||
+      !Number.isSafeInteger(input.maximumConcurrentUploads) ||
+      input.maximumConcurrentUploads < 1 ||
+      !Number.isSafeInteger(input.maximumStagedBytes) ||
+      input.maximumStagedBytes < input.totalLength
+    ) {
+      throw new Error('Chunk upload lease is invalid.');
+    }
+    const id = crypto.randomUUID().replaceAll('-', '');
+    const deliveryId = crypto.randomUUID().replaceAll('-', '');
+    const authorization = this.chunkAuthorizationStatements(
+      input.capabilityId,
+      input.authorization,
+      input.now,
+    );
+    const statements = [
+      ...authorization.statements,
+      this.database
+        .prepare(
+          `INSERT OR IGNORE INTO chunk_uploads(id, delivery_id, capability_id, chain, slot, epoch, total_length, created_at, expires_at, operation_id, operation_digest)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?)
+             AND ? <= (SELECT expires_at FROM capabilities WHERE id = ?)
+             AND (SELECT COUNT(*) FROM chunk_uploads WHERE capability_id = ? AND committed_at IS NULL AND expires_at > ?) < ?
+             AND (SELECT COALESCE(SUM(total_length), 0) FROM chunk_uploads WHERE capability_id = ? AND committed_at IS NULL AND expires_at > ?)
+               + (SELECT COALESCE(SUM(reserved_bytes), 0) FROM staged_bodies WHERE (capability_id = ? OR capability_id IS NULL) AND expires_at > ?)
+               + ? <= ?`,
+        )
+        .bind(
+          id,
+          deliveryId,
+          input.capabilityId,
+          input.chain,
+          input.slot,
+          input.epoch,
+          input.totalLength,
+          input.now,
+          input.expiresAt,
+          input.operationId,
+          input.operationDigest,
+          authorization.gate,
+          input.expiresAt,
+          input.capabilityId,
+          input.capabilityId,
+          input.now,
+          input.maximumConcurrentUploads,
+          input.capabilityId,
+          input.now,
+          input.capabilityId,
+          input.now,
+          input.totalLength,
+          input.maximumStagedBytes,
+        ),
+      ...input.parts.map((part, ordinal) =>
+        this.database
+          .prepare(
+            'INSERT OR IGNORE INTO chunk_upload_parts(upload_id, part_id, ordinal, length, digest) SELECT id, ?, ?, ?, ? FROM chunk_uploads WHERE operation_id = ? AND operation_digest = ?',
+          )
+          .bind(
+            part.id,
+            ordinal,
+            part.length,
+            part.digest,
+            input.operationId,
+            input.operationDigest,
+          ),
+      ),
+      this.database
+        .prepare(
+          "INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-chunk-create-assertion', NULL WHERE NOT EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?) OR NOT EXISTS (SELECT 1 FROM chunk_uploads WHERE operation_id = ? AND operation_digest = ?)",
+        )
+        .bind(authorization.gate, input.operationId, input.operationDigest),
+      this.database
+        .prepare('DELETE FROM maintenance_leases WHERE name = ?')
+        .bind(authorization.gate),
+    ];
+    let mutationChanges = 0;
+    try {
+      const results = await this.database.batch<D1RunResultLike>(statements);
+      mutationChanges =
+        results[authorization.statements.length]?.meta?.changes ?? 0;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /maintenance_leases\.expires_at/i.test(error.message)
+      ) {
+        if (await this.hasLiveNonce(input.authorization.claims, input.now)) {
+          throw new Error('Chunk upload authorization is unavailable.');
+        }
+        const conflict = await this.findChunkUploadByOperation(
+          input.operationId,
+        );
+        if (conflict) {
+          this.requireMatchingOperation(
+            conflict.operationDigest,
+            input.operationDigest,
+          );
+        }
+        throw new Error('Chunk upload staging quota is exhausted.');
+      }
+      throw error;
+    }
+    const upload = await this.findChunkUploadByOperation(input.operationId);
+    if (!upload) {
+      throw new Error('Chunk upload reservation is unavailable.');
+    }
+    this.requireMatchingOperation(
+      upload.operationDigest,
+      input.operationDigest,
+    );
+    return { upload, idempotent: mutationChanges !== 1 };
+  }
+
+  async findChunkUpload(
+    input: Parameters<V2Repository['findChunkUpload']>[0],
+  ): Promise<V2ChunkUpload | null> {
+    const row = await this.database
+      .prepare(
+        "SELECT u.id FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL",
+      )
+      .bind(input.id, input.capabilityId, input.now, input.now)
+      .first<Row>();
+    return row ? this.requireChunkUpload(String(row.id)) : null;
+  }
+
+  async findChunkUploadForCommit(
+    input: Parameters<V2Repository['findChunkUploadForCommit']>[0],
+  ): Promise<V2ChunkUpload | null> {
+    const row = await this.database
+      .prepare(
+        "SELECT u.id FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL",
+      )
+      .bind(input.id, input.capabilityId, input.now, input.now)
+      .first<Row>();
+    return row ? this.requireChunkUpload(String(row.id)) : null;
+  }
+
+  async authorizeChunkUpload(
+    input: Parameters<V2Repository['authorizeChunkUpload']>[0],
+  ): Promise<V2ChunkUpload> {
+    const authorization = this.chunkAuthorizationStatements(
+      input.capabilityId,
+      input.authorization,
+      input.now,
+    );
+    try {
+      await this.database.batch([
+        ...authorization.statements,
+        this.database
+          .prepare(
+            `INSERT INTO maintenance_leases(name, expires_at)
+             SELECT 'v2-chunk-authorize-assertion', NULL
+             WHERE NOT EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?)
+                OR NOT EXISTS (
+                  SELECT 1 FROM chunk_uploads u
+                  JOIN capabilities c ON c.id = u.capability_id
+                  WHERE u.id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ?
+                    AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL
+                )`,
+          )
+          .bind(
+            authorization.gate,
+            input.id,
+            input.capabilityId,
+            input.now,
+            input.now,
+          ),
+        this.database
+          .prepare('DELETE FROM maintenance_leases WHERE name = ?')
+          .bind(authorization.gate),
+      ]);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /maintenance_leases\.expires_at/i.test(error.message)
+      ) {
+        throw new Error('Chunk upload is unavailable.');
+      }
+      throw error;
+    }
+    return this.requireChunkUpload(input.id);
+  }
+
+  async prepareChunkUploadPart(
+    input: Parameters<V2Repository['prepareChunkUploadPart']>[0],
+  ): Promise<{ upload: V2ChunkUpload; idempotent: boolean }> {
+    this.validateChunkOperation(input.operationId, input.operationDigest);
+    if (
+      !/^[a-f0-9]{32}$/.test(input.writeToken) ||
+      !Number.isSafeInteger(input.writeExpiresAt) ||
+      input.writeExpiresAt <= input.now
+    ) {
+      throw new Error('Chunk upload part write lease is invalid.');
+    }
+    const bodyKey = v2StagedChunkKey(input.id, input.partId);
+    const authorization = this.chunkAuthorizationStatements(
+      input.capabilityId,
+      input.authorization,
+      input.now,
+    );
+    const statements = [
+      ...authorization.statements,
+      this.database
+        .prepare(
+          `UPDATE chunk_upload_parts SET write_token = ?, write_expires_at = ?, operation_id = ?, operation_digest = ?
+           WHERE upload_id = ? AND part_id = ? AND body_key IS NULL
+             AND (write_token IS NULL OR write_expires_at <= ?)
+             AND (operation_id IS NULL OR (operation_id = ? AND operation_digest = ?))
+             AND EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?)
+             AND EXISTS (SELECT 1 FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL)`,
+        )
+        .bind(
+          input.writeToken,
+          input.writeExpiresAt,
+          input.operationId,
+          input.operationDigest,
+          input.id,
+          input.partId,
+          input.now,
+          input.operationId,
+          input.operationDigest,
+          authorization.gate,
+          input.id,
+          input.capabilityId,
+          input.now,
+          input.now,
+        ),
+      this.database
+        .prepare(
+          "INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-chunk-part-assertion', NULL WHERE NOT EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?) OR NOT EXISTS (SELECT 1 FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ? AND operation_id = ? AND operation_digest = ? AND ((body_key = ?) OR (body_key IS NULL AND write_token = ?)))",
+        )
+        .bind(
+          authorization.gate,
+          input.id,
+          input.partId,
+          input.operationId,
+          input.operationDigest,
+          bodyKey,
+          input.writeToken,
+        ),
+      this.database
+        .prepare('DELETE FROM maintenance_leases WHERE name = ?')
+        .bind(authorization.gate),
+    ];
+    try {
+      await this.database.batch<D1RunResultLike>(statements);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /maintenance_leases\.expires_at/i.test(error.message)
+      ) {
+        if (await this.hasLiveNonce(input.authorization.claims, input.now)) {
+          throw new Error('Chunk upload authorization is unavailable.');
+        }
+        const conflict = await this.database
+          .prepare(
+            'SELECT operation_id, operation_digest FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
+          )
+          .bind(input.id, input.partId)
+          .first<Row>();
+        if (conflict?.operation_id) {
+          this.requireMatchingOperation(
+            d1Bytes(conflict.operation_digest),
+            input.operationDigest,
+          );
+        }
+        throw new Error('Chunk upload part is unavailable.');
+      }
+      throw error;
+    }
+    const upload = await this.requireChunkUpload(input.id);
+    const part = upload.parts.find(
+      (candidate) => candidate.id === input.partId,
+    );
+    if (!part) {
+      throw new Error('Chunk upload part is unavailable.');
+    }
+    return {
+      upload,
+      idempotent: part.bodyKey !== undefined,
+    };
+  }
+
+  async completeChunkUploadPart(
+    input: Parameters<V2Repository['completeChunkUploadPart']>[0],
+  ): Promise<V2ChunkUpload> {
+    if (
+      !/^[a-f0-9]{32}$/.test(input.writeToken) ||
+      input.bodyKey !== v2StagedChunkKey(input.id, input.partId)
+    ) {
+      throw new Error('Chunk upload part completion is invalid.');
+    }
+    const result = await this.database
+      .prepare(
+        `UPDATE chunk_upload_parts SET body_key = ?, received_at = ?, write_token = NULL, write_expires_at = NULL
+         WHERE upload_id = ? AND part_id = ? AND body_key IS NULL AND write_token = ?
+           AND EXISTS (SELECT 1 FROM chunk_uploads u JOIN capabilities c ON c.id = u.capability_id WHERE u.id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND c.scope = 'write' AND c.expires_at > ? AND c.revoked_at IS NULL)`,
+      )
+      .bind(
+        input.bodyKey,
+        input.now,
+        input.id,
+        input.partId,
+        input.writeToken,
+        input.id,
+        input.capabilityId,
+        input.now,
+        input.now,
+      )
+      .run<D1RunResultLike>();
+    if ((result.meta?.changes ?? 0) !== 1) {
+      throw new Error('Chunk upload part write is unavailable.');
+    }
+    return this.requireChunkUpload(input.id);
+  }
+
+  async abortChunkUploadPart(
+    input: Parameters<V2Repository['abortChunkUploadPart']>[0],
+  ): Promise<boolean> {
+    if (!/^[a-f0-9]{32}$/.test(input.writeToken)) {
+      throw new Error('Chunk upload part write token is invalid.');
+    }
+    const result = await this.database
+      .prepare(
+        'UPDATE chunk_upload_parts SET write_token = NULL, write_expires_at = NULL, operation_id = NULL, operation_digest = NULL WHERE upload_id = ? AND part_id = ? AND body_key IS NULL AND write_token = ?',
+      )
+      .bind(input.id, input.partId, input.writeToken)
+      .run<D1RunResultLike>();
+    if ((result.meta?.changes ?? 0) === 1) {
+      return true;
+    }
+    const part = await this.database
+      .prepare(
+        'SELECT 1 FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
+      )
+      .bind(input.id, input.partId)
+      .first<Row>();
+    return part === null;
+  }
+
+  async renewChunkUpload(
+    input: Parameters<V2Repository['renewChunkUpload']>[0],
+  ): Promise<{ upload: V2ChunkUpload; idempotent: boolean }> {
+    this.validateChunkOperation(input.operationId, input.operationDigest);
+    const authorization = this.chunkAuthorizationStatements(
+      input.capabilityId,
+      input.authorization,
+      input.now,
+    );
+    const statements = [
+      ...authorization.statements,
+      this.database
+        .prepare(
+          `UPDATE chunk_uploads SET expires_at = ?, renewal_operation_id = ?, renewal_operation_digest = ?
+           WHERE id = ? AND capability_id = ? AND committed_at IS NULL AND expires_at > ?
+             AND EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?)
+             AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND scope = 'write' AND expires_at >= ? AND revoked_at IS NULL)
+             AND expires_at < ?`,
+        )
+        .bind(
+          input.expiresAt,
+          input.operationId,
+          input.operationDigest,
+          input.id,
+          input.capabilityId,
+          input.now,
+          authorization.gate,
+          input.capabilityId,
+          input.expiresAt,
+          input.expiresAt,
+        ),
+      this.database
+        .prepare(
+          "INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-chunk-renew-assertion', NULL WHERE NOT EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?) OR NOT EXISTS (SELECT 1 FROM chunk_uploads WHERE id = ? AND renewal_operation_id = ? AND renewal_operation_digest = ?)",
+        )
+        .bind(
+          authorization.gate,
+          input.id,
+          input.operationId,
+          input.operationDigest,
+        ),
+      this.database
+        .prepare('DELETE FROM maintenance_leases WHERE name = ?')
+        .bind(authorization.gate),
+    ];
+    let mutationChanges = 0;
+    try {
+      const results = await this.database.batch<D1RunResultLike>(statements);
+      mutationChanges =
+        results[authorization.statements.length]?.meta?.changes ?? 0;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /maintenance_leases\.expires_at/i.test(error.message)
+      ) {
+        if (await this.hasLiveNonce(input.authorization.claims, input.now)) {
+          throw new Error('Chunk upload authorization is unavailable.');
+        }
+        throw new Error('Chunk upload lease cannot be renewed.');
+      }
+      throw error;
+    }
+    return {
+      upload: await this.requireChunkUpload(input.id),
+      idempotent: mutationChanges !== 1,
+    };
+  }
+
+  async abandonChunkUpload(
+    input: Parameters<V2Repository['abandonChunkUpload']>[0],
+  ): Promise<void> {
+    const authorization = this.chunkAuthorizationStatements(
+      input.capabilityId,
+      input.authorization,
+      input.now,
+    );
+    try {
+      await this.database.batch([
+        ...authorization.statements,
+        this.database
+          .prepare(
+            `UPDATE chunk_uploads SET expires_at = ? WHERE id = ? AND capability_id = ? AND committed_at IS NULL AND expires_at > ?
+             AND EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?)
+             AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND scope = 'write' AND expires_at > ? AND revoked_at IS NULL)`,
+          )
+          .bind(
+            input.now,
+            input.id,
+            input.capabilityId,
+            input.now,
+            authorization.gate,
+            input.capabilityId,
+            input.now,
+          ),
+        this.database
+          .prepare(
+            "INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-chunk-abandon-assertion', NULL WHERE NOT EXISTS (SELECT 1 FROM maintenance_leases WHERE name = ?) OR NOT EXISTS (SELECT 1 FROM chunk_uploads WHERE id = ? AND capability_id = ? AND expires_at = ?)",
+          )
+          .bind(authorization.gate, input.id, input.capabilityId, input.now),
+        this.database
+          .prepare('DELETE FROM maintenance_leases WHERE name = ?')
+          .bind(authorization.gate),
+      ]);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /maintenance_leases\.expires_at/i.test(error.message)
+      ) {
+        throw new Error('Chunk upload is unavailable.');
+      }
+      throw error;
+    }
+  }
+
   async reserveDelivery(input: {
     capabilityId: string;
     operationId: Uint8Array;
     operationDigest: Uint8Array;
     payloadLength: number;
+    chunkUploadId?: string;
     maximumTotalBytes?: number;
     maximumPendingDeliveries?: number;
     maximumObjectsPerCapability?: number;
@@ -507,8 +1009,26 @@ export class D1V2Repository
     expiresAt: number;
   }): Promise<V2DeliveryReservation | { existing: V2RepositoryDelivery }> {
     operationId(input.operationId);
-    const deliveryId = crypto.randomUUID().replaceAll('-', '');
-    const payloadKey = `deliveries/${deliveryId}.bin`;
+    const upload = input.chunkUploadId
+      ? await this.requireChunkUpload(input.chunkUploadId)
+      : undefined;
+    const deliveryId =
+      upload?.deliveryId ?? crypto.randomUUID().replaceAll('-', '');
+    const payloadKey = upload
+      ? v2DeliveryChunkKey(deliveryId, upload.parts[0]!.id)
+      : `deliveries/${deliveryId}.bin`;
+    const chunkGuard = input.chunkUploadId
+      ? ' AND EXISTS (SELECT 1 FROM chunk_uploads u WHERE u.id = ? AND u.delivery_id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND u.total_length = ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts p WHERE p.upload_id = u.id AND p.body_key IS NULL))'
+      : '';
+    const chunkValues = input.chunkUploadId
+      ? [
+          input.chunkUploadId,
+          deliveryId,
+          input.capabilityId,
+          input.now,
+          input.payloadLength,
+        ]
+      : [];
     // Published-but-uncollected deliveries plus in-flight reservations for the
     // capability's own relationship and direction.
     const pendingGuard =
@@ -640,7 +1160,7 @@ export class D1V2Repository
       statements.push(
         this.database
           .prepare(
-            `INSERT OR IGNORE INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = ? AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL) AND NOT EXISTS (SELECT 1 FROM deliveries WHERE operation_id = ?)${pendingGuard}`,
+            `INSERT OR IGNORE INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = ? AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL) AND NOT EXISTS (SELECT 1 FROM deliveries WHERE operation_id = ?)${pendingGuard}${chunkGuard}`,
           )
           .bind(
             deliveryId,
@@ -655,6 +1175,7 @@ export class D1V2Repository
             input.now,
             input.operationId,
             ...pendingValues,
+            ...chunkValues,
           ),
       );
     } else {
@@ -681,7 +1202,7 @@ export class D1V2Repository
       statements.push(
         this.database
           .prepare(
-            'INSERT INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1',
+            `INSERT INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1${chunkGuard}`,
           )
           .bind(
             deliveryId,
@@ -691,6 +1212,7 @@ export class D1V2Repository
             input.expiresAt,
             input.operationId,
             input.operationDigest,
+            ...chunkValues,
           ),
       );
     }
@@ -800,19 +1322,40 @@ export class D1V2Repository
   }
 
   async publishDelivery(
-    input: Omit<V2RepositoryDelivery, 'state' | 'sequence'>,
+    input: Parameters<V2Repository['publishDelivery']>[0],
   ): Promise<{
     delivery: V2RepositoryDelivery;
     idempotent: boolean;
   }> {
     operationId(input.operationId);
-    const results = await this.database.batch<D1RunResultLike>([
+    const upload = input.chunkUploadId
+      ? await this.requireChunkUpload(input.chunkUploadId)
+      : undefined;
+    if (
+      input.chunkUploadId &&
+      (!upload ||
+        upload.deliveryId !== input.id ||
+        !input.parts ||
+        input.parts.length !== upload.parts.length ||
+        input.parts.some((part, index) => {
+          const declared = upload.parts[index]!;
+          return (
+            part.id !== declared.id ||
+            part.length !== declared.length ||
+            !bytesEqual(part.digest, declared.digest) ||
+            part.key !== v2DeliveryChunkKey(input.id, part.id)
+          );
+        }))
+    ) {
+      throw new Error('Chunk delivery publication is invalid.');
+    }
+    const statements = [
       this.database
         .prepare(
           // `sequence` is assigned by the same statement that commits the row,
           // so the inbox can return deliveries in publication order instead of
           // whole-second creation order.
-          "INSERT INTO deliveries(id, relationship_id, direction, slot, epoch, encrypted_descriptor, requested_policy, effective_policy, policy_digest, payload_key, payload_length, payload_digest, operation_id, operation_digest, state, sequence, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, payload_key, ?, ?, operation_id, operation_digest, 'published', COALESCE((SELECT MAX(sequence) + 1 FROM deliveries WHERE relationship_id = ? AND direction = ?), 1), ?, ? FROM reservations WHERE delivery_id = ? AND payload_key = ? AND operation_id = ? AND operation_digest = ?",
+          "INSERT INTO deliveries(id, relationship_id, direction, slot, epoch, authorization_chain, encrypted_descriptor, requested_policy, effective_policy, policy_digest, payload_key, payload_length, payload_digest, operation_id, operation_digest, state, sequence, created_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, payload_key, ?, ?, operation_id, operation_digest, 'published', COALESCE((SELECT MAX(sequence) + 1 FROM deliveries WHERE relationship_id = ? AND direction = ?), 1), ?, ? FROM reservations WHERE delivery_id = ? AND payload_key = ? AND operation_id = ? AND operation_digest = ?",
         )
         .bind(
           input.id,
@@ -820,6 +1363,7 @@ export class D1V2Repository
           directionNumber(input.direction),
           input.slot,
           input.epoch,
+          input.chain ?? null,
           input.encryptedDescriptor,
           input.requestedPolicy,
           input.effectivePolicy,
@@ -847,6 +1391,43 @@ export class D1V2Repository
           input.operationId,
           input.operationDigest,
         ),
+      ...(input.parts ?? []).map((part, ordinal) =>
+        this.database
+          .prepare(
+            'INSERT OR IGNORE INTO delivery_chunks(delivery_id, part_id, ordinal, length, digest, body_key) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM deliveries WHERE id = ? AND operation_id = ? AND operation_digest = ?)',
+          )
+          .bind(
+            input.id,
+            part.id,
+            ordinal,
+            part.length,
+            part.digest,
+            part.key,
+            input.id,
+            input.operationId,
+            input.operationDigest,
+          ),
+      ),
+      ...(input.chunkUploadId
+        ? [
+            this.database
+              .prepare(
+                'UPDATE chunk_uploads SET committed_at = ?, expires_at = ? WHERE id = ? AND delivery_id = ? AND committed_at IS NULL AND EXISTS (SELECT 1 FROM deliveries WHERE id = ?)',
+              )
+              .bind(
+                input.createdAt,
+                input.expiresAt,
+                input.chunkUploadId,
+                input.id,
+                input.id,
+              ),
+            this.database
+              .prepare(
+                'UPDATE chunk_upload_parts SET body_key = NULL WHERE upload_id = ? AND EXISTS (SELECT 1 FROM deliveries WHERE id = ?)',
+              )
+              .bind(input.chunkUploadId, input.id),
+          ]
+        : []),
       this.database
         .prepare(
           'DELETE FROM reservations WHERE delivery_id = ? AND payload_key = ? AND EXISTS (SELECT 1 FROM deliveries WHERE id = ? AND operation_id = ? AND operation_digest = ?)',
@@ -858,7 +1439,8 @@ export class D1V2Repository
           input.operationId,
           input.operationDigest,
         ),
-    ]);
+    ];
+    const results = await this.database.batch<D1RunResultLike>(statements);
     const delivery = await this.findDelivery(input.id);
     if (!delivery) {
       throw new Error('Delivery reservation is unavailable.');
@@ -1470,10 +2052,13 @@ export class D1V2Repository
       expiredReservations,
       expiredControls,
       expiredStaging,
+      expiredDeliveryParts,
+      expiredChunkParts,
+      expiredChunkUploads,
       expiredInvitations,
     ] = await Promise.all([
       this.selectRows(
-        'SELECT id, payload_key FROM deliveries WHERE expires_at <= ? ORDER BY expires_at, id LIMIT ?',
+        'SELECT id, payload_key, EXISTS (SELECT 1 FROM chunk_uploads u WHERE u.delivery_id = deliveries.id) AS chunked FROM deliveries WHERE expires_at <= ? AND NOT EXISTS (SELECT 1 FROM delivery_chunks p WHERE p.delivery_id = deliveries.id) ORDER BY expires_at, id LIMIT ?',
         now,
         limit,
       ),
@@ -1489,6 +2074,21 @@ export class D1V2Repository
       ),
       this.selectRows(
         'SELECT id, body_key FROM staged_bodies WHERE expires_at <= ? ORDER BY expires_at, id LIMIT ?',
+        now,
+        limit,
+      ),
+      this.selectRows(
+        'SELECT p.delivery_id, p.part_id, p.body_key FROM delivery_chunks p JOIN deliveries d ON d.id = p.delivery_id WHERE d.expires_at <= ? ORDER BY d.expires_at, p.delivery_id, p.ordinal LIMIT ?',
+        now,
+        limit,
+      ),
+      this.selectRows(
+        'SELECT p.upload_id, p.part_id, p.body_key, u.committed_at FROM chunk_upload_parts p JOIN chunk_uploads u ON u.id = p.upload_id WHERE u.expires_at <= ? ORDER BY u.expires_at, p.upload_id, p.ordinal LIMIT ?',
+        now,
+        limit,
+      ),
+      this.selectRows(
+        'SELECT id FROM chunk_uploads WHERE expires_at <= ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts p WHERE p.upload_id = chunk_uploads.id) ORDER BY expires_at, id LIMIT ?',
         now,
         limit,
       ),
@@ -1533,6 +2133,25 @@ export class D1V2Repository
           .prepare('DELETE FROM staged_bodies WHERE id = ?')
           .bind(row.id),
       ),
+      ...expiredDeliveryParts.map((row) =>
+        this.database
+          .prepare(
+            'DELETE FROM delivery_chunks WHERE delivery_id = ? AND part_id = ?',
+          )
+          .bind(row.delivery_id, row.part_id),
+      ),
+      ...expiredChunkParts.map((row) =>
+        this.database
+          .prepare(
+            'DELETE FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
+          )
+          .bind(row.upload_id, row.part_id),
+      ),
+      ...expiredChunkUploads.map((row) =>
+        this.database
+          .prepare('DELETE FROM chunk_uploads WHERE id = ?')
+          .bind(row.id),
+      ),
       ...expiredInvitations.map((row) =>
         this.database
           .prepare('DELETE FROM invitations WHERE id = ?')
@@ -1572,11 +2191,23 @@ export class D1V2Repository
     const deletedRateWindows = changes(1) + changes(3) + changes(4);
     return {
       expiredDeliveryIds: expiredDeliveries.map((row) => String(row.id)),
-      expiredBodyKeys: [
-        ...expiredDeliveries.map((row) => String(row.payload_key)),
-        ...expiredReservations.map((row) => String(row.payload_key)),
-        ...expiredStaging.map((row) => String(row.body_key)),
-      ],
+      expiredBodyKeys: Array.from(
+        new Set([
+          ...expiredDeliveries.flatMap((row) =>
+            Number(row.chunked) === 1 ? [] : [String(row.payload_key)],
+          ),
+          ...expiredReservations.map((row) => String(row.payload_key)),
+          ...expiredStaging.map((row) => String(row.body_key)),
+          ...expiredDeliveryParts.map((row) => String(row.body_key)),
+          ...expiredChunkParts.flatMap((row) =>
+            row.body_key === null || row.body_key === undefined
+              ? row.committed_at === null || row.committed_at === undefined
+                ? [v2StagedChunkKey(String(row.upload_id), String(row.part_id))]
+                : []
+              : [String(row.body_key)],
+          ),
+        ]),
+      ),
       deletedNonces,
       deletedControlEvents: expiredControls.length,
       deletedRateWindows,
@@ -1586,6 +2217,9 @@ export class D1V2Repository
         expiredReservations.length < limit &&
         expiredControls.length < limit &&
         expiredStaging.length < limit &&
+        expiredDeliveryParts.length < limit &&
+        expiredChunkParts.length < limit &&
+        expiredChunkUploads.length < limit &&
         expiredInvitations.length < limit &&
         changes(0) < limit &&
         changes(1) < limit &&
@@ -1611,7 +2245,17 @@ export class D1V2Repository
     const rows = await this.selectRows(
       `SELECT payload_key AS key FROM deliveries WHERE payload_key IN (${placeholders})
        UNION SELECT payload_key AS key FROM reservations WHERE payload_key IN (${placeholders})
-       UNION SELECT body_key AS key FROM staged_bodies WHERE body_key IN (${placeholders})`,
+       UNION SELECT body_key AS key FROM staged_bodies WHERE body_key IN (${placeholders})
+       UNION SELECT body_key AS key FROM chunk_upload_parts WHERE body_key IN (${placeholders})
+       UNION SELECT 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' AS key
+         FROM chunk_upload_parts AS part
+         JOIN chunk_uploads AS upload ON upload.id = part.upload_id
+         WHERE part.body_key IS NULL AND upload.committed_at IS NULL
+           AND 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' IN (${placeholders})
+       UNION SELECT body_key AS key FROM delivery_chunks WHERE body_key IN (${placeholders})`,
+      ...keys,
+      ...keys,
+      ...keys,
       ...keys,
       ...keys,
       ...keys,
@@ -1637,7 +2281,17 @@ export class D1V2Repository
          SELECT payload_key AS key FROM deliveries WHERE payload_key > ?
          UNION SELECT payload_key AS key FROM reservations WHERE payload_key > ?
          UNION SELECT body_key AS key FROM staged_bodies WHERE body_key > ?
+         UNION SELECT body_key AS key FROM chunk_upload_parts WHERE body_key > ?
+         UNION SELECT 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' AS key
+           FROM chunk_upload_parts AS part
+           JOIN chunk_uploads AS upload ON upload.id = part.upload_id
+           WHERE part.body_key IS NULL AND part.write_token IS NOT NULL AND upload.committed_at IS NULL
+             AND 'staging/uploads/' || part.upload_id || '/' || part.part_id || '.age' > ?
+         UNION SELECT body_key AS key FROM delivery_chunks WHERE body_key > ?
        ) ORDER BY key LIMIT ?`,
+      cursor,
+      cursor,
+      cursor,
       cursor,
       cursor,
       cursor,
@@ -1842,7 +2496,7 @@ export class D1V2Repository
       .prepare('SELECT * FROM deliveries WHERE operation_id = ?')
       .bind(id)
       .first<Row>();
-    return row ? deliveryFromRow(row) : null;
+    return row ? this.deliveryWithParts(row) : null;
   }
 
   private async findControlEventByOperation(
@@ -1871,7 +2525,7 @@ export class D1V2Repository
       )
       .bind(relationshipId, directionNumber(direction), now, ...values)
       .first<Row>();
-    return row ? deliveryFromRow(row) : null;
+    return row ? this.deliveryWithParts(row) : null;
   }
 
   private async queryControlEvents(
@@ -1966,6 +2620,146 @@ export class D1V2Repository
     return row !== null && row !== undefined;
   }
 
+  private validateChunkOperation(
+    operationIdValue: Uint8Array,
+    operationDigest: Uint8Array,
+  ): void {
+    if (
+      operationIdValue.byteLength !== 16 ||
+      operationDigest.byteLength !== 32
+    ) {
+      throw new Error('Chunk upload operation is invalid.');
+    }
+  }
+
+  private chunkAuthorizationStatements(
+    capabilityId: string,
+    authorization: V2RepositoryAuthorization,
+    now: number,
+  ): {
+    gate: string;
+    statements: ReturnType<D1DatabaseLike['prepare']>[];
+  } {
+    if (
+      authorization.claims.length !== 1 ||
+      authorization.claims[0]!.capabilityId !== capabilityId ||
+      !Number.isSafeInteger(authorization.maximumRequestsPerMinute) ||
+      authorization.maximumRequestsPerMinute < 1
+    ) {
+      throw new Error('Chunk upload authorization is invalid.');
+    }
+    const claim = authorization.claims[0]!;
+    const minute = Math.floor(now / 60);
+    const gate = `v2-chunk-gate-${crypto.randomUUID()}`;
+    return {
+      gate,
+      statements: [
+        this.database
+          .prepare(
+            "INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-chunk-nonce-assertion', NULL WHERE EXISTS (SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?)",
+          )
+          .bind(claim.capabilityId, claim.nonce, now),
+        this.database
+          .prepare(
+            `INSERT INTO nonces(capability_id, nonce, expires_at)
+             SELECT ?, ?, ?
+             WHERE EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND scope = 'write' AND expires_at > ? AND revoked_at IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?)
+               AND COALESCE((SELECT count FROM rate_windows WHERE capability_id = ? AND minute = ?), 0) < ?
+             ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?`,
+          )
+          .bind(
+            claim.capabilityId,
+            claim.nonce,
+            claim.expiresAt,
+            claim.capabilityId,
+            now,
+            claim.capabilityId,
+            claim.nonce,
+            now,
+            claim.capabilityId,
+            minute,
+            authorization.maximumRequestsPerMinute,
+            now,
+          ),
+        this.database
+          .prepare(
+            'INSERT INTO rate_windows(capability_id, minute, count) SELECT ?, ?, 1 WHERE changes() = 1 ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + 1 WHERE count < ?',
+          )
+          .bind(
+            claim.capabilityId,
+            minute,
+            authorization.maximumRequestsPerMinute,
+          ),
+        this.database
+          .prepare(
+            'INSERT INTO maintenance_leases(name, expires_at) SELECT ?, ? WHERE changes() = 1',
+          )
+          .bind(gate, now),
+      ],
+    };
+  }
+
+  private async findChunkUploadByOperation(
+    operationIdValue: Uint8Array,
+  ): Promise<V2ChunkUpload | null> {
+    const row = await this.database
+      .prepare('SELECT id FROM chunk_uploads WHERE operation_id = ?')
+      .bind(operationIdValue)
+      .first<Row>();
+    return row ? this.requireChunkUpload(String(row.id)) : null;
+  }
+
+  private async requireChunkUpload(id: string): Promise<V2ChunkUpload> {
+    const row = await this.database
+      .prepare(
+        'SELECT id, delivery_id, capability_id, chain, slot, epoch, total_length, created_at, expires_at, operation_id, operation_digest, committed_at FROM chunk_uploads WHERE id = ?',
+      )
+      .bind(id)
+      .first<Row>();
+    if (!row) {
+      throw new Error('Chunk upload is unavailable.');
+    }
+    const parts = await this.selectRows(
+      'SELECT part_id, ordinal, length, digest, body_key, received_at, operation_id, operation_digest FROM chunk_upload_parts WHERE upload_id = ? ORDER BY ordinal',
+      id,
+    );
+    return {
+      id: String(row.id),
+      deliveryId: String(row.delivery_id),
+      capabilityId: String(row.capability_id),
+      chain: Number(row.chain),
+      slot: d1Bytes(row.slot),
+      epoch: Number(row.epoch),
+      totalLength: Number(row.total_length),
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+      operationId: d1Bytes(row.operation_id),
+      operationDigest: d1Bytes(row.operation_digest),
+      ...(optionalNumber(row.committed_at) === undefined
+        ? {}
+        : { committedAt: optionalNumber(row.committed_at) }),
+      parts: parts.map((part) => ({
+        id: String(part.part_id),
+        ordinal: Number(part.ordinal),
+        length: Number(part.length),
+        digest: d1Bytes(part.digest),
+        ...(part.body_key === null || part.body_key === undefined
+          ? {}
+          : { bodyKey: String(part.body_key) }),
+        ...(optionalNumber(part.received_at) === undefined
+          ? {}
+          : { receivedAt: optionalNumber(part.received_at) }),
+        ...(part.operation_id === null || part.operation_id === undefined
+          ? {}
+          : {
+              operationId: d1Bytes(part.operation_id),
+              operationDigest: d1Bytes(part.operation_digest),
+            }),
+      })),
+    };
+  }
+
   private requireMatchingOperation(
     actual: Uint8Array,
     expected: Uint8Array,
@@ -2044,6 +2838,10 @@ function deliveryFromRow(row: Row): V2RepositoryDelivery {
     direction: directionFromRow(row.direction),
     slot: d1Bytes(row.slot),
     epoch: Number(row.epoch),
+    ...(row.authorization_chain === null ||
+    row.authorization_chain === undefined
+      ? {}
+      : { chain: Number(row.authorization_chain) }),
     encryptedDescriptor: d1Bytes(row.encrypted_descriptor),
     requestedPolicy: d1Bytes(row.requested_policy),
     effectivePolicy: d1Bytes(row.effective_policy),

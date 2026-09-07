@@ -117,7 +117,16 @@ async function createSQLiteRepository(t) {
     repository.close();
     await rm(directory, { recursive: true, force: true });
   });
-  return { repository };
+  return {
+    repository,
+    createIndependentRepository: () => {
+      const independent = new SQLiteV2Repository(directory);
+      return {
+        repository: independent,
+        close: () => independent.close(),
+      };
+    },
+  };
 }
 
 const factories = [
@@ -185,6 +194,378 @@ const WRITE_TUPLE = {
 };
 
 for (const [name, factory] of factories) {
+  test(`${name} persists chunk upload leases, parts, and bounded reclaim`, async (t) => {
+    const { repository, createIndependentRepository } = await factory(t);
+    await repository.initialize();
+    await repository.registerCapability(
+      {
+        id: 'chunk-writer',
+        relationshipId: 'chunk-relationship',
+        direction: 'inviter->invitee',
+        scope: 'write',
+        encryptedTokenSecret: 'opaque',
+        createdAt: 1,
+        expiresAt: 10_000,
+      },
+      bytes(16, 240),
+      20_000,
+    );
+    let nonceSeed = 1;
+    const authorization = () => ({
+      claims: [
+        {
+          capabilityId: 'chunk-writer',
+          nonce: bytes(16, nonceSeed++),
+          expiresAt: 1_000,
+        },
+      ],
+      maximumRequestsPerMinute: 60,
+    });
+    const parts = [
+      { id: 'a'.repeat(32), length: 3, digest: bytes(32, 1) },
+      { id: 'b'.repeat(32), length: 4, digest: bytes(32, 2) },
+    ];
+    const create = {
+      capabilityId: 'chunk-writer',
+      chain: 4,
+      slot: bytes(16, 230),
+      epoch: 20_000,
+      operationId: bytes(16, 10),
+      operationDigest: bytes(32, 10),
+      parts,
+      totalLength: 7,
+      now: 10,
+      expiresAt: 100,
+      maximumConcurrentUploads: 1,
+      maximumStagedBytes: 100,
+    };
+    const created = await repository.createChunkUpload({
+      ...create,
+      authorization: authorization(),
+    });
+    assert.equal(created.idempotent, false);
+    assert.equal(created.upload.parts.length, 2);
+    assert.equal(created.upload.chain, 4);
+    assert.deepEqual(created.upload.slot, bytes(16, 230));
+    assert.equal(
+      (
+        await repository.createChunkUpload({
+          ...create,
+          now: 11,
+          authorization: authorization(),
+        })
+      ).idempotent,
+      true,
+    );
+    await assert.rejects(
+      repository.createChunkUpload({
+        ...create,
+        operationId: bytes(16, 11),
+        operationDigest: bytes(32, 11),
+        now: 11,
+        authorization: authorization(),
+      }),
+      /quota|exhausted/,
+    );
+    const statusAuthorization = authorization();
+    assert.equal(
+      (
+        await repository.authorizeChunkUpload({
+          id: created.upload.id,
+          capabilityId: 'chunk-writer',
+          authorization: statusAuthorization,
+          now: 11,
+        })
+      ).id,
+      created.upload.id,
+    );
+    await assert.rejects(
+      repository.authorizeChunkUpload({
+        id: created.upload.id,
+        capabilityId: 'chunk-writer',
+        authorization: statusAuthorization,
+        now: 11,
+      }),
+      /authorization|unavailable/,
+    );
+    const part = created.upload.parts[0];
+    const bodyKey = `staging/uploads/${created.upload.id}/${part.id}.age`;
+    assert.deepEqual(await repository.filterKnownBodyKeys([bodyKey]), [
+      bodyKey,
+    ]);
+    const prepared = await repository.prepareChunkUploadPart({
+      id: created.upload.id,
+      capabilityId: 'chunk-writer',
+      partId: part.id,
+      writeToken: '1'.repeat(32),
+      writeExpiresAt: 42,
+      operationId: bytes(16, 12),
+      operationDigest: bytes(32, 12),
+      authorization: authorization(),
+      now: 12,
+    });
+    assert.equal(prepared.idempotent, false);
+    assert.ok(
+      (await repository.listBodyKeys({ limit: 1_000 })).keys.includes(bodyKey),
+    );
+    const blockedAuthorization = authorization();
+    await assert.rejects(
+      repository.prepareChunkUploadPart({
+        id: created.upload.id,
+        capabilityId: 'chunk-writer',
+        partId: part.id,
+        writeToken: '2'.repeat(32),
+        writeExpiresAt: 43,
+        operationId: bytes(16, 12),
+        operationDigest: bytes(32, 12),
+        authorization: blockedAuthorization,
+        now: 13,
+      }),
+      /write|unavailable/,
+    );
+    const recorded = await repository.completeChunkUploadPart({
+      id: created.upload.id,
+      capabilityId: 'chunk-writer',
+      partId: part.id,
+      writeToken: '1'.repeat(32),
+      bodyKey,
+      now: 12,
+    });
+    assert.equal(recorded.parts[0].bodyKey, bodyKey);
+    if (createIndependentRepository) {
+      const independent = createIndependentRepository();
+      await independent.repository.initialize();
+      assert.equal(
+        (
+          await independent.repository.findChunkUpload({
+            id: created.upload.id,
+            capabilityId: 'chunk-writer',
+            now: 13,
+          })
+        ).parts[0].bodyKey,
+        bodyKey,
+      );
+      independent.close();
+    }
+    assert.equal(
+      (
+        await repository.prepareChunkUploadPart({
+          id: created.upload.id,
+          capabilityId: 'chunk-writer',
+          partId: part.id,
+          writeToken: '2'.repeat(32),
+          writeExpiresAt: 43,
+          operationId: bytes(16, 12),
+          operationDigest: bytes(32, 12),
+          authorization: blockedAuthorization,
+          now: 13,
+        })
+      ).idempotent,
+      true,
+    );
+    const pendingPart = created.upload.parts[1];
+    assert.equal(
+      (
+        await repository.prepareChunkUploadPart({
+          id: created.upload.id,
+          capabilityId: 'chunk-writer',
+          partId: pendingPart.id,
+          writeToken: '3'.repeat(32),
+          writeExpiresAt: 14,
+          operationId: bytes(16, 15),
+          operationDigest: bytes(32, 15),
+          authorization: authorization(),
+          now: 13,
+        })
+      ).idempotent,
+      false,
+    );
+    assert.equal(
+      (
+        await repository.prepareChunkUploadPart({
+          id: created.upload.id,
+          capabilityId: 'chunk-writer',
+          partId: pendingPart.id,
+          writeToken: '4'.repeat(32),
+          writeExpiresAt: 45,
+          operationId: bytes(16, 15),
+          operationDigest: bytes(32, 15),
+          authorization: authorization(),
+          now: 15,
+        })
+      ).idempotent,
+      false,
+    );
+    await assert.rejects(
+      repository.completeChunkUploadPart({
+        id: created.upload.id,
+        capabilityId: 'chunk-writer',
+        partId: pendingPart.id,
+        writeToken: '3'.repeat(32),
+        bodyKey: `staging/uploads/${created.upload.id}/${pendingPart.id}.age`,
+        now: 15,
+      }),
+      /write|unavailable/,
+    );
+    assert.equal(
+      await repository.abortChunkUploadPart({
+        id: created.upload.id,
+        partId: pendingPart.id,
+        writeToken: '3'.repeat(32),
+      }),
+      false,
+    );
+    assert.equal(
+      await repository.abortChunkUploadPart({
+        id: created.upload.id,
+        partId: pendingPart.id,
+        writeToken: '4'.repeat(32),
+      }),
+      true,
+    );
+    const renewed = await repository.renewChunkUpload({
+      id: created.upload.id,
+      capabilityId: 'chunk-writer',
+      operationId: bytes(16, 13),
+      operationDigest: bytes(32, 13),
+      authorization: authorization(),
+      now: 16,
+      expiresAt: 200,
+    });
+    assert.equal(renewed.idempotent, false);
+    assert.equal(renewed.upload.expiresAt, 200);
+    assert.equal(
+      (
+        await repository.renewChunkUpload({
+          id: created.upload.id,
+          capabilityId: 'chunk-writer',
+          operationId: bytes(16, 13),
+          operationDigest: bytes(32, 13),
+          authorization: authorization(),
+          now: 17,
+          expiresAt: 200,
+        })
+      ).idempotent,
+      true,
+    );
+    await repository.abandonChunkUpload({
+      id: created.upload.id,
+      capabilityId: 'chunk-writer',
+      authorization: authorization(),
+      now: 18,
+    });
+    assert.equal(
+      await repository.findChunkUpload({
+        id: created.upload.id,
+        capabilityId: 'chunk-writer',
+        now: 18,
+      }),
+      null,
+    );
+    const reclaimed = [];
+    let maintenance;
+    do {
+      maintenance = await repository.runMaintenance(18, 1);
+      reclaimed.push(...maintenance.expiredBodyKeys);
+    } while (!maintenance.complete);
+    assert.deepEqual(reclaimed, [
+      bodyKey,
+      `staging/uploads/${created.upload.id}/${pendingPart.id}.age`,
+    ]);
+    await assert.doesNotReject(
+      repository.createChunkUpload({
+        ...create,
+        operationId: bytes(16, 14),
+        operationDigest: bytes(32, 14),
+        now: 19,
+        expiresAt: 100,
+        authorization: authorization(),
+      }),
+    );
+  });
+
+  test(`${name} isolates staged bytes between capabilities`, async (t) => {
+    const { repository } = await factory(t);
+    await repository.initialize();
+    for (const [index, capabilityId] of ['writer-a', 'writer-b'].entries()) {
+      await repository.registerCapability(
+        {
+          id: capabilityId,
+          relationshipId: `relationship-${capabilityId}`,
+          direction: 'inviter->invitee',
+          scope: 'write',
+          encryptedTokenSecret: `opaque-${capabilityId}`,
+          createdAt: 1,
+          expiresAt: 1_000,
+        },
+        bytes(16, 180 + index),
+        20_000,
+      );
+    }
+    const stagingInput = (id, capabilityId) => ({
+      id,
+      capabilityId,
+      expiresAt: 100,
+      now: 10,
+      reservedBytes: 7,
+      maximumConcurrentUploads: 2,
+      maximumStagedBytes: 7,
+    });
+    const parts = [
+      { id: 'c'.repeat(32), length: 3, digest: bytes(32, 190) },
+      { id: 'd'.repeat(32), length: 4, digest: bytes(32, 191) },
+    ];
+    let nonceSeed = 200;
+    let operationSeed = 210;
+    const create = (capabilityId) => {
+      const operation = operationSeed++;
+      return repository.createChunkUpload({
+        capabilityId,
+        chain: 0,
+        slot: bytes(16, 192),
+        epoch: 20_000,
+        operationId: bytes(16, operation),
+        operationDigest: bytes(32, operation),
+        parts,
+        totalLength: 7,
+        authorization: {
+          claims: [
+            {
+              capabilityId,
+              nonce: bytes(16, nonceSeed++),
+              expiresAt: 100,
+            },
+          ],
+          maximumRequestsPerMinute: 60,
+        },
+        now: 10,
+        expiresAt: 100,
+        maximumConcurrentUploads: 2,
+        maximumStagedBytes: 7,
+      });
+    };
+    await repository.reserveStagedBody(
+      stagingInput('1'.repeat(32), 'writer-a'),
+    );
+    await repository.reserveStagedBody(
+      stagingInput('2'.repeat(32), 'writer-b'),
+    );
+    await assert.rejects(
+      repository.reserveStagedBody(stagingInput('3'.repeat(32), 'writer-a')),
+      /quota|exhausted/,
+    );
+    await assert.rejects(create('writer-a'), /quota|exhausted/);
+    await repository.releaseStagedBody('1'.repeat(32));
+    await repository.releaseStagedBody('2'.repeat(32));
+    await create('writer-a');
+    await create('writer-b');
+    await assert.rejects(create('writer-a'), /quota|exhausted/);
+    await assert.rejects(
+      repository.reserveStagedBody(stagingInput('4'.repeat(32), 'writer-a')),
+      /quota|exhausted/,
+    );
+  });
+
   test(`${name} granular repository conforms for operation retries and inbox state`, async (t) => {
     const { repository } = await factory(t);
     await repository.initialize();
@@ -950,6 +1331,7 @@ test('D1/R2 maintenance removes an authenticated staging crash body by metadata 
   const { repository } = await createLocalD1Repository(t);
   const key = await repository.reserveStagedBody({
     id: 'e'.repeat(32),
+    capabilityId: 'staged-writer',
     expiresAt: 10,
     now: 0,
     reservedBytes: 3,
@@ -982,6 +1364,7 @@ test('D1/R2 maintenance tolerates a post-finalization staging record with no bod
   const { repository } = await createLocalD1Repository(t);
   const key = await repository.reserveStagedBody({
     id: 'f'.repeat(32),
+    capabilityId: 'staged-writer',
     expiresAt: 10,
     now: 0,
     reservedBytes: 0,

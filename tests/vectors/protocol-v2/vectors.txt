@@ -89,7 +89,19 @@ key 26 (incremental_base) present -> REJECT; digest e710b82270b1d81c6e967f50d9ee
 A 2.0.0 receiver rejects on presence of any of keys 24, 25, 26.
 key_epoch=1 -> REJECT (key_epoch 1 is unsupported in 2.0)
 
-### Vector 10 — extension criticality (deterministic)
+### Vector 10 — chunked descriptor (deterministic)
+chunk_size          = 1048576
+chunk_ids           = c0c1c2c3c4c5c6c7c8c9cacbcccdcecf, d0d1d2d3d4d5d6d7d8d9dadbdcdddedf
+chunk_hashes        = 808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f, a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf
+plaintext_size      = 1048577
+descriptor_cbor_len = 351 bytes
+descriptor_cbor     = b8180102020103010450101112131415161718191a1b1c1d1e1f05020650202122232425262728292a2b2c2d2e2f0700080009000a070b5820303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f0c50404142434445464748494a4b4c4d4e4f0d480e311dc453ca62670e50606162636465666768696a6b6c6d6e6f0f7768747470733a2f2f6475642e6578616d706c652e636f6d101a6b49ce1811a4011a6b49d20002010319012c0401125820707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f13825820808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f5820a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf146a7265706f72742e7064661500161a0010000118181a0010000018198250c0c1c2c3c4c5c6c7c8c9cacbcccdcecf50d0d1d2d3d4d5d6d7d8d9dadbdcdddedf
+descriptor_digest   = 7efc32c447534e7fbc3e830c7fd35070dfb1589491693045e204d59c851e7d51
+signature           = ae9df29e2a831446d066c8536b1e315799a73a6ec6289694fe05193aa5ab53950bb6d994b75d48b30b47acbc6b168e8cfa4f4b2eadb638153bfa5b9941f6ca08
+PASS: feature-7 decoder accepts the chunked descriptor
+baseline decoder    -> REJECT (keys 24 and 25 are unsupported)
+
+### Vector 11 — extension criticality (deterministic)
 unknown core                 -> REJECT (unknown core key 27)
 unknown optional extension   -> IGNORE
 unknown critical extension   -> REJECT (unsupported critical extension key 128)

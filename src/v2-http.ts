@@ -121,8 +121,8 @@ export function v2CborResponse(
   });
 }
 
-export function v2EmptyResponse(status = 204): Response {
-  return new Response(null, { status, headers: secureHeaders() });
+export function v2EmptyResponse(status = 204, headers?: HeadersInit): Response {
+  return new Response(null, { status, headers: secureHeaders(headers) });
 }
 
 export function v2ErrorResponse(

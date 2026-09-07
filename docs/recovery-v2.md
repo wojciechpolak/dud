@@ -83,8 +83,9 @@ dud doctor --json
 
 The delivery status reports pending deliveries, pending completions, pending
 control publications, unacknowledged deliveries, whether inbound work is
-waiting, undrained control events, quarantined chains, and the halt reason if
-any.
+waiting, resumable uploads and downloads with their descriptor digests and
+remaining bytes, undrained control events, quarantined chains, and the halt
+reason if any.
 
 - **Undrained control events** usually clear on the next `dud sync`, which
   drains every active peer.
@@ -122,6 +123,45 @@ dud receive PEER --id DESCRIPTOR_DIGEST --out /work/recovered --on-conflict over
 
 If the relationship is unusable, revoke and re-pair (§6) rather than editing
 local state by hand.
+
+### An interrupted large transfer
+
+An interrupted upload remains in the sender's private encrypted spool. Run:
+
+```sh
+dud sync PEER
+```
+
+The client verifies the saved chunks, reuses or recreates the upload lease, and
+sends only the missing parts. The delivery has no server-visible sequence until
+commit, so it cannot block the peer's inbox while it is incomplete.
+
+An interrupted download remains in the receiver's private transfer directory.
+Run the same receive command again:
+
+```sh
+dud receive PEER --out-dir /work/received
+```
+
+The client verifies every saved part before reuse, fetches only missing parts,
+and atomically installs the complete output. The receive watermark stays at the
+preceding sequence until that output commit succeeds.
+
+To discard either checkpoint, read its 64-character descriptor digest from
+`dud peer show PEER` or `dud doctor`, then run:
+
+```sh
+dud peer abandon PEER --id DESCRIPTOR_DIGEST --yes
+```
+
+For an upload, abandonment removes the unpublished server lease when reachable,
+deletes the local spool, and restores the prior send-chain state. Only the
+newest outbound sequence can be abandoned. A lost commit response leaves
+publication ambiguous. Retrying the send resolves the same idempotent commit;
+abandoning it deletes the local spool but retains the signed sequence and digest
+so a different descriptor can never reuse that sequence. For a download,
+abandonment deletes only the local staged chunks. The delivery remains
+published, and the next receive downloads it from the beginning.
 
 ## 5. Capability expiry and reissue
 
@@ -199,7 +239,9 @@ exists so a body staged by an in-flight upload is never mistaken for an orphan;
 do not lower it below the time a large upload takes on your deployment.
 
 Metadata rows whose body is gone are not repairable; the ciphertext is the data.
-The sender still holds the plaintext, so the recovery is to send again.
+The sender must send the source again. A sender-side resumable spool can finish
+an unpublished upload, but it cannot reconstruct a committed delivery body the
+server lost.
 
 Back up the data directory as one unit. On Cloudflare, D1 and R2 have
 independent backup schedules. Reconcile after any restore that did not capture

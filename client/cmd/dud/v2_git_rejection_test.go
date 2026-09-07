@@ -356,7 +356,7 @@ func TestV2PeerFeaturesAreAdvertisedAndParsed(t *testing.T) {
 			t.Fatalf("advertised features = %#v, want %#v", features, v2LocalPeerFeatures)
 		}
 	}
-	if len(features) != 2 || features[0] != 5 || features[1] != 6 {
+	if len(features) != 3 || features[0] != 5 || features[1] != 6 || features[2] != 7 {
 		t.Fatalf("incremental peer features = %#v", features)
 	}
 	if v2MetadataFeatures(map[int]any{1: uint64(1)}) != nil {

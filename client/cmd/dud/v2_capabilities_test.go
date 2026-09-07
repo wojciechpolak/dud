@@ -91,6 +91,64 @@ func TestV2PeerRuntimeUsesStoredCapabilitiesWithoutDiscovery(t *testing.T) {
 	}
 }
 
+func TestV2ChunkedTransferNegotiationTreatsPeerSilenceAsBaseline(t *testing.T) {
+	capabilities := testV2Capabilities(t)
+	capabilities.Features = []uint64{2, 3, 5, 7, 9, 10, 11}
+	capabilities.Limits[10] = 16_782_955
+	capabilities.Limits[11] = 1_024
+	capabilities.Limits[12] = 1_073_741_824
+	capabilities.Limits[13] = 3_600
+	contract, err := newV2ServerContract(capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &v2PeerRuntime{state: &v2PeerDeliveryState{ServerContract: contract}}
+	if runtime.supportsChunkedTransfers() {
+		t.Fatal("server advertisement plus 2.0.0 peer silence enabled chunking")
+	}
+	runtime.state.PeerFeatures = []uint64{5, 6, 7}
+	if !runtime.supportsChunkedTransfers() {
+		t.Fatal("matching server and signed-peer advertisements did not enable chunking")
+	}
+	runtime.state.PeerFeatures = []uint64{7, 6}
+	if runtime.supportsChunkedTransfers() {
+		t.Fatal("malformed signed-peer advertisement enabled chunking")
+	}
+	runtime.state.PeerFeatures = []uint64{5, 6, 7}
+	baseline := testV2Capabilities(t)
+	runtime.state.ServerContract, err = newV2ServerContract(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.supportsChunkedTransfers() {
+		t.Fatal("peer advertisement alone enabled chunking")
+	}
+}
+
+func TestV2CapabilityLimitValuesAddReadableUnits(t *testing.T) {
+	for _, test := range []struct {
+		id    uint64
+		value uint64
+		want  string
+	}{
+		{1, 104_857_600, "104857600 (100 MiB)"},
+		{2, 262_144, "262144 (256 KiB)"},
+		{3, 2_592_000, "2592000 (30 days)"},
+		{4, 64, "64"},
+		{8, 209_715_200, "209715200 (200 MiB)"},
+		{9, 4_096, "4096 (4 KiB)"},
+		{10, 16_782_955, "16782955 (16.01 MiB)"},
+		{11, 1_024, "1024"},
+		{12, 1_073_741_824, "1073741824 (1 GiB)"},
+		{13, 3_600, "3600 (1 hour)"},
+		{99, 1_024, "1024"},
+	} {
+		if got := formatV2LimitValue(test.id, test.value); got != test.want {
+			t.Errorf("limit %d value = %q, want %q", test.id, got, test.want)
+		}
+	}
+}
+
 func TestDecodeV2CapabilitiesRejectsNonDeterministicAndIncompleteResponses(t *testing.T) {
 	nonMinimal := []byte{0xa1, 0x18, 0x01, 0x80}
 	if _, err := decodeV2Capabilities(nonMinimal); err == nil {

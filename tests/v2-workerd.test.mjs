@@ -19,6 +19,10 @@ import test from 'node:test';
 import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 
+import {
+  buildV2DeliveryProof,
+  deriveV2DailyCapabilityLookupId,
+} from '../dist/src/v2-auth.js';
 import { encodeCbor, decodeCbor } from '../dist/src/cbor.js';
 import { V2_INBOX_RESPONSE_KEYS } from '../dist/src/v2-delivery-frame.js';
 import { sha256 } from '../dist/src/sha256.js';
@@ -27,11 +31,14 @@ import { readD1Migrations } from './d1-local.mjs';
 import {
   buildDeliveryRequest,
   buildInboxRequest,
+  hex,
   registerCapability,
   requestedPolicy,
   V2_DATA_SLOT,
   V2_DEPLOYMENT_KEY,
+  V2_EPOCH,
   V2_RELATIONSHIP_CAPABILITIES,
+  V2_TOKENS,
 } from './v2-delivery-fixtures.mjs';
 
 const ORIGIN = 'https://dud.example.com';
@@ -129,19 +136,90 @@ async function startWorker(t) {
 }
 
 /** Registers the capabilities a pairing would have published. */
-async function grantCapabilities(database, expiresAt) {
+async function grantCapabilities(database, expiresAt, epoch = V2_EPOCH) {
   const repository = new D1V2Repository(database);
   for (const capability of V2_RELATIONSHIP_CAPABILITIES) {
-    await registerCapability(repository, {
-      ...capability,
-      relationshipId: RELATIONSHIP,
-      expiresAt,
-    });
+    await registerCapability(
+      repository,
+      {
+        ...capability,
+        relationshipId: RELATIONSHIP,
+        expiresAt,
+      },
+      epoch,
+    );
   }
 }
 
 async function cborBody(response) {
   return decodeCbor(new Uint8Array(await response.arrayBuffer()));
+}
+
+async function chunkAuthorization({
+  method,
+  path,
+  digest,
+  nonce,
+  epoch = V2_EPOCH,
+  tokenSecret = V2_TOKENS.write,
+  scope = 'write',
+}) {
+  const proof = await buildV2DeliveryProof({
+    tokenSecret,
+    capabilityLookupId: await deriveV2DailyCapabilityLookupId(
+      tokenSecret,
+      epoch,
+    ),
+    direction: 'inviter->invitee',
+    scope,
+    chain: 0,
+    slot: V2_DATA_SLOT,
+    slotEpoch: epoch,
+    method,
+    canonicalOrigin: ORIGIN,
+    normalizedPath: path,
+    operationIndex: 0,
+    requestDigest: digest,
+    nonce,
+    expiresAt: Math.floor(Date.now() / 1000) + 60,
+  });
+  return `DUD2 ${base64url(proof)}`;
+}
+
+async function signedChunkRequest({
+  method,
+  path,
+  nonce,
+  epoch,
+  body,
+  tokenSecret,
+  scope,
+  contentType,
+}) {
+  const digest = body === undefined ? new Uint8Array(32) : sha256(body);
+  const headers = {
+    'dud-authorization': await chunkAuthorization({
+      method,
+      path,
+      digest,
+      nonce,
+      epoch,
+      tokenSecret,
+      scope,
+    }),
+  };
+  if (body !== undefined) {
+    headers['content-type'] = contentType;
+    headers['content-length'] = String(body.byteLength);
+  }
+  if (contentType === 'application/octet-stream') {
+    headers['dud-content-sha256'] = hex(digest);
+  }
+  return new Request(`${ORIGIN}${path}`, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body }),
+  });
 }
 
 test('a pairing rendezvous survives the round trip through D1', async (t) => {
@@ -281,4 +359,147 @@ test('a delivery published on workerd comes back out of the inbox', async (t) =>
     PAYLOAD.byteLength,
   );
   assert.deepEqual(frame.subarray(8 + headerLength), PAYLOAD);
+});
+
+test('workerd persists resumable parts in R2 and commits their D1 reservation', async (t) => {
+  const worker = await startWorker(t);
+  const now = Math.floor(Date.now() / 1000);
+  const epoch = Math.floor(now / 86_400);
+  const expiresAt = now + 300;
+  await grantCapabilities(worker.database, expiresAt, epoch);
+  const parts = [
+    { id: fixed(0x31, 16), body: fixed(0x51, 33) },
+    { id: fixed(0x41, 16), body: fixed(0x61, 17) },
+  ];
+  const createBody = encodeCbor(
+    new Map([
+      [1, fixed(0x71, 16)],
+      [2, 0],
+      [3, V2_DATA_SLOT],
+      [4, epoch],
+      [
+        5,
+        parts.map(
+          (part) =>
+            new Map([
+              [1, part.id],
+              [2, part.body.byteLength],
+              [3, sha256(part.body)],
+            ]),
+        ),
+      ],
+      [6, parts.reduce((total, part) => total + part.body.byteLength, 0)],
+    ]),
+  );
+  const createPath = '/v2/deliveries/uploads';
+  const created = await worker.fetch(
+    await signedChunkRequest({
+      method: 'POST',
+      path: createPath,
+      nonce: fixed(0x81, 16),
+      epoch,
+      body: createBody,
+      contentType: CBOR_CONTENT_TYPE,
+    }),
+  );
+  assert.equal(created.status, 201, 'chunk upload was not created');
+  const uploadId = (await cborBody(created)).get(1);
+  const uploadHex = Buffer.from(uploadId).toString('hex');
+
+  const reserved = await worker.database
+    .prepare(
+      'SELECT total_length, committed_at FROM chunk_uploads WHERE id = ?',
+    )
+    .bind(uploadHex)
+    .first();
+  assert.deepEqual(reserved, { total_length: 50, committed_at: null });
+
+  for (const [index, part] of parts.entries()) {
+    const path = `/v2/deliveries/uploads/${uploadHex}/chunks/${hex(part.id)}`;
+    const response = await worker.fetch(
+      await signedChunkRequest({
+        method: 'PUT',
+        path,
+        nonce: fixed(0x91 + index, 16),
+        epoch,
+        body: part.body,
+        contentType: 'application/octet-stream',
+      }),
+    );
+    assert.equal(response.status, 204, `chunk ${index + 1} was not stored`);
+  }
+
+  const retried = await worker.fetch(
+    await signedChunkRequest({
+      method: 'POST',
+      path: createPath,
+      nonce: fixed(0xa1, 16),
+      epoch,
+      body: createBody,
+      contentType: CBOR_CONTENT_TYPE,
+    }),
+  );
+  assert.equal(retried.status, 200, 'chunk create retry was not idempotent');
+  assert.deepEqual((await cborBody(retried)).get(3), []);
+
+  const commitBody = encodeCbor(
+    new Map([
+      [1, fixed(0xb1, 16)],
+      [2, fixed(0xc1, 48)],
+      [3, requestedPolicy(expiresAt)],
+    ]),
+  );
+  const commitPath = `/v2/deliveries/uploads/${uploadHex}/commit`;
+  const committed = await worker.fetch(
+    await signedChunkRequest({
+      method: 'POST',
+      path: commitPath,
+      nonce: fixed(0xd1, 16),
+      epoch,
+      body: commitBody,
+      contentType: CBOR_CONTENT_TYPE,
+    }),
+  );
+  assert.equal(committed.status, 200, 'chunk upload was not committed');
+  const deliveryId = (await cborBody(committed)).get(1);
+
+  const committedRow = await worker.database
+    .prepare('SELECT committed_at, delivery_id FROM chunk_uploads WHERE id = ?')
+    .bind(uploadHex)
+    .first();
+  assert.equal(
+    committedRow.delivery_id,
+    Buffer.from(deliveryId).toString('hex'),
+  );
+  assert.equal(typeof committedRow.committed_at, 'number');
+
+  const inbox = await worker.fetch(
+    await buildInboxRequest({ epoch, proofExpiresAt: expiresAt }),
+  );
+  assert.equal(inbox.status, 200, 'chunked delivery was absent from the inbox');
+  const frame = new Uint8Array(await inbox.arrayBuffer());
+  const headerLength = new DataView(frame.buffer, frame.byteOffset).getUint32(
+    4,
+    false,
+  );
+  const header = decodeCbor(frame.subarray(8, 8 + headerLength));
+  assert.equal(header.get(V2_INBOX_RESPONSE_KEYS.payloadLength), 0);
+  assert.equal(header.get(10).length, 2);
+
+  const chunkPath = `/v2/deliveries/${Buffer.from(deliveryId).toString('hex')}/chunks/${hex(parts[1].id)}`;
+  const downloaded = await worker.fetch(
+    await signedChunkRequest({
+      method: 'GET',
+      path: chunkPath,
+      nonce: fixed(0xe1, 16),
+      epoch,
+      tokenSecret: V2_TOKENS.read,
+      scope: 'read',
+    }),
+  );
+  assert.equal(downloaded.status, 200, 'committed R2 part was not readable');
+  assert.deepEqual(
+    new Uint8Array(await downloaded.arrayBuffer()),
+    parts[1].body,
+  );
 });

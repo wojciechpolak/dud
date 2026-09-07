@@ -324,14 +324,26 @@ _dud_complete_wordlist() {
     upload)
       printf '%%s\n' --file -m --ttl --delete-after-read --passphrase --recipient -r --recipient-file -R --json --no-qr --url --doh-url
       ;;
+    peer-send)
+      printf '%%s\n' --file -m --stdin --name --ttl --delete-after-read --progress --no-progress -v --verbose --json
+      ;;
     download)
       printf '%%s\n' --id --out --stdout --extract --out-dir --identity -i --json --url --doh-url
       ;;
+    peer-receive)
+      printf '%%s\n' --id --out --out-dir --wait --max --on-conflict --no-extract --interactive --progress --no-progress -v --verbose --json
+      ;;
     git-push)
-      printf '%%s\n' --branch --current --ttl --json --delete-after-read --passphrase --recipient -r --recipient-file -R --no-qr --url --doh-url
+      printf '%%s\n' --ttl --json --delete-after-read --passphrase --recipient -r --recipient-file -R --no-qr --url --doh-url
+      ;;
+    peer-git-push)
+      printf '%%s\n' --branch --current --full --incremental --ttl --progress --no-progress -v --verbose --json
       ;;
     git-fetch)
-      printf '%%s\n' --associate --allow-rewrite --json --id --identity -i --remote --url --doh-url
+      printf '%%s\n' --id --identity -i --remote --json --url --doh-url
+      ;;
+    peer-git-fetch)
+      printf '%%s\n' --associate --allow-rewrite --progress --no-progress -v --verbose --json
       ;;
     flush)
       printf '%%s\n' --json --url --doh-url
@@ -368,6 +380,7 @@ _dud_complete_parse() {
   _dud_complete_expect=""
   _dud_complete_value_kind=""
   _dud_complete_keygen_input_seen=0
+  _dud_complete_peer_mode=0
 
   while [ $# -gt 0 ]; do
     if [ -n "$_dud_complete_expect" ]; then
@@ -423,6 +436,9 @@ _dud_complete_parse() {
             _dud_complete_value_kind="plain"
             ;;
         esac
+        if [ "$_dud_complete_command" = "send" ] && [ "${1#-}" = "$1" ]; then
+          _dud_complete_peer_mode=1
+        fi
         ;;
       download|receive)
         case "$1" in
@@ -439,6 +455,9 @@ _dud_complete_parse() {
             _dud_complete_value_kind="plain"
             ;;
         esac
+        if [ "$_dud_complete_command" = "receive" ] && [ "${1#-}" = "$1" ]; then
+          _dud_complete_peer_mode=1
+        fi
         ;;
       git)
         if [ -z "$_dud_complete_subcommand" ]; then
@@ -463,6 +482,9 @@ _dud_complete_parse() {
                 _dud_complete_value_kind="plain"
                 ;;
             esac
+            if [ "${1#-}" = "$1" ]; then
+              _dud_complete_peer_mode=1
+            fi
             ;;
           fetch|receive)
             case "$1" in
@@ -475,6 +497,9 @@ _dud_complete_parse() {
                 _dud_complete_value_kind="plain"
                 ;;
             esac
+            if [ "${1#-}" = "$1" ]; then
+              _dud_complete_peer_mode=1
+            fi
             ;;
         esac
         ;;
@@ -551,16 +576,31 @@ _dud_complete_candidates() {
           ;;
       esac
       ;;
-    upload|send)
-      _dud_peer_aliases
+    upload)
       _dud_complete_wordlist upload
       ;;
-    download|receive)
-      _dud_peer_aliases
+    send)
+      if [ "$_dud_complete_peer_mode" = "1" ]; then
+        _dud_complete_wordlist peer-send
+      else
+        _dud_peer_aliases
+        _dud_complete_wordlist upload
+      fi
+      ;;
+    download)
       _dud_complete_wordlist download
+      ;;
+    receive)
+      if [ "$_dud_complete_peer_mode" = "1" ]; then
+        _dud_complete_wordlist peer-receive
+      else
+        _dud_peer_aliases
+        _dud_complete_wordlist download
+      fi
       ;;
     sync)
       _dud_peer_aliases
+      printf '%%s\n' --progress --no-progress --json
       ;;
     git)
       if [ -z "$_dud_complete_subcommand" ]; then
@@ -569,12 +609,20 @@ _dud_complete_candidates() {
       fi
       case "$_dud_complete_subcommand" in
         push|send)
-          _dud_peer_aliases
-          _dud_complete_wordlist git-push
+          if [ "$_dud_complete_peer_mode" = "1" ]; then
+            _dud_complete_wordlist peer-git-push
+          else
+            _dud_peer_aliases
+            _dud_complete_wordlist git-push
+          fi
           ;;
         fetch|receive)
-          _dud_peer_aliases
-          _dud_complete_wordlist git-fetch
+          if [ "$_dud_complete_peer_mode" = "1" ]; then
+            _dud_complete_wordlist peer-git-fetch
+          else
+            _dud_peer_aliases
+            _dud_complete_wordlist git-fetch
+          fi
           ;;
         status)
           _dud_peer_aliases

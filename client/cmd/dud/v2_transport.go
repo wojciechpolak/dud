@@ -62,11 +62,16 @@ type v2Request struct {
 	// it. MaxResponseBytes does not apply to a streamed response.
 	StreamResponse   bool
 	MaxResponseBytes int64
+	// Observers receive cumulative byte counts from actual body reads. A zero
+	// total means the response did not declare its length.
+	ObserveUpload   func(transferred, total int64)
+	ObserveDownload func(transferred, total int64)
 }
 
 type v2Response struct {
 	StatusCode  int
 	ContentType string
+	Headers     http.Header
 	Body        []byte
 	// Stream is set only when the request asked for a streamed response. The
 	// caller owns it and must close it, which also releases the request.
@@ -376,11 +381,26 @@ func (transport *productionV2Transport) doTarget(
 
 	var guard *v2ProgressGuard
 	body := io.Reader(bytes.NewReader(request.Body))
+	uploadTotal := int64(len(request.Body))
 	if request.BodyStream != nil {
 		guard = newV2ProgressGuard(v2StreamIdleTimeout, cancel)
-		body = &v2ProgressReader{reader: request.BodyStream, guard: guard}
+		uploadTotal = request.ContentLength
+		body = request.BodyStream
 	} else if request.StreamResponse {
 		guard = newV2ProgressGuard(v2StreamIdleTimeout, cancel)
+	}
+	if request.ObserveUpload != nil && (request.Body != nil || request.BodyStream != nil) {
+		request.ObserveUpload(0, uploadTotal)
+		body = &v2ObservedReader{
+			reader: body, total: uploadTotal, observe: request.ObserveUpload,
+			progress: func() {
+				if guard != nil {
+					guard.progressed()
+				}
+			},
+		}
+	} else if request.BodyStream != nil {
+		body = &v2ProgressReader{reader: body, guard: guard}
 	}
 
 	httpRequest, err := http.NewRequestWithContext(ctx, request.Method, origin+request.Path, body)
@@ -395,6 +415,8 @@ func (transport *productionV2Transport) doTarget(
 		if request.ContentLength == 0 {
 			httpRequest.Body = http.NoBody
 		}
+	} else if request.Body != nil {
+		httpRequest.ContentLength = int64(len(request.Body))
 	}
 	for name, values := range request.Headers {
 		for _, value := range values {
@@ -421,13 +443,23 @@ func (transport *productionV2Transport) doTarget(
 	result := &v2Response{
 		StatusCode:  response.StatusCode,
 		ContentType: response.Header.Get("Content-Type"),
+		Headers:     response.Header.Clone(),
 		TLS:         v2ConnectionInfoFrom(response.TLS, resolution.ECHConfig),
 	}
 	if request.StreamResponse {
+		downloadTotal := response.ContentLength
+		if downloadTotal < 0 {
+			downloadTotal = 0
+		}
+		if request.ObserveDownload != nil {
+			request.ObserveDownload(0, downloadTotal)
+		}
 		result.Stream = &v2StreamBody{
-			reader: response.Body,
-			guard:  guard,
-			cancel: cancel,
+			reader:  response.Body,
+			guard:   guard,
+			cancel:  cancel,
+			total:   downloadTotal,
+			observe: request.ObserveDownload,
 			onFailure: func() {
 				transport.retireTargetClient(origin)
 			},
@@ -443,7 +475,16 @@ func (transport *productionV2Transport) doTarget(
 	if limit == 0 {
 		limit = v2DefaultBodyLimit
 	}
-	result.Body, err = io.ReadAll(io.LimitReader(response.Body, limit+1))
+	downloadTotal := response.ContentLength
+	if downloadTotal < 0 {
+		downloadTotal = 0
+	}
+	responseReader := io.Reader(response.Body)
+	if request.ObserveDownload != nil {
+		request.ObserveDownload(0, downloadTotal)
+		responseReader = &v2ObservedReader{reader: responseReader, total: downloadTotal, observe: request.ObserveDownload}
+	}
+	result.Body, err = io.ReadAll(io.LimitReader(responseReader, limit+1))
 	if err != nil {
 		if guard != nil {
 			transport.retireTargetClient(origin)
@@ -522,6 +563,9 @@ type v2StreamBody struct {
 	reader    io.ReadCloser
 	guard     *v2ProgressGuard
 	cancel    context.CancelFunc
+	read      int64
+	total     int64
+	observe   func(int64, int64)
 	onFailure func()
 	failed    sync.Once
 	closed    sync.Once
@@ -531,6 +575,10 @@ func (body *v2StreamBody) Read(buffer []byte) (int, error) {
 	count, err := body.reader.Read(buffer)
 	if count > 0 {
 		body.guard.progressed()
+		body.read += int64(count)
+		if body.observe != nil {
+			body.observe(body.read, body.total)
+		}
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		body.failed.Do(body.onFailure)

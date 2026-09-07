@@ -52,6 +52,7 @@ type v2GranularInboxDelivery struct {
 	EncryptedDescriptor []byte
 	EffectivePolicy     map[int]any
 	Payload             []byte
+	Chunks              []v2ChunkManifestPart
 }
 
 type v2GranularControlEventResponse struct {
@@ -255,6 +256,10 @@ func encodeV2GranularInboxRequest(origin string, dataProofs, controlProofs []v2G
 }
 
 func queryV2GranularInbox(ctx context.Context, transport v2Transport, origin string, dataProofs, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte) (*v2GranularInboxResponse, error) {
+	return queryV2GranularInboxObserved(ctx, transport, origin, dataProofs, controlProofs, processedControlIDs, nil)
+}
+
+func queryV2GranularInboxObserved(ctx context.Context, transport v2Transport, origin string, dataProofs, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte, observe func(int64, int64)) (*v2GranularInboxResponse, error) {
 	body, err := encodeV2GranularInboxRequest(origin, dataProofs, controlProofs, processedControlIDs)
 	if err != nil {
 		return nil, err
@@ -270,6 +275,7 @@ func queryV2GranularInbox(ctx context.Context, transport v2Transport, origin str
 		},
 		Body:             body,
 		MaxResponseBytes: v2GranularFramePrefixBytes + v2GranularMaxHeaderBytes + v2GranularMaxPayloadBytes,
+		ObserveDownload:  observe,
 	})
 	if err != nil {
 		return nil, err
@@ -292,7 +298,7 @@ func decodeV2GranularInboxDelivery(response *v2GranularInboxResponse) (*v2Granul
 		return nil, errors.New("granular inbox response is missing")
 	}
 	for key := range response.Header {
-		if key < 1 || key > 9 {
+		if key < 1 || key > 10 {
 			return nil, fmt.Errorf("granular inbox response contains unknown key %d", key)
 		}
 	}
@@ -309,7 +315,7 @@ func decodeV2GranularInboxDelivery(response *v2GranularInboxResponse) (*v2Granul
 	}
 	deliveryID, exists := response.Header[3].([]byte)
 	if !exists {
-		if response.Header[3] != nil || len(response.Payload) != 0 || response.Header[4] != nil || response.Header[5] != nil || response.Header[6] != nil {
+		if response.Header[3] != nil || len(response.Payload) != 0 || response.Header[4] != nil || response.Header[5] != nil || response.Header[6] != nil || response.Header[10] != nil {
 			return nil, errors.New("granular inbox has delivery fields without a delivery ID")
 		}
 		return nil, nil
@@ -320,12 +326,37 @@ func decodeV2GranularInboxDelivery(response *v2GranularInboxResponse) (*v2Granul
 	if len(deliveryID) != 16 || !slotOK || len(slot) != 16 || !descriptorOK || len(descriptor) == 0 || len(descriptor) > v2MaxDescriptorBytes || policyErr != nil {
 		return nil, errors.New("granular inbox delivery is invalid")
 	}
+	var chunks []v2ChunkManifestPart
+	if rawManifest, chunked := response.Header[10]; chunked {
+		rawParts, ok := rawManifest.([]any)
+		if !ok || len(rawParts) < 2 || len(rawParts) > v2MaximumChunkCount || len(response.Payload) != 0 {
+			return nil, errors.New("granular inbox chunk manifest is invalid")
+		}
+		chunks = make([]v2ChunkManifestPart, len(rawParts))
+		for index, raw := range rawParts {
+			part, err := normalizeV2Map(raw)
+			if err != nil || len(part) != 3 {
+				return nil, errors.New("granular inbox chunk manifest is invalid")
+			}
+			id, idOK := part[1].([]byte)
+			length, lengthOK := asV2Uint(part[2])
+			digest, digestOK := part[3].([]byte)
+			if !idOK || !lengthOK || !digestOK {
+				return nil, errors.New("granular inbox chunk manifest is invalid")
+			}
+			chunks[index] = v2ChunkManifestPart{ID: append([]byte(nil), id...), Length: length, Digest: append([]byte(nil), digest...)}
+		}
+		if _, err := validateV2ChunkManifest(chunks); err != nil {
+			return nil, errors.New("granular inbox chunk manifest is invalid")
+		}
+	}
 	return &v2GranularInboxDelivery{
 		ID:                  append([]byte(nil), deliveryID...),
 		Slot:                append([]byte(nil), slot...),
 		EncryptedDescriptor: append([]byte(nil), descriptor...),
 		EffectivePolicy:     policy,
 		Payload:             append([]byte(nil), response.Payload...),
+		Chunks:              chunks,
 	}, nil
 }
 
@@ -462,6 +493,10 @@ func encodeV2GranularDeliveryRequest(origin string, operationID, descriptor []by
 }
 
 func publishV2GranularDelivery(ctx context.Context, transport v2Transport, origin string, operationID, descriptor []byte, policy map[int]any, payload []byte, dataProof v2GranularSlotProofInput, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte) (*v2GranularDeliveryResponse, error) {
+	return publishV2GranularDeliveryObserved(ctx, transport, origin, operationID, descriptor, policy, payload, dataProof, controlProofs, processedControlIDs, nil)
+}
+
+func publishV2GranularDeliveryObserved(ctx context.Context, transport v2Transport, origin string, operationID, descriptor []byte, policy map[int]any, payload []byte, dataProof v2GranularSlotProofInput, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte, observe func(int64, int64)) (*v2GranularDeliveryResponse, error) {
 	frame, err := encodeV2GranularDeliveryRequest(origin, operationID, descriptor, policy, payload, dataProof, controlProofs, processedControlIDs)
 	if err != nil {
 		return nil, err
@@ -480,6 +515,7 @@ func publishV2GranularDelivery(ctx context.Context, transport v2Transport, origi
 		Headers:          headers,
 		Body:             frame,
 		MaxResponseBytes: v2MaxDescriptorBytes,
+		ObserveUpload:    observe,
 	})
 	if err != nil {
 		return nil, err

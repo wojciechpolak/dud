@@ -176,6 +176,48 @@ func TestV2DeliveryStatusNamesEveryCategory(t *testing.T) {
 	}
 }
 
+func TestV2DeliveryStatusListsResumableTransferDigests(t *testing.T) {
+	uploadDigest := strings.Repeat("a1", 32)
+	downloadDigest := strings.Repeat("b2", 32)
+	state := &v2PeerDeliveryState{
+		PendingChunkDeliveries: []v2PendingChunkDelivery{{
+			CommitState:      v2ChunkCommitUnattempted,
+			DescriptorDigest: uploadDigest,
+			Parts: []v2PendingChunkPart{
+				{CiphertextLength: 10, Uploaded: true},
+				{CiphertextLength: 20},
+			},
+		}},
+		InboundTransfers: map[string]v2InboundTransfer{
+			downloadDigest: {
+				DescriptorDigest: downloadDigest,
+				Chunks: []v2InboundChunkPart{
+					{CiphertextLength: 30},
+					{CiphertextLength: 40, Downloaded: true},
+				},
+			},
+		},
+		Sent:   map[string]v2SentDelivery{},
+		Chains: map[string]*v2ChainState{},
+	}
+	status := v2DeliveryStatusOf(state)
+	if len(status.ResumableTransfers) != 2 ||
+		status.ResumableTransfers[0] != (v2ResumableTransfer{Direction: "download", DescriptorDigest: downloadDigest, RemainingBytes: 30}) ||
+		status.ResumableTransfers[1] != (v2ResumableTransfer{Direction: "upload", DescriptorDigest: uploadDigest, RemainingBytes: 20}) {
+		t.Fatalf("resumable transfers = %#v", status.ResumableTransfers)
+	}
+	block := status.report("Status").String()
+	for _, fragment := range []string{uploadDigest + " (20 bytes remaining)", downloadDigest + " (30 bytes remaining)"} {
+		if !strings.Contains(block, fragment) {
+			t.Fatalf("status block %q omitted %q", block, fragment)
+		}
+	}
+	fields := status.fields()
+	if fields["resumable_transfers"] == nil {
+		t.Fatal("status fields omitted resumable_transfers")
+	}
+}
+
 func TestV2SyncReportsQueuedWorkInJSONAndText(t *testing.T) {
 	paths, state := newPairedV2TestPeer(t, "laptop")
 	state.PendingCompletions = append(state.PendingCompletions, queuedV2TestCompletion())
@@ -266,7 +308,7 @@ func TestV2ReceiveReportsStatusWhenNothingIsPending(t *testing.T) {
 	if err := a.run([]string{"receive", "laptop"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "Status\n  queued deliveries          0\n  queued completions         0") ||
+	if !strings.Contains(stdout.String(), "Status\n  queued deliveries          0\n  resumable uploads          0\n  resumable upload bytes     0\n  resumable downloads        0\n  resumable download bytes   0\n  queued completions         0") ||
 		!strings.Contains(stdout.String(), "- in:control (fork at sequence 3)") {
 		t.Fatalf("receive text = %s", stdout.String())
 	}
@@ -283,6 +325,10 @@ func (transport *echoingV2DeliveryTransport) Do(_ context.Context, request v2Req
 	transport.requests++
 	if request.Method != "POST" || request.Path != "/v2/deliveries" {
 		return nil, errors.New("unexpected granular delivery request")
+	}
+	if request.ObserveUpload != nil {
+		request.ObserveUpload(0, int64(len(request.Body)))
+		request.ObserveUpload(int64(len(request.Body)), int64(len(request.Body)))
 	}
 	header, _, err := decodeV2GranularFrame(request.Body, 4, 5)
 	if err != nil {
@@ -312,7 +358,8 @@ func TestV2SendReportsStatusInJSONAndText(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
-	a := newApp(strings.NewReader(""), &stdout, &bytes.Buffer{})
+	var stderr bytes.Buffer
+	a := newApp(strings.NewReader(""), &stdout, &stderr)
 	a.newV2Transport = func(v2TransportOptions) (v2Transport, error) {
 		return &echoingV2DeliveryTransport{}, nil
 	}
@@ -330,14 +377,41 @@ func TestV2SendReportsStatusInJSONAndText(t *testing.T) {
 	if _, exists := result["pending_completions"]; !exists {
 		t.Fatalf("send JSON omitted queued completions: %#v", result)
 	}
+	if stderr.Len() != 0 {
+		t.Fatalf("automatic JSON progress wrote stderr: %q", stderr.String())
+	}
 
 	stdout.Reset()
 	if err := a.run([]string{"send", "laptop", "-m", "hello again"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stdout.String(), "Sent to laptop as data sequence 2") ||
-		!strings.Contains(stdout.String(), "Status\n  queued deliveries          0\n  queued completions         0\n  queued control events      0\n  unacknowledged deliveries  2\n  inbound waiting            no\n  undrained control          yes") {
+		!strings.Contains(stdout.String(), "Status\n  queued deliveries          0\n  resumable uploads          0\n  resumable upload bytes     0\n  resumable downloads        0\n  resumable download bytes   0\n  queued completions         0\n  queued control events      0\n  unacknowledged deliveries  2\n  inbound waiting            no\n  undrained control          yes") {
 		t.Fatalf("send text = %s", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("redirected stderr enabled automatic progress: %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := a.run([]string{"send", "laptop", "-m", "forced", "--json", "--progress"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("forced progress corrupted JSON stdout: %v: %q", err, stdout.String())
+	}
+	if strings.ContainsAny(stderr.String(), "\r\x1b") || !strings.Contains(stderr.String(), "laptop: uploading") || !strings.Contains(stderr.String(), "laptop: complete") {
+		t.Fatalf("forced redirected progress = %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := a.run([]string{"send", "laptop", "-m", "quiet", "--no-progress"}); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("--no-progress wrote stderr: %q", stderr.String())
 	}
 }
 

@@ -23,8 +23,11 @@ test('v2 SQLite migrations create the normalized schema', () => {
   assert.deepEqual(tables, [
     'capabilities',
     'capability_lookups',
+    'chunk_upload_parts',
+    'chunk_uploads',
     'control_events',
     'deliveries',
+    'delivery_chunks',
     'invitations',
     'maintenance_leases',
     'nonces',
@@ -68,9 +71,8 @@ test('v2 SQLite migrations record every version exactly once in order', () => {
   database.close();
 });
 
-// With a single bootstrap migration this asserts that an already-recorded
-// version is neither re-executed nor re-stamped. `applied` tracks the migration
-// count, so appending one exercises a real resume.
+// A recorded version is neither re-executed nor re-stamped, and every higher
+// version applies in order when initialization resumes.
 test('a partially migrated v2 SQLite database resumes at its next version', () => {
   const database = new DatabaseSync(':memory:');
   database.exec(V2_SQLITE_MIGRATIONS[0]);
@@ -98,7 +100,7 @@ test('a partially migrated v2 SQLite database resumes at its next version', () =
   );
   assert.ok(
     database
-      .prepare("SELECT name FROM sqlite_master WHERE name = 'staged_bodies'")
+      .prepare("SELECT name FROM sqlite_master WHERE name = 'chunk_uploads'")
       .get(),
   );
   database.close();

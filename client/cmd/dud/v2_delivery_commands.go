@@ -41,6 +41,7 @@ type v2PeerRuntime struct {
 	recipient      age.Recipient
 	origin         string
 	transport      v2Transport
+	progress       *v2ProgressReporter
 	maxTTL         uint64
 }
 
@@ -54,6 +55,7 @@ type v2PeerSendOptions struct {
 	ttl             time.Duration
 	json            bool
 	verbose         bool
+	progress        v2ProgressFlags
 }
 
 type v2PeerReceiveOptions struct {
@@ -68,6 +70,7 @@ type v2PeerReceiveOptions struct {
 	interactive bool
 	json        bool
 	verbose     bool
+	progress    v2ProgressFlags
 }
 
 func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2PeerRuntime) error) error {
@@ -200,6 +203,14 @@ func (runtime *v2PeerRuntime) requireGitFeatures() error {
 	return requireV2CapabilityFeatures(capabilities, 5)
 }
 
+func (runtime *v2PeerRuntime) supportsChunkedTransfers() bool {
+	capabilities, err := runtime.state.ServerContract.capabilities()
+	return err == nil &&
+		hasV2Feature(capabilities.Features, 7) &&
+		strictlyIncreasingV2(runtime.state.PeerFeatures) &&
+		hasV2Feature(runtime.state.PeerFeatures, 7)
+}
+
 func (runtime *v2PeerRuntime) reissueCapabilities(ctx context.Context) error {
 	serverCapabilities, err := requireV2Features(
 		ctx,
@@ -293,12 +304,21 @@ func (runtime *v2PeerRuntime) reissueCapabilities(ctx context.Context) error {
 }
 
 func encryptV2Payload(plaintext []byte, recipient age.Recipient) ([]byte, error) {
+	return encryptV2PayloadObserved(plaintext, recipient, nil)
+}
+
+func encryptV2PayloadObserved(plaintext []byte, recipient age.Recipient, observe func(int64, int64)) ([]byte, error) {
 	var ciphertext bytes.Buffer
 	writer, err := age.Encrypt(&ciphertext, recipient)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := writer.Write(plaintext); err != nil {
+	reader := io.Reader(bytes.NewReader(plaintext))
+	if observe != nil {
+		observe(0, int64(len(plaintext)))
+		reader = &v2ObservedReader{reader: reader, total: int64(len(plaintext)), observe: observe}
+	}
+	if _, err := io.Copy(writer, reader); err != nil {
 		return nil, err
 	}
 	if err := writer.Close(); err != nil {
@@ -308,11 +328,20 @@ func encryptV2Payload(plaintext []byte, recipient age.Recipient) ([]byte, error)
 }
 
 func decryptV2Payload(ciphertext []byte, identity age.Identity, maximum int64) ([]byte, error) {
+	return decryptV2PayloadObserved(ciphertext, identity, maximum, 0, nil)
+}
+
+func decryptV2PayloadObserved(ciphertext []byte, identity age.Identity, maximum, plaintextTotal int64, observe func(int64, int64)) ([]byte, error) {
 	reader, err := age.Decrypt(bytes.NewReader(ciphertext), identity)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt peer payload: %w", err)
 	}
-	plaintext, err := io.ReadAll(io.LimitReader(reader, maximum+1))
+	plaintextReader := io.Reader(reader)
+	if observe != nil {
+		observe(0, plaintextTotal)
+		plaintextReader = &v2ObservedReader{reader: plaintextReader, total: plaintextTotal, observe: observe}
+	}
+	plaintext, err := io.ReadAll(io.LimitReader(plaintextReader, maximum+1))
 	if err != nil {
 		return nil, err
 	}
@@ -366,6 +395,11 @@ func parseV2PeerSendOptions(args []string) (v2PeerSendOptions, error) {
 				return opts, err
 			}
 			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.progress.parse(args[0]); err != nil {
+				return opts, err
+			}
+			args = args[1:]
 		case "-v", "--verbose":
 			if err := markVerboseOption(&opts.verbose); err != nil {
 				return opts, err
@@ -397,6 +431,10 @@ func parseV2PeerSendOptions(args []string) (v2PeerSendOptions, error) {
 }
 
 func (a *app) readV2PeerSendPayload(opts v2PeerSendOptions) ([]byte, uint64, string, map[int]any, *uint64, error) {
+	return a.readV2PeerSendPayloadObserved(opts, nil)
+}
+
+func (a *app) readV2PeerSendPayloadObserved(opts v2PeerSendOptions, observe func(int64, int64)) ([]byte, uint64, string, map[int]any, *uint64, error) {
 	if opts.message != "" {
 		return []byte(opts.message), 1, opts.displayName, nil, nil, nil
 	}
@@ -455,9 +493,22 @@ func (a *app) readV2PeerSendPayload(opts v2PeerSendOptions) ([]byte, uint64, str
 	if info.Size() > v2MaximumObjectBytes {
 		return nil, 0, "", nil, nil, errors.New("peer plaintext exceeds the 100 MiB object limit")
 	}
-	body, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, 0, "", nil, nil, err
+	}
+	defer file.Close()
+	reader := io.Reader(file)
+	if observe != nil {
+		observe(0, info.Size())
+		reader = &v2ObservedReader{reader: reader, total: info.Size(), observe: observe}
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, v2MaximumObjectBytes+1))
+	if err != nil {
+		return nil, 0, "", nil, nil, err
+	}
+	if len(body) > v2MaximumObjectBytes {
+		return nil, 0, "", nil, nil, errors.New("peer plaintext exceeds the 100 MiB object limit")
 	}
 	name := opts.displayName
 	if name == "" {
@@ -467,6 +518,20 @@ func (a *app) readV2PeerSendPayload(opts v2PeerSendOptions) ([]byte, uint64, str
 		return nil, 0, "", nil, nil, errors.New("peer display name must be a single path component")
 	}
 	return body, 2, name, nil, nil, nil
+}
+
+func preflightV2PeerSendPayload(opts v2PeerSendOptions) error {
+	for _, raw := range opts.files {
+		path := absPathIfRelative(raw)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			return errors.New("peer send requires regular files or directories")
+		}
+	}
+	return nil
 }
 
 func v2TransportPolicyMap(policy v2TransportPolicy) map[int]any {
@@ -622,6 +687,9 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 			return errors.New("queued granular delivery policy is not deterministic")
 		}
 		publish := func(at time.Time) error {
+			if runtime.progress != nil {
+				runtime.progress.Phase("connecting", 0)
+			}
 			writeSecret, secretErr := v2CapabilitySecret(runtime.state, v2OutboundDirection(runtime.state.Role), "write")
 			if secretErr != nil {
 				return secretErr
@@ -646,7 +714,8 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 			if processErr != nil {
 				return processErr
 			}
-			published, publishErr := publishV2GranularDelivery(
+			uploading := false
+			published, publishErr := publishV2GranularDeliveryObserved(
 				ctx,
 				runtime.transport,
 				runtime.origin,
@@ -657,12 +726,24 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 				dataProof,
 				controls,
 				processed,
+				func(transferred, total int64) {
+					if runtime.progress != nil {
+						if !uploading {
+							runtime.progress.Phase("uploading", total)
+							uploading = true
+						}
+						runtime.progress.Set(transferred, total)
+					}
+				},
 			)
 			if publishErr != nil {
 				return publishErr
 			}
 			if policyErr := validateV2EffectivePolicy(policy, published.EffectivePolicy); policyErr != nil {
 				return policyErr
+			}
+			if runtime.progress != nil {
+				runtime.progress.Phase("verification and publication", 0)
 			}
 			return runtime.applyV2GranularControlResponse(published.ControlEvents)
 		}
@@ -687,6 +768,267 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (runtime *v2PeerRuntime) flushPendingDeliveries(ctx context.Context) error {
+	if err := runtime.flushPendingChunkDeliveries(ctx); err != nil {
+		return err
+	}
+	return runtime.flushPendingGranularDeliveries(ctx)
+}
+
+func pendingV2ChunkManifest(queued v2PendingChunkDelivery) ([]v2ChunkManifestPart, error) {
+	parts := make([]v2ChunkManifestPart, len(queued.Parts))
+	for index, queuedPart := range queued.Parts {
+		id, idErr := hex.DecodeString(queuedPart.ID)
+		digest, digestErr := hex.DecodeString(queuedPart.CiphertextHash)
+		if idErr != nil || len(id) != 16 || digestErr != nil || len(digest) != 32 {
+			return nil, errors.New("queued chunk delivery manifest is invalid")
+		}
+		parts[index] = v2ChunkManifestPart{ID: id, Length: queuedPart.CiphertextLength, Digest: digest}
+	}
+	if _, err := validateV2ChunkManifest(parts); err != nil {
+		return nil, err
+	}
+	return parts, nil
+}
+
+func verifyV2PendingChunkFile(part v2PendingChunkPart) (*os.File, error) {
+	file, err := os.Open(part.Path)
+	if err != nil {
+		return nil, err
+	}
+	valid := false
+	defer func() {
+		if !valid {
+			_ = file.Close()
+		}
+	}()
+	hasher := sha256.New()
+	length, err := io.Copy(hasher, file)
+	if err != nil {
+		return nil, err
+	}
+	expected, err := hex.DecodeString(part.CiphertextHash)
+	if err != nil || length != int64(part.CiphertextLength) || !bytes.Equal(hasher.Sum(nil), expected) {
+		return nil, errors.New("queued chunk ciphertext does not match its durable manifest")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	valid = true
+	return file, nil
+}
+
+func (runtime *v2PeerRuntime) newV2ChunkWriteProof(slot []byte, epoch uint64, at time.Time) (v2GranularSlotProofInput, error) {
+	secret, err := v2CapabilitySecret(runtime.state, v2OutboundDirection(runtime.state.Role), "write")
+	if err != nil {
+		return v2GranularSlotProofInput{}, err
+	}
+	return newV2GranularSlotProofInput(secret, v2DirectionName(v2OutboundDirection(runtime.state.Role)), "write", v2GranularDataChain, slot, epoch, at)
+}
+
+func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) error {
+	for len(runtime.state.PendingChunkDeliveries) != 0 {
+		queued := runtime.state.PendingChunkDeliveries[0]
+		now := time.Now()
+		if queued.NextAttemptAt > uint64(now.Unix()) {
+			return fmt.Errorf("next chunk delivery retry is scheduled at %d", queued.NextAttemptAt)
+		}
+		fail := func(cause error) error {
+			queued.Attempts++
+			delay := v2BackoffWithJitter(queued.Attempts)
+			queued.NextAttemptAt = uint64(now.Unix()) + uint64((delay+time.Second-1)/time.Second)
+			runtime.state.PendingChunkDeliveries[0] = queued
+			if writeErr := writeV2PeerDeliveryState(runtime.paths, runtime.state); writeErr != nil {
+				return writeErr
+			}
+			return cause
+		}
+		parts, err := pendingV2ChunkManifest(queued)
+		if err != nil {
+			return err
+		}
+		var uploadTotal int64
+		for _, part := range queued.Parts {
+			uploadTotal += int64(part.CiphertextLength)
+		}
+		slot, slotErr := hex.DecodeString(queued.DataSlot)
+		createOperationID, createErr := hex.DecodeString(queued.CreateOperationID)
+		commitOperationID, commitErr := hex.DecodeString(queued.CommitOperationID)
+		descriptor, descriptorErr := decodeV2Base64URL(queued.EncryptedDescriptor, -1)
+		policyBytes, policyErr := decodeV2Base64URL(queued.RequestedPolicy, -1)
+		if slotErr != nil || len(slot) != 16 || createErr != nil || len(createOperationID) != 16 || commitErr != nil || len(commitOperationID) != 16 || descriptorErr != nil || policyErr != nil {
+			return errors.New("queued chunk delivery is invalid")
+		}
+		var policy map[int]any
+		if err := v2DecMode.Unmarshal(policyBytes, &policy); err != nil {
+			return errors.New("queued chunk delivery policy is invalid")
+		}
+		canonicalPolicy, err := v2EncMode.Marshal(policy)
+		if err != nil || !bytes.Equal(canonicalPolicy, policyBytes) {
+			return errors.New("queued chunk delivery policy is not deterministic")
+		}
+
+		if queued.UploadID == "" {
+			if runtime.progress != nil {
+				runtime.progress.Phase("connecting", 0)
+			}
+			proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
+			if proofErr != nil {
+				return proofErr
+			}
+			created, createUploadErr := createV2ChunkUpload(ctx, runtime.transport, runtime.origin, createOperationID, v2GranularDataChain, slot, queued.SlotEpoch, parts, proof)
+			if createUploadErr != nil {
+				return fail(createUploadErr)
+			}
+			missing := map[string]bool{}
+			for _, id := range created.MissingChunkIDs {
+				missing[hex.EncodeToString(id)] = true
+			}
+			queued.UploadID = hex.EncodeToString(created.UploadID)
+			queued.LeaseExpiresAt = created.ExpiresAt
+			for index := range queued.Parts {
+				queued.Parts[index].Uploaded = !missing[queued.Parts[index].ID]
+			}
+			runtime.state.PendingChunkDeliveries[0] = queued
+			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+				return err
+			}
+		}
+
+		uploadID, uploadErr := hex.DecodeString(queued.UploadID)
+		if uploadErr != nil || len(uploadID) != 16 {
+			return errors.New("queued chunk upload lease is invalid")
+		}
+		if queued.CommitState != v2ChunkCommitAmbiguous && queued.LeaseExpiresAt <= uint64(time.Now().Unix()) {
+			createID, randomErr := randomV2Bytes(16)
+			if randomErr != nil {
+				return randomErr
+			}
+			queued.CreateOperationID = hex.EncodeToString(createID)
+			queued.UploadID = ""
+			queued.RenewOperationID = ""
+			queued.LeaseExpiresAt = 0
+			for index := range queued.Parts {
+				queued.Parts[index].Uploaded = false
+			}
+			queued.NextAttemptAt = 0
+			runtime.state.PendingChunkDeliveries[0] = queued
+			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+				return err
+			}
+			continue
+		}
+		if queued.CommitState != v2ChunkCommitAmbiguous && queued.LeaseExpiresAt <= uint64(time.Now().Add(5*time.Minute).Unix()) {
+			if runtime.progress != nil {
+				runtime.progress.Phase("connecting", 0)
+			}
+			if queued.RenewOperationID == "" {
+				renewID, randomErr := randomV2Bytes(16)
+				if randomErr != nil {
+					return randomErr
+				}
+				queued.RenewOperationID = hex.EncodeToString(renewID)
+				runtime.state.PendingChunkDeliveries[0] = queued
+				if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+					return err
+				}
+			}
+			renewID, renewErr := hex.DecodeString(queued.RenewOperationID)
+			if renewErr != nil || len(renewID) != 16 {
+				return errors.New("queued chunk upload renewal is invalid")
+			}
+			proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
+			if proofErr != nil {
+				return proofErr
+			}
+			expiresAt, _, renewUploadErr := renewV2ChunkUpload(ctx, runtime.transport, runtime.origin, uploadID, renewID, proof)
+			if renewUploadErr != nil {
+				return fail(renewUploadErr)
+			}
+			queued.RenewOperationID = ""
+			queued.LeaseExpiresAt = expiresAt
+			runtime.state.PendingChunkDeliveries[0] = queued
+			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+				return err
+			}
+		}
+		var uploadedBase int64
+		for _, part := range queued.Parts {
+			if part.Uploaded {
+				uploadedBase += int64(part.CiphertextLength)
+			}
+		}
+		if runtime.progress != nil {
+			runtime.progress.PhaseResumed("uploading", uploadedBase, uploadTotal)
+		}
+		for index := range queued.Parts {
+			if queued.Parts[index].Uploaded {
+				continue
+			}
+			file, openErr := verifyV2PendingChunkFile(queued.Parts[index])
+			if openErr != nil {
+				return openErr
+			}
+			proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
+			if proofErr == nil {
+				base := uploadedBase
+				proofErr = putV2ChunkUploadPartObserved(ctx, runtime.transport, runtime.origin, uploadID, parts[index], file, proof, func(transferred, _ int64) {
+					if runtime.progress != nil {
+						runtime.progress.Set(base+transferred, uploadTotal)
+					}
+				})
+			}
+			closeErr := file.Close()
+			if proofErr != nil {
+				return fail(proofErr)
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			queued.Parts[index].Uploaded = true
+			uploadedBase += int64(queued.Parts[index].CiphertextLength)
+			if runtime.progress != nil {
+				runtime.progress.Set(uploadedBase, uploadTotal)
+			}
+			runtime.state.PendingChunkDeliveries[0] = queued
+			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+				return err
+			}
+		}
+
+		{
+			if runtime.progress != nil {
+				runtime.progress.Phase("verification and publication", 0)
+			}
+			proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
+			if proofErr != nil {
+				return proofErr
+			}
+			if queued.CommitState != v2ChunkCommitAmbiguous {
+				queued.CommitState = v2ChunkCommitAmbiguous
+				runtime.state.PendingChunkDeliveries[0] = queued
+				if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+					return err
+				}
+			}
+			if _, commitUploadErr := commitV2ChunkUpload(ctx, runtime.transport, runtime.origin, uploadID, commitOperationID, descriptor, policy, proof); commitUploadErr != nil {
+				return fail(commitUploadErr)
+			}
+		}
+		runtime.state.PendingChunkDeliveries = runtime.state.PendingChunkDeliveries[1:]
+		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+			return err
+		}
+		for _, part := range queued.Parts {
+			if err := os.Remove(part.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove published chunk ciphertext: %w", err)
+			}
+		}
+		continue
 	}
 	return nil
 }
@@ -797,26 +1139,122 @@ func (a *app) cmdPeerSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	plaintext, payloadType, displayName, typeMetadata, archiveFormat, err := a.readV2PeerSendPayload(opts)
-	if err != nil {
+	if err := preflightV2PeerSendPayload(opts); err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.alias, 2*time.Minute, func(runtime *v2PeerRuntime) error {
+	return a.withV2Peer(opts.alias, 2*time.Minute, func(runtime *v2PeerRuntime) (resultErr error) {
+		runtime.progress = a.newV2ProgressReporter(opts.alias, opts.json, opts.progress)
+		defer func() {
+			if resultErr != nil {
+				runtime.progress.Fail()
+			} else {
+				runtime.progress.Complete()
+			}
+		}()
 		ctx := context.Background()
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
-		if len(runtime.state.PendingGranularDeliveries) != 0 {
-			if err := runtime.flushPendingGranularDeliveries(ctx); err != nil {
+		if len(runtime.state.PendingGranularDeliveries) != 0 || len(runtime.state.PendingChunkDeliveries) != 0 {
+			runtime.progress.Phase("connecting", 0)
+			if err := runtime.flushPendingDeliveries(ctx); err != nil {
 				return fmt.Errorf("retry pending atomic delivery: %w", err)
 			}
 		}
-		payloadCiphertext, err := encryptV2Payload(plaintext, runtime.recipient)
-		if err != nil {
-			return err
+		const chunkSize = uint64(16 * 1024 * 1024)
+		var plaintext []byte
+		var plaintextSource io.ReadCloser
+		var plaintextSize uint64
+		var payloadType uint64
+		var displayName string
+		var typeMetadata map[int]any
+		var archiveFormat *uint64
+		if runtime.supportsChunkedTransfers() && len(opts.files) == 1 {
+			path := absPathIfRelative(opts.files[0])
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				return statErr
+			}
+			if info.Mode().IsRegular() && info.Size() > int64(chunkSize) {
+				capabilities, capabilityErr := runtime.state.ServerContract.capabilities()
+				if capabilityErr != nil {
+					return capabilityErr
+				}
+				if uint64(info.Size()) > capabilities.Limits[12] || uint64(info.Size()) > v2MaximumChunkedBytes {
+					return errors.New("peer plaintext exceeds the negotiated chunked-transfer limit")
+				}
+				displayName = opts.displayName
+				if displayName == "" {
+					displayName = filepath.Base(path)
+				}
+				if err := v2SafeReceivedFileName(displayName); err != nil {
+					return err
+				}
+				plaintextSource, err = os.Open(path)
+				if err != nil {
+					return err
+				}
+				defer plaintextSource.Close()
+				plaintextSize = uint64(info.Size())
+				payloadType = 2
+			}
 		}
-		if len(payloadCiphertext) > v2MaximumObjectBytes {
-			return errors.New("encrypted peer payload exceeds the server object limit")
+		if plaintextSource == nil {
+			runtime.progress.Phase("preparing", 0)
+			reading := false
+			plaintext, payloadType, displayName, typeMetadata, archiveFormat, err = a.readV2PeerSendPayloadObserved(opts, func(transferred, total int64) {
+				if !reading {
+					runtime.progress.Phase("preparing", total)
+					reading = true
+				}
+				runtime.progress.Set(transferred, total)
+			})
+			if err != nil {
+				return err
+			}
+			plaintextSize = uint64(len(plaintext))
+		}
+		var payloadCiphertext []byte
+		var chunkSpool *v2ChunkSpool
+		retainChunkSpool := false
+		defer func() {
+			if chunkSpool != nil && !retainChunkSpool {
+				_ = removeV2SpooledChunks(chunkSpool.Chunks)
+			}
+		}()
+		if runtime.supportsChunkedTransfers() && plaintextSize > chunkSize {
+			runtime.progress.Phase("preparing and encrypting", int64(plaintextSize))
+			available, availableErr := v2AvailableBytes(runtime.paths.StateDir)
+			if availableErr != nil {
+				return availableErr
+			}
+			chunkCount := (plaintextSize + chunkSize - 1) / chunkSize
+			needed := plaintextSize + chunkCount*8192
+			if available < needed {
+				return fmt.Errorf("resumable send needs %d bytes but only %d bytes are free", needed, available)
+			}
+			spoolID, spoolErr := randomV2Bytes(16)
+			if spoolErr != nil {
+				return spoolErr
+			}
+			spoolDir := filepath.Join(runtime.paths.StateDir, "uploads", runtime.state.RelationshipID, hex.EncodeToString(spoolID))
+			source := io.Reader(plaintextSource)
+			if source == nil {
+				source = bytes.NewReader(plaintext)
+			}
+			chunkSpool, err = spoolV2ChunkedPayloadObserved(source, spoolDir, runtime.recipient, chunkSize, plaintextSize, runtime.progress.Set)
+			if err != nil {
+				return err
+			}
+		} else {
+			runtime.progress.Phase("preparing and encrypting", int64(plaintextSize))
+			payloadCiphertext, err = encryptV2PayloadObserved(plaintext, runtime.recipient, runtime.progress.Set)
+			if err != nil {
+				return err
+			}
+			if len(payloadCiphertext) > v2MaximumObjectBytes {
+				return errors.New("encrypted peer payload exceeds the server object limit")
+			}
 		}
 		now := uint64(time.Now().Unix())
 		consume := uint64(0)
@@ -835,8 +1273,22 @@ func (a *app) cmdPeerSend(args []string) error {
 		if err != nil {
 			return err
 		}
-		plainDigest := sha256.Sum256(plaintext)
-		cipherDigest := sha256.Sum256(payloadCiphertext)
+		plainDigest := [32]byte{}
+		chunkHashes := [][]byte{}
+		chunkIDs := [][]byte(nil)
+		if chunkSpool == nil {
+			plainDigest = sha256.Sum256(plaintext)
+			cipherDigest := sha256.Sum256(payloadCiphertext)
+			chunkHashes = append(chunkHashes, cipherDigest[:])
+		} else {
+			plainDigest = [32]byte{}
+			copy(plainDigest[:], chunkSpool.PlaintextHash)
+			chunkIDs = make([][]byte, len(chunkSpool.Chunks))
+			for index, chunk := range chunkSpool.Chunks {
+				chunkIDs[index] = append([]byte(nil), chunk.ID...)
+				chunkHashes = append(chunkHashes, append([]byte(nil), chunk.CiphertextHash...))
+			}
+		}
 		descriptor := v2Descriptor{
 			DescriptorID:      descriptorID,
 			PayloadType:       payloadType,
@@ -852,13 +1304,17 @@ func (a *app) cmdPeerSend(args []string) error {
 			CreatedAt:         now,
 			TransportPolicy:   policy,
 			PayloadHash:       plainDigest[:],
-			ChunkHashes:       [][]byte{cipherDigest[:]},
+			ChunkHashes:       chunkHashes,
 			DisplayName:       displayName,
 			ArchiveFormat:     archiveFormat,
 			TypeMetadata:      typeMetadata,
 		}
-		plaintextSize := uint64(len(plaintext))
 		descriptor.PlaintextSize = &plaintextSize
+		if chunkSpool != nil {
+			descriptor.ChunkSize = new(uint64)
+			*descriptor.ChunkSize = chunkSize
+			descriptor.ChunkIDs = chunkIDs
+		}
 		descriptorCiphertext, err := encryptV2Envelope(descriptor, runtime.signingKey, runtime.recipient)
 		if err != nil {
 			return err
@@ -886,21 +1342,56 @@ func (a *app) cmdPeerSend(args []string) error {
 			return err
 		}
 		key := hex.EncodeToString(descriptorDigest[:])
-		operationID, err := randomV2Bytes(16)
-		if err != nil {
-			return err
+		if chunkSpool == nil {
+			operationID, operationErr := randomV2Bytes(16)
+			if operationErr != nil {
+				return operationErr
+			}
+			runtime.state.PendingGranularDeliveries = append(runtime.state.PendingGranularDeliveries, v2PendingGranularDelivery{
+				OperationID:         hex.EncodeToString(operationID),
+				EncryptedDescriptor: v2Base64URL(descriptorCiphertext),
+				PayloadCiphertext:   v2Base64URL(payloadCiphertext),
+				DataSlot:            hex.EncodeToString(slot),
+				SlotEpoch:           slotEpoch,
+				RequestedPolicy:     v2Base64URL(policyBytes),
+				DescriptorDigest:    key,
+				Sequence:            descriptor.Sequence,
+				CreatedAt:           now,
+			})
+		} else {
+			createOperationID, createErr := randomV2Bytes(16)
+			commitOperationID, commitErr := randomV2Bytes(16)
+			if createErr != nil || commitErr != nil {
+				return errors.Join(createErr, commitErr)
+			}
+			parts := make([]v2PendingChunkPart, len(chunkSpool.Chunks))
+			for index, chunk := range chunkSpool.Chunks {
+				parts[index] = v2PendingChunkPart{
+					ID:               hex.EncodeToString(chunk.ID),
+					Path:             chunk.Path,
+					PlaintextLength:  chunk.PlaintextLength,
+					CiphertextLength: chunk.CiphertextLength,
+					CiphertextHash:   hex.EncodeToString(chunk.CiphertextHash),
+				}
+			}
+			runtime.state.PendingChunkDeliveries = append(runtime.state.PendingChunkDeliveries, v2PendingChunkDelivery{
+				CreateOperationID:   hex.EncodeToString(createOperationID),
+				CommitOperationID:   hex.EncodeToString(commitOperationID),
+				CommitState:         v2ChunkCommitUnattempted,
+				EncryptedDescriptor: v2Base64URL(descriptorCiphertext),
+				DataSlot:            hex.EncodeToString(slot),
+				SlotEpoch:           slotEpoch,
+				RequestedPolicy:     v2Base64URL(policyBytes),
+				DescriptorDigest:    key,
+				PreviousDigest:      hex.EncodeToString(descriptor.PreviousDigest),
+				Sequence:            descriptor.Sequence,
+				ChunkSize:           chunkSize,
+				PlaintextLength:     chunkSpool.PlaintextLength,
+				PlaintextHash:       hex.EncodeToString(chunkSpool.PlaintextHash),
+				Parts:               parts,
+				CreatedAt:           now,
+			})
 		}
-		runtime.state.PendingGranularDeliveries = append(runtime.state.PendingGranularDeliveries, v2PendingGranularDelivery{
-			OperationID:         hex.EncodeToString(operationID),
-			EncryptedDescriptor: v2Base64URL(descriptorCiphertext),
-			PayloadCiphertext:   v2Base64URL(payloadCiphertext),
-			DataSlot:            hex.EncodeToString(slot),
-			SlotEpoch:           slotEpoch,
-			RequestedPolicy:     v2Base64URL(policyBytes),
-			DescriptorDigest:    key,
-			Sequence:            descriptor.Sequence,
-			CreatedAt:           now,
-		})
 		chain.SendSequence = descriptor.Sequence
 		chain.SendDigest = key
 		runtime.state.Sent[key] = v2SentDelivery{
@@ -920,9 +1411,12 @@ func (a *app) cmdPeerSend(args []string) error {
 		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 			return err
 		}
-		if err := runtime.flushPendingGranularDeliveries(ctx); err != nil {
+		retainChunkSpool = true
+		if err := runtime.flushPendingDeliveries(ctx); err != nil {
 			return fmt.Errorf("delivery committed locally and will retry publication: %w", err)
 		}
+		runtime.progress.Phase("publication", 0)
+		runtime.progress.Complete()
 		status := v2DeliveryStatusOf(runtime.state)
 		if opts.json {
 			return writeJSON(a.out, status.merge(map[string]any{
@@ -1025,6 +1519,11 @@ func parseV2PeerReceiveOptions(args []string) (v2PeerReceiveOptions, error) {
 				return opts, err
 			}
 			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.progress.parse(args[0]); err != nil {
+				return opts, err
+			}
+			args = args[1:]
 		case "-v", "--verbose":
 			if err := markVerboseOption(&opts.verbose); err != nil {
 				return opts, err
@@ -1079,7 +1578,15 @@ func (a *app) cmdPeerReceive(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.alias, 2*time.Minute+opts.wait, func(runtime *v2PeerRuntime) error {
+	return a.withV2Peer(opts.alias, 2*time.Minute+opts.wait, func(runtime *v2PeerRuntime) (resultErr error) {
+		runtime.progress = a.newV2ProgressReporter(opts.alias, opts.json, opts.progress)
+		defer func() {
+			if resultErr != nil {
+				runtime.progress.Fail()
+			} else {
+				runtime.progress.Complete()
+			}
+		}()
 		ctx := context.Background()
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
@@ -1090,6 +1597,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 			}
 		}
 		if opts.id != "" {
+			runtime.progress.Stop()
 			return runtime.exportCommittedTransfer(a, opts)
 		}
 		// One invocation drains the whole queue. The server hands back the
@@ -1148,6 +1656,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 			case <-timer.C:
 			}
 		}
+		runtime.progress.Complete()
 		return a.renderV2ReceiveReport(opts, drained, stop, v2DeliveryStatusOf(runtime.state))
 	})
 }
@@ -1158,6 +1667,9 @@ func (a *app) cmdPeerReceive(args []string) error {
 // caller that drains has to tell "nothing waiting" apart from "waiting, but not
 // applicable" instead of polling the same entry forever.
 func (runtime *v2PeerRuntime) receiveAvailable(ctx context.Context, a *app, opts v2PeerReceiveOptions) (*v2ReceivedItem, bool, error) {
+	if runtime.progress != nil {
+		runtime.progress.Phase("connecting", 0)
+	}
 	now := time.Now()
 	dataProofs, err := runtime.granularDataQueryProofs(now)
 	if err != nil {
@@ -1171,9 +1683,21 @@ func (runtime *v2PeerRuntime) receiveAvailable(ctx context.Context, a *app, opts
 	if err != nil {
 		return nil, false, err
 	}
-	response, err := queryV2GranularInbox(ctx, runtime.transport, runtime.origin, dataProofs, controlProofs, processed)
+	downloading := false
+	response, err := queryV2GranularInboxObserved(ctx, runtime.transport, runtime.origin, dataProofs, controlProofs, processed, func(transferred, total int64) {
+		if runtime.progress != nil {
+			if !downloading {
+				runtime.progress.Phase("downloading", total)
+				downloading = true
+			}
+			runtime.progress.Set(transferred, total)
+		}
+	})
 	if err != nil {
 		return nil, false, err
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("verification", 0)
 	}
 	rawControls, controlsOK := response.Header[2].([]any)
 	if !controlsOK {
@@ -1278,12 +1802,16 @@ func descriptorPolicy(desc map[int]any) (map[int]any, error) {
 // no-op. A directory, broken symlink, or unreadable file is not a match. The
 // caller refuses rather than overwriting something it could not inspect.
 func v2ExistingOutputMatches(target string, payloadDigest []byte) bool {
-	existing, err := os.ReadFile(target)
+	existing, err := os.Open(target)
 	if err != nil {
 		return false
 	}
-	digest := sha256.Sum256(existing)
-	return bytes.Equal(digest[:], payloadDigest)
+	defer existing.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, existing); err != nil {
+		return false
+	}
+	return bytes.Equal(hasher.Sum(nil), payloadDigest)
 }
 
 func (runtime *v2PeerRuntime) validateNextDescriptor(chain *v2ChainState, envelope *validatedV2Envelope) (bool, error) {
@@ -1399,77 +1927,99 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 			Next:     "dud git fetch " + opts.alias,
 		}
 	}
-	payloadCiphertext := delivery.Payload
-	chunks, ok := envelope.Descriptor[kChunkHashes].([]any)
-	if !ok || len(chunks) != 1 {
-		return nil, errors.New("descriptor ciphertext hash list is invalid")
-	}
-	expectedCipherDigest, _ := chunks[0].([]byte)
-	actualCipherDigest := sha256.Sum256(payloadCiphertext)
-	if !bytes.Equal(expectedCipherDigest, actualCipherDigest[:]) {
-		return nil, errors.New("peer payload ciphertext digest does not match the signed descriptor")
-	}
-	plaintext, err := decryptV2Payload(payloadCiphertext, runtime.identity, v2MaximumObjectBytes)
-	if err != nil {
-		return nil, err
-	}
-	plainDigest := sha256.Sum256(plaintext)
-	expectedPlainDigest, _ := envelope.Descriptor[kPayloadHash].([]byte)
-	if !bytes.Equal(expectedPlainDigest, plainDigest[:]) {
-		return nil, errors.New("peer plaintext digest does not match the signed descriptor")
-	}
-	if size, exists := envelope.Descriptor[kPlaintextSize]; exists {
-		value, ok := asV2Uint(size)
-		if !ok || value != uint64(len(plaintext)) {
-			return nil, errors.New("peer plaintext size does not match the signed descriptor")
-		}
-	}
 	if payloadType != 1 && payloadType != 2 && payloadType != 3 {
 		return nil, errors.New("peer delivery payload type is unsupported by this command")
 	}
 	digestString := hex.EncodeToString(envelope.DescriptorDigest[:])
-	transferDir := filepath.Join(runtime.paths.StateDir, "transfers", runtime.state.RelationshipID)
-	if err := os.MkdirAll(transferDir, 0o700); err != nil {
-		return nil, err
-	}
-	durableOutput := filepath.Join(transferDir, digestString)
-	if existing, readErr := os.ReadFile(durableOutput); readErr == nil {
-		existingDigest := sha256.Sum256(existing)
-		if !bytes.Equal(existingDigest[:], plainDigest[:]) {
-			return nil, errors.New("durable peer output conflicts with the signed delivery")
+	var plaintext []byte
+	var plainDigest [32]byte
+	var durableOutput string
+	var transfer v2InboundTransfer
+	var resume bool
+	if len(delivery.Chunks) != 0 {
+		if payloadType != 2 {
+			return nil, errors.New("chunked delivery payload type is unsupported by this command")
 		}
-	} else {
-		if !errors.Is(readErr, os.ErrNotExist) {
-			return nil, readErr
-		}
-		if err := atomicWriteV2File(durableOutput, plaintext, 0o600); err != nil {
+		durableOutput, plainDigest, transfer, resume, err = runtime.receiveV2ChunkedPayload(ctx, delivery, envelope, sourceSlotEpoch, policyDigest, sequence, expiresAt)
+		if err != nil {
 			return nil, err
 		}
-	}
-	transfer, resume := runtime.state.InboundTransfers[digestString]
-	if resume {
-		if transfer.Sequence != sequence ||
-			transfer.OutputDigest != hex.EncodeToString(plainDigest[:]) ||
-			transfer.PolicyDigest != hex.EncodeToString(policyDigest) {
-			return nil, errors.New("durable inbound transfer state conflicts with the signed descriptor")
-		}
 	} else {
-		transfer = v2InboundTransfer{
-			EntryID:              hex.EncodeToString(delivery.ID),
-			Slot:                 hex.EncodeToString(delivery.Slot),
-			DescriptorDigest:     digestString,
-			Sequence:             sequence,
-			Phase:                "payload-verified",
-			TemporaryOutput:      durableOutput,
-			OutputDigest:         hex.EncodeToString(plainDigest[:]),
-			PolicyDigest:         hex.EncodeToString(policyDigest),
-			DescriptorCiphertext: v2Base64URL(descriptorCiphertext),
-			PlaintextPayload:     durableOutput,
-			ExpiresAt:            expiresAt,
+		payloadCiphertext := delivery.Payload
+		chunks, ok := envelope.Descriptor[kChunkHashes].([]any)
+		if !ok || len(chunks) != 1 {
+			return nil, errors.New("descriptor ciphertext hash list is invalid")
 		}
-		runtime.state.InboundTransfers[digestString] = transfer
-		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+		expectedCipherDigest, _ := chunks[0].([]byte)
+		actualCipherDigest := sha256.Sum256(payloadCiphertext)
+		if !bytes.Equal(expectedCipherDigest, actualCipherDigest[:]) {
+			return nil, errors.New("peer payload ciphertext digest does not match the signed descriptor")
+		}
+		plaintextTotal := int64(0)
+		if size, exists := envelope.Descriptor[kPlaintextSize]; exists {
+			if value, ok := asV2Uint(size); ok && value <= uint64(v2MaximumObjectBytes) {
+				plaintextTotal = int64(value)
+			}
+		}
+		if runtime.progress != nil {
+			runtime.progress.Phase("decrypting and verifying", plaintextTotal)
+		}
+		var observe func(int64, int64)
+		if runtime.progress != nil {
+			observe = runtime.progress.Set
+		}
+		plaintext, err = decryptV2PayloadObserved(payloadCiphertext, runtime.identity, v2MaximumObjectBytes, plaintextTotal, observe)
+		if err != nil {
 			return nil, err
+		}
+		plainDigest = sha256.Sum256(plaintext)
+		expectedPlainDigest, _ := envelope.Descriptor[kPayloadHash].([]byte)
+		if !bytes.Equal(expectedPlainDigest, plainDigest[:]) {
+			return nil, errors.New("peer plaintext digest does not match the signed descriptor")
+		}
+		if size, exists := envelope.Descriptor[kPlaintextSize]; exists {
+			value, ok := asV2Uint(size)
+			if !ok || value != uint64(len(plaintext)) {
+				return nil, errors.New("peer plaintext size does not match the signed descriptor")
+			}
+		}
+		transferDir := filepath.Join(runtime.paths.StateDir, "transfers", runtime.state.RelationshipID)
+		if err := os.MkdirAll(transferDir, 0o700); err != nil {
+			return nil, err
+		}
+		durableOutput = filepath.Join(transferDir, digestString)
+		if !v2ExistingOutputMatches(durableOutput, plainDigest[:]) {
+			if _, statErr := os.Lstat(durableOutput); statErr == nil {
+				return nil, errors.New("durable peer output conflicts with the signed delivery")
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return nil, statErr
+			} else if err := atomicWriteV2File(durableOutput, plaintext, 0o600); err != nil {
+				return nil, err
+			}
+		}
+		transfer, resume = runtime.state.InboundTransfers[digestString]
+		if resume {
+			if transfer.Sequence != sequence || transfer.OutputDigest != hex.EncodeToString(plainDigest[:]) || transfer.PolicyDigest != hex.EncodeToString(policyDigest) {
+				return nil, errors.New("durable inbound transfer state conflicts with the signed descriptor")
+			}
+		} else {
+			transfer = v2InboundTransfer{
+				EntryID:              hex.EncodeToString(delivery.ID),
+				Slot:                 hex.EncodeToString(delivery.Slot),
+				DescriptorDigest:     digestString,
+				Sequence:             sequence,
+				Phase:                "payload-verified",
+				TemporaryOutput:      durableOutput,
+				OutputDigest:         hex.EncodeToString(plainDigest[:]),
+				PolicyDigest:         hex.EncodeToString(policyDigest),
+				DescriptorCiphertext: v2Base64URL(descriptorCiphertext),
+				PlaintextPayload:     durableOutput,
+				ExpiresAt:            expiresAt,
+			}
+			runtime.state.InboundTransfers[digestString] = transfer
+			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+				return nil, err
+			}
 		}
 	}
 	committedOutput := durableOutput
@@ -1494,8 +2044,13 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		if err := validateV2CollectionNames(entries, names); err != nil {
 			return nil, err
 		}
-		if opts.interactive && !a.confirmV2CollectionExtraction(entries) {
-			return nil, errors.New("collection extraction cancelled")
+		if opts.interactive {
+			if runtime.progress != nil {
+				runtime.progress.Clear()
+			}
+			if !a.confirmV2CollectionExtraction(entries) {
+				return nil, errors.New("collection extraction cancelled")
+			}
 		}
 		destination := opts.outDir
 		if destination == "" {
@@ -1555,7 +2110,7 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 			case resume:
 				return nil, fmt.Errorf("existing output %s conflicts with the durable transfer", safeTerminalText(target))
 			case opts.onConflict == "overwrite":
-				if err := atomicWriteV2File(target, plaintext, 0o600); err != nil {
+				if err := atomicCopyV2File(target, durableOutput); err != nil {
 					return nil, err
 				}
 				committedOutput = target
@@ -1576,7 +2131,7 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return nil, err
 			}
-			if err := atomicWriteV2File(target, plaintext, 0o600); err != nil {
+			if err := atomicCopyV2File(target, durableOutput); err != nil {
 				return nil, err
 			}
 			committedOutput = target
@@ -1614,6 +2169,9 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		// This delivery is committed and acknowledged, so upkeep that fails must
 		// not fail it. Leaving the record's paths intact hands the removal back
 		// to the expiry pruner rather than losing track of plaintext on disk.
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		fmt.Fprintf(a.errOut, "WARNING: %v\n", discardErr)
 	}
 	if discarded {
@@ -1623,7 +2181,13 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		}
 	}
 	if err := runtime.flushPendingCompletions(ctx); err != nil {
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		fmt.Fprintf(a.errOut, "WARNING: output committed; atomic completion queued for automatic retry: %v\n", err)
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("completion", 0)
 	}
 	displayName, _ := envelope.Descriptor[kDisplayName].(string)
 	item := &v2ReceivedItem{
@@ -1650,6 +2214,9 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		// rather than being held for the report. The report moves to stderr in
 		// response, which keeps a piped receive yielding only the messages.
 		item.Outcome = "message"
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		if _, err := a.out.Write(plaintext); err != nil {
 			return nil, err
 		}
@@ -2348,35 +2915,53 @@ func (runtime *v2PeerRuntime) publishPeerRevocation(ctx context.Context, reason 
 	return runtime.flushPendingControlPublications(ctx)
 }
 
-func (a *app) cmdSync(args []string) error {
-	jsonOutput := false
-	alias := ""
+type v2SyncOptions struct {
+	alias    string
+	json     bool
+	progress v2ProgressFlags
+}
+
+func parseV2SyncOptions(args []string) (v2SyncOptions, error) {
+	opts := v2SyncOptions{}
 	for len(args) != 0 {
 		switch args[0] {
 		case "--json":
-			if err := markJSONOption(&jsonOutput); err != nil {
-				return err
+			if err := markJSONOption(&opts.json); err != nil {
+				return opts, err
+			}
+			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.progress.parse(args[0]); err != nil {
+				return opts, err
 			}
 			args = args[1:]
 		case "--url", "--doh-url", "--ech-mode":
-			return v2PeerNetworkOptionError(args[0])
+			return opts, v2PeerNetworkOptionError(args[0])
 		default:
 			if strings.HasPrefix(args[0], "-") {
-				return fatalError("Unknown sync option: " + args[0])
+				return opts, fatalError("Unknown sync option: " + args[0])
 			}
-			if alias != "" {
-				return errors.New("dud sync accepts at most one peer")
+			if opts.alias != "" {
+				return opts, errors.New("dud sync accepts at most one peer")
 			}
-			alias, args = args[0], args[1:]
+			opts.alias, args = args[0], args[1:]
 		}
+	}
+	return opts, nil
+}
+
+func (a *app) cmdSync(args []string) error {
+	opts, err := parseV2SyncOptions(args)
+	if err != nil {
+		return err
 	}
 	cfg, _, err := loadV2Config()
 	if err != nil {
 		return err
 	}
 	aliases := []string{}
-	if alias != "" {
-		aliases = append(aliases, alias)
+	if opts.alias != "" {
+		aliases = append(aliases, opts.alias)
 	} else {
 		for name, peer := range cfg.Peers {
 			if peer.Status == "active" {
@@ -2391,10 +2976,19 @@ func (a *app) cmdSync(args []string) error {
 	for _, name := range aliases {
 		result := map[string]any{"peer": name}
 		var status *v2DeliveryStatus
-		err := a.withV2Peer(name, 30*time.Second, func(runtime *v2PeerRuntime) error {
+		err := a.withV2Peer(name, 30*time.Second, func(runtime *v2PeerRuntime) (resultErr error) {
+			runtime.progress = a.newV2ProgressReporter(name, opts.json, opts.progress)
+			defer func() {
+				if resultErr != nil {
+					runtime.progress.Fail()
+				} else {
+					runtime.progress.Complete()
+				}
+			}()
+			runtime.progress.Phase("connecting", 0)
 			drainErr := runtime.boundedControlDrain(context.Background())
 			completionErr := runtime.flushPendingCompletions(context.Background())
-			deliveryErr := runtime.flushPendingGranularDeliveries(context.Background())
+			deliveryErr := runtime.flushPendingDeliveries(context.Background())
 			controlErr := runtime.flushPendingControlPublications(context.Background())
 			if drainErr != nil {
 				result["drain_error"] = drainErr.Error()
@@ -2427,7 +3021,7 @@ func (a *app) cmdSync(args []string) error {
 		results = append(results, result)
 		statuses = append(statuses, status)
 	}
-	if jsonOutput {
+	if opts.json {
 		if err := writeJSON(a.out, results); err != nil {
 			return err
 		}

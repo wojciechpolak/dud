@@ -4,13 +4,9 @@
 /**
  * Ordered, idempotent migrations for the self-hosted Node metadata database.
  *
- * Version 0 is the bookkeeping table; version 1 is the complete bootstrap, one
- * step rather than a chain of incremental ones, exactly like `migrations/d1`.
- *
- * The applier only runs versions above the highest one recorded, so editing a
- * version in place leaves an existing database on a schema the code does not
- * match. Editing version 1 means deleting the data directory; a schema change
- * that has to preserve data appends a version instead.
+ * Version 0 is the bookkeeping table and version 1 is the complete bootstrap.
+ * Every schema extension occupies a higher index. Applied entries are immutable
+ * because the applier runs only versions above the highest recorded index.
  */
 export const V2_SQLITE_MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);`,
@@ -116,6 +112,42 @@ export const V2_SQLITE_MIGRATIONS = [
   );
   CREATE INDEX IF NOT EXISTS expired_staged_body ON staged_bodies(expires_at);
   CREATE TABLE IF NOT EXISTS maintenance_leases (name TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);`,
+  `CREATE TABLE chunk_uploads (
+    id TEXT PRIMARY KEY, delivery_id TEXT NOT NULL UNIQUE,
+    capability_id TEXT NOT NULL REFERENCES capabilities(id),
+    total_length INTEGER NOT NULL CHECK(total_length > 0),
+    created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+    operation_id BLOB NOT NULL UNIQUE, operation_digest BLOB NOT NULL,
+    renewal_operation_id BLOB UNIQUE, renewal_operation_digest BLOB
+  );
+  CREATE INDEX active_chunk_upload ON chunk_uploads(capability_id, expires_at);
+  CREATE INDEX expired_chunk_upload ON chunk_uploads(expires_at, id);
+  CREATE TABLE chunk_upload_parts (
+    upload_id TEXT NOT NULL REFERENCES chunk_uploads(id) ON DELETE CASCADE,
+    part_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    length INTEGER NOT NULL CHECK(length > 0), digest BLOB NOT NULL,
+    body_key TEXT UNIQUE, received_at INTEGER,
+    operation_id BLOB UNIQUE, operation_digest BLOB,
+    PRIMARY KEY(upload_id, part_id), UNIQUE(upload_id, ordinal)
+  );`,
+  `ALTER TABLE chunk_uploads ADD COLUMN chain INTEGER NOT NULL DEFAULT 0 CHECK(chain >= 0);
+  ALTER TABLE chunk_uploads ADD COLUMN slot BLOB NOT NULL DEFAULT X'00000000000000000000000000000000';
+  ALTER TABLE chunk_uploads ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0 CHECK(epoch >= 0);`,
+  `ALTER TABLE chunk_uploads ADD COLUMN committed_at INTEGER;
+  ALTER TABLE deliveries ADD COLUMN authorization_chain INTEGER CHECK(authorization_chain >= 0);
+  CREATE UNIQUE INDEX chunk_upload_delivery_id ON chunk_uploads(delivery_id);
+  CREATE TABLE delivery_chunks (
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    part_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    length INTEGER NOT NULL CHECK(length > 0), digest BLOB NOT NULL,
+    body_key TEXT NOT NULL UNIQUE,
+    PRIMARY KEY(delivery_id, part_id), UNIQUE(delivery_id, ordinal)
+  );`,
+  `ALTER TABLE chunk_upload_parts ADD COLUMN write_token TEXT;
+  ALTER TABLE chunk_upload_parts ADD COLUMN write_expires_at INTEGER;
+  CREATE UNIQUE INDEX chunk_upload_part_write_token ON chunk_upload_parts(write_token);`,
+  `ALTER TABLE staged_bodies ADD COLUMN capability_id TEXT;
+  CREATE INDEX staged_body_capability_usage ON staged_bodies(capability_id, expires_at);`,
 ] as const;
 
 export interface V2SQLiteDatabase {

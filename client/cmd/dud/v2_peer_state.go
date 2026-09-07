@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	v2PairingStateVersion  = 4
-	v2DeliveryStateVersion = 9
-	v2ReplayHistoryLimit   = 4096
+	v2PairingStateVersion    = 4
+	v2DeliveryStateVersion   = 10
+	v2ReplayHistoryLimit     = 4096
+	v2ChunkCommitUnattempted = "unattempted"
+	v2ChunkCommitAmbiguous   = "ambiguous"
 )
 
 type v2PendingPairing struct {
@@ -98,6 +100,38 @@ type v2PendingGranularDelivery struct {
 	NextAttemptAt       uint64 `json:"next_attempt_at"`
 }
 
+type v2PendingChunkPart struct {
+	ID               string `json:"id"`
+	Path             string `json:"path"`
+	PlaintextLength  uint64 `json:"plaintext_length"`
+	CiphertextLength uint64 `json:"ciphertext_length"`
+	CiphertextHash   string `json:"ciphertext_hash"`
+	Uploaded         bool   `json:"uploaded"`
+}
+
+type v2PendingChunkDelivery struct {
+	CreateOperationID   string               `json:"create_operation_id"`
+	UploadID            string               `json:"upload_id,omitempty"`
+	RenewOperationID    string               `json:"renew_operation_id,omitempty"`
+	CommitOperationID   string               `json:"commit_operation_id"`
+	CommitState         string               `json:"commit_state"`
+	EncryptedDescriptor string               `json:"encrypted_descriptor"`
+	DataSlot            string               `json:"data_slot"`
+	SlotEpoch           uint64               `json:"slot_epoch"`
+	RequestedPolicy     string               `json:"requested_policy"`
+	DescriptorDigest    string               `json:"descriptor_digest"`
+	PreviousDigest      string               `json:"previous_digest"`
+	Sequence            uint64               `json:"sequence"`
+	ChunkSize           uint64               `json:"chunk_size"`
+	PlaintextLength     uint64               `json:"plaintext_length"`
+	PlaintextHash       string               `json:"plaintext_hash"`
+	Parts               []v2PendingChunkPart `json:"parts"`
+	LeaseExpiresAt      uint64               `json:"lease_expires_at,omitempty"`
+	CreatedAt           uint64               `json:"created_at"`
+	Attempts            uint64               `json:"attempts"`
+	NextAttemptAt       uint64               `json:"next_attempt_at"`
+}
+
 type v2PendingCompletion struct {
 	DeliveryID       string `json:"delivery_id"`
 	SourceSlot       string `json:"source_slot"`
@@ -134,19 +168,30 @@ type v2SentDelivery struct {
 }
 
 type v2InboundTransfer struct {
-	EntryID              string `json:"entry_id"`
-	Slot                 string `json:"slot"`
-	DescriptorDigest     string `json:"descriptor_digest"`
-	Sequence             uint64 `json:"sequence"`
-	Phase                string `json:"phase"`
-	TemporaryOutput      string `json:"temporary_output,omitempty"`
-	CommittedOutput      string `json:"committed_output,omitempty"`
-	OutputDigest         string `json:"output_digest,omitempty"`
-	PolicyDigest         string `json:"policy_digest"`
-	DescriptorCiphertext string `json:"descriptor_ciphertext,omitempty"`
-	PlaintextPayload     string `json:"plaintext_payload,omitempty"`
-	RejectionReason      string `json:"rejection_reason,omitempty"`
-	ExpiresAt            uint64 `json:"expires_at"`
+	EntryID              string               `json:"entry_id"`
+	Slot                 string               `json:"slot"`
+	DescriptorDigest     string               `json:"descriptor_digest"`
+	Sequence             uint64               `json:"sequence"`
+	Phase                string               `json:"phase"`
+	TemporaryOutput      string               `json:"temporary_output,omitempty"`
+	CommittedOutput      string               `json:"committed_output,omitempty"`
+	OutputDigest         string               `json:"output_digest,omitempty"`
+	PolicyDigest         string               `json:"policy_digest"`
+	DescriptorCiphertext string               `json:"descriptor_ciphertext,omitempty"`
+	PlaintextPayload     string               `json:"plaintext_payload,omitempty"`
+	ChunkSize            uint64               `json:"chunk_size,omitempty"`
+	PlaintextLength      uint64               `json:"plaintext_length,omitempty"`
+	Chunks               []v2InboundChunkPart `json:"chunks,omitempty"`
+	RejectionReason      string               `json:"rejection_reason,omitempty"`
+	ExpiresAt            uint64               `json:"expires_at"`
+}
+
+type v2InboundChunkPart struct {
+	ID               string `json:"id"`
+	Path             string `json:"path"`
+	CiphertextLength uint64 `json:"ciphertext_length"`
+	CiphertextHash   string `json:"ciphertext_hash"`
+	Downloaded       bool   `json:"downloaded"`
 }
 
 type v2PeerDeliveryState struct {
@@ -163,6 +208,7 @@ type v2PeerDeliveryState struct {
 	Chains                     map[string]*v2ChainState      `json:"chains"`
 	PendingControlPublications []v2PendingControlPublication `json:"pending_control_publications"`
 	PendingGranularDeliveries  []v2PendingGranularDelivery   `json:"pending_granular_deliveries"`
+	PendingChunkDeliveries     []v2PendingChunkDelivery      `json:"pending_chunk_deliveries,omitempty"`
 	PendingCompletions         []v2PendingCompletion         `json:"pending_completions"`
 	InboundTransfers           map[string]v2InboundTransfer  `json:"inbound_transfers"`
 	Sent                       map[string]v2SentDelivery     `json:"sent"`
@@ -318,6 +364,9 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 	if state.PendingGranularDeliveries == nil {
 		state.PendingGranularDeliveries = []v2PendingGranularDelivery{}
 	}
+	if state.PendingChunkDeliveries == nil {
+		state.PendingChunkDeliveries = []v2PendingChunkDelivery{}
+	}
 	if state.PendingCompletions == nil {
 		state.PendingCompletions = []v2PendingCompletion{}
 	}
@@ -355,6 +404,51 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 			return errors.New("pending granular delivery is invalid")
 		}
 	}
+	for _, delivery := range state.PendingChunkDeliveries {
+		createID, createErr := hex.DecodeString(delivery.CreateOperationID)
+		commitID, commitErr := hex.DecodeString(delivery.CommitOperationID)
+		slot, slotErr := hex.DecodeString(delivery.DataSlot)
+		descriptor, descriptorErr := decodeV2Base64URL(delivery.EncryptedDescriptor, -1)
+		policy, policyErr := decodeV2Base64URL(delivery.RequestedPolicy, -1)
+		digest, digestErr := hex.DecodeString(delivery.DescriptorDigest)
+		previousDigest, previousDigestErr := hex.DecodeString(delivery.PreviousDigest)
+		plaintextHash, plaintextHashErr := hex.DecodeString(delivery.PlaintextHash)
+		if createErr != nil || len(createID) != 16 || commitErr != nil || len(commitID) != 16 || slotErr != nil || len(slot) != 16 || descriptorErr != nil || len(descriptor) == 0 || len(descriptor) > v2MaxDescriptorBytes || policyErr != nil || len(policy) == 0 || digestErr != nil || len(digest) != 32 || previousDigestErr != nil || len(previousDigest) != 32 || plaintextHashErr != nil || len(plaintextHash) != 32 || delivery.SlotEpoch == 0 || delivery.Sequence == 0 || delivery.ChunkSize == 0 || delivery.ChunkSize > v2MaximumChunkedBytes || delivery.PlaintextLength == 0 || len(delivery.Parts) < 2 || len(delivery.Parts) > v2MaximumChunkCount || (delivery.CommitState != v2ChunkCommitUnattempted && delivery.CommitState != v2ChunkCommitAmbiguous) {
+			return errors.New("pending chunk delivery is invalid")
+		}
+		if delivery.UploadID != "" {
+			uploadID, uploadErr := hex.DecodeString(delivery.UploadID)
+			if uploadErr != nil || len(uploadID) != 16 || delivery.LeaseExpiresAt == 0 {
+				return errors.New("pending chunk delivery upload lease is invalid")
+			}
+		}
+		if delivery.RenewOperationID != "" {
+			renewID, renewErr := hex.DecodeString(delivery.RenewOperationID)
+			if renewErr != nil || len(renewID) != 16 || delivery.UploadID == "" {
+				return errors.New("pending chunk delivery renewal is invalid")
+			}
+		}
+		seen := map[string]bool{}
+		var plaintextTotal uint64
+		for _, part := range delivery.Parts {
+			id, idErr := hex.DecodeString(part.ID)
+			ciphertextHash, hashErr := hex.DecodeString(part.CiphertextHash)
+			if idErr != nil || len(id) != 16 || hashErr != nil || len(ciphertextHash) != 32 || seen[part.ID] || part.PlaintextLength == 0 || part.PlaintextLength > delivery.ChunkSize || part.CiphertextLength == 0 || part.CiphertextLength > v2MaximumChunkCiphertextBytes || !filepath.IsAbs(part.Path) {
+				return errors.New("pending chunk delivery part is invalid")
+			}
+			if info, statErr := os.Lstat(part.Path); statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || uint64(info.Size()) != part.CiphertextLength {
+				return errors.New("pending chunk delivery part file is invalid")
+			}
+			seen[part.ID] = true
+			if plaintextTotal > v2MaximumChunkedBytes-part.PlaintextLength {
+				return errors.New("pending chunk delivery plaintext length is invalid")
+			}
+			plaintextTotal += part.PlaintextLength
+		}
+		if plaintextTotal != delivery.PlaintextLength {
+			return errors.New("pending chunk delivery plaintext length is invalid")
+		}
+	}
 	for _, publication := range state.PendingControlPublications {
 		operationID, operationErr := hex.DecodeString(publication.OperationID)
 		slot, slotErr := hex.DecodeString(publication.ControlSlot)
@@ -376,6 +470,27 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 	}
 	if state.InboundTransfers == nil {
 		state.InboundTransfers = map[string]v2InboundTransfer{}
+	}
+	for digest, transfer := range state.InboundTransfers {
+		descriptorDigest, digestErr := hex.DecodeString(digest)
+		if digestErr != nil || len(descriptorDigest) != 32 || transfer.DescriptorDigest != digest {
+			return errors.New("inbound transfer descriptor identity is invalid")
+		}
+		if len(transfer.Chunks) == 0 {
+			continue
+		}
+		if !validV2ChunkSize(transfer.ChunkSize) || transfer.PlaintextLength == 0 || transfer.PlaintextLength > v2MaximumChunkedBytes || len(transfer.Chunks) < 2 || len(transfer.Chunks) > v2MaximumChunkCount {
+			return errors.New("inbound chunk transfer is invalid")
+		}
+		seen := map[string]bool{}
+		for _, part := range transfer.Chunks {
+			id, idErr := hex.DecodeString(part.ID)
+			partDigest, partDigestErr := hex.DecodeString(part.CiphertextHash)
+			if idErr != nil || len(id) != 16 || partDigestErr != nil || len(partDigest) != 32 || seen[part.ID] || part.CiphertextLength == 0 || part.CiphertextLength > v2MaximumChunkCiphertextBytes || !filepath.IsAbs(part.Path) {
+				return errors.New("inbound chunk transfer part is invalid")
+			}
+			seen[part.ID] = true
+		}
 	}
 	for _, name := range []string{"out:data", "out:control", "in:data", "in:control"} {
 		chain := state.Chains[name]
@@ -426,8 +541,30 @@ func loadV2PeerDeliveryState(paths v2Paths, relationshipID string) (*v2PeerDeliv
 	if err := json.Unmarshal(body, &state); err != nil {
 		return nil, fmt.Errorf("parse peer delivery state: %w", err)
 	}
+	migrated := state.Version == 9
+	if migrated {
+		for index := range state.PendingChunkDeliveries {
+			delivery := &state.PendingChunkDeliveries[index]
+			delivery.CommitState = v2ChunkCommitUnattempted
+			if delivery.UploadID != "" {
+				allUploaded := len(delivery.Parts) != 0
+				for _, part := range delivery.Parts {
+					allUploaded = allUploaded && part.Uploaded
+				}
+				if allUploaded {
+					delivery.CommitState = v2ChunkCommitAmbiguous
+				}
+			}
+		}
+		state.Version = v2DeliveryStateVersion
+	}
 	if err := validateV2PeerDeliveryState(&state, relationshipID); err != nil {
 		return nil, err
+	}
+	if migrated {
+		if err := writeV2PeerDeliveryState(paths, &state); err != nil {
+			return nil, err
+		}
 	}
 	return &state, nil
 }
@@ -477,6 +614,22 @@ func pruneV2ExpiredInboundTransfers(state *v2PeerDeliveryState, now uint64) (boo
 			paths[path] = true
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				problems = append(problems, fmt.Errorf("remove expired peer delivery payload %s: %w", digest, err))
+				retained = true
+			}
+		}
+		chunkDirectories := map[string]bool{}
+		for _, part := range transfer.Chunks {
+			for _, path := range []string{part.Path, part.Path + ".tmp"} {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					problems = append(problems, fmt.Errorf("remove expired peer delivery chunk %s: %w", digest, err))
+					retained = true
+				}
+			}
+			chunkDirectories[filepath.Dir(part.Path)] = true
+		}
+		for directory := range chunkDirectories {
+			if err := os.Remove(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
+				problems = append(problems, fmt.Errorf("remove expired peer delivery chunk directory %s: %w", digest, err))
 				retained = true
 			}
 		}
