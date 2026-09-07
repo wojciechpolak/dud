@@ -41,7 +41,7 @@ type v2PeerRuntime struct {
 	recipient      age.Recipient
 	origin         string
 	transport      v2Transport
-	progress       io.Writer
+	progress       *v2ProgressReporter
 	maxTTL         uint64
 }
 
@@ -55,6 +55,7 @@ type v2PeerSendOptions struct {
 	ttl             time.Duration
 	json            bool
 	verbose         bool
+	progress        v2ProgressFlags
 }
 
 type v2PeerReceiveOptions struct {
@@ -69,6 +70,7 @@ type v2PeerReceiveOptions struct {
 	interactive bool
 	json        bool
 	verbose     bool
+	progress    v2ProgressFlags
 }
 
 func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2PeerRuntime) error) error {
@@ -158,7 +160,6 @@ func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2
 		recipient:      recipient,
 		origin:         origin,
 		transport:      transport,
-		progress:       a.errOut,
 	}
 	if err := runtime.requirePeerFeatures(); err != nil {
 		return err
@@ -303,12 +304,21 @@ func (runtime *v2PeerRuntime) reissueCapabilities(ctx context.Context) error {
 }
 
 func encryptV2Payload(plaintext []byte, recipient age.Recipient) ([]byte, error) {
+	return encryptV2PayloadObserved(plaintext, recipient, nil)
+}
+
+func encryptV2PayloadObserved(plaintext []byte, recipient age.Recipient, observe func(int64, int64)) ([]byte, error) {
 	var ciphertext bytes.Buffer
 	writer, err := age.Encrypt(&ciphertext, recipient)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := writer.Write(plaintext); err != nil {
+	reader := io.Reader(bytes.NewReader(plaintext))
+	if observe != nil {
+		observe(0, int64(len(plaintext)))
+		reader = &v2ObservedReader{reader: reader, total: int64(len(plaintext)), observe: observe}
+	}
+	if _, err := io.Copy(writer, reader); err != nil {
 		return nil, err
 	}
 	if err := writer.Close(); err != nil {
@@ -318,11 +328,20 @@ func encryptV2Payload(plaintext []byte, recipient age.Recipient) ([]byte, error)
 }
 
 func decryptV2Payload(ciphertext []byte, identity age.Identity, maximum int64) ([]byte, error) {
+	return decryptV2PayloadObserved(ciphertext, identity, maximum, 0, nil)
+}
+
+func decryptV2PayloadObserved(ciphertext []byte, identity age.Identity, maximum, plaintextTotal int64, observe func(int64, int64)) ([]byte, error) {
 	reader, err := age.Decrypt(bytes.NewReader(ciphertext), identity)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt peer payload: %w", err)
 	}
-	plaintext, err := io.ReadAll(io.LimitReader(reader, maximum+1))
+	plaintextReader := io.Reader(reader)
+	if observe != nil {
+		observe(0, plaintextTotal)
+		plaintextReader = &v2ObservedReader{reader: plaintextReader, total: plaintextTotal, observe: observe}
+	}
+	plaintext, err := io.ReadAll(io.LimitReader(plaintextReader, maximum+1))
 	if err != nil {
 		return nil, err
 	}
@@ -376,6 +395,11 @@ func parseV2PeerSendOptions(args []string) (v2PeerSendOptions, error) {
 				return opts, err
 			}
 			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.progress.parse(args[0]); err != nil {
+				return opts, err
+			}
+			args = args[1:]
 		case "-v", "--verbose":
 			if err := markVerboseOption(&opts.verbose); err != nil {
 				return opts, err
@@ -407,6 +431,10 @@ func parseV2PeerSendOptions(args []string) (v2PeerSendOptions, error) {
 }
 
 func (a *app) readV2PeerSendPayload(opts v2PeerSendOptions) ([]byte, uint64, string, map[int]any, *uint64, error) {
+	return a.readV2PeerSendPayloadObserved(opts, nil)
+}
+
+func (a *app) readV2PeerSendPayloadObserved(opts v2PeerSendOptions, observe func(int64, int64)) ([]byte, uint64, string, map[int]any, *uint64, error) {
 	if opts.message != "" {
 		return []byte(opts.message), 1, opts.displayName, nil, nil, nil
 	}
@@ -465,9 +493,22 @@ func (a *app) readV2PeerSendPayload(opts v2PeerSendOptions) ([]byte, uint64, str
 	if info.Size() > v2MaximumObjectBytes {
 		return nil, 0, "", nil, nil, errors.New("peer plaintext exceeds the 100 MiB object limit")
 	}
-	body, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, 0, "", nil, nil, err
+	}
+	defer file.Close()
+	reader := io.Reader(file)
+	if observe != nil {
+		observe(0, info.Size())
+		reader = &v2ObservedReader{reader: reader, total: info.Size(), observe: observe}
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, v2MaximumObjectBytes+1))
+	if err != nil {
+		return nil, 0, "", nil, nil, err
+	}
+	if len(body) > v2MaximumObjectBytes {
+		return nil, 0, "", nil, nil, errors.New("peer plaintext exceeds the 100 MiB object limit")
 	}
 	name := opts.displayName
 	if name == "" {
@@ -646,6 +687,9 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 			return errors.New("queued granular delivery policy is not deterministic")
 		}
 		publish := func(at time.Time) error {
+			if runtime.progress != nil {
+				runtime.progress.Phase("connecting", 0)
+			}
 			writeSecret, secretErr := v2CapabilitySecret(runtime.state, v2OutboundDirection(runtime.state.Role), "write")
 			if secretErr != nil {
 				return secretErr
@@ -670,7 +714,8 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 			if processErr != nil {
 				return processErr
 			}
-			published, publishErr := publishV2GranularDelivery(
+			uploading := false
+			published, publishErr := publishV2GranularDeliveryObserved(
 				ctx,
 				runtime.transport,
 				runtime.origin,
@@ -681,12 +726,24 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 				dataProof,
 				controls,
 				processed,
+				func(transferred, total int64) {
+					if runtime.progress != nil {
+						if !uploading {
+							runtime.progress.Phase("uploading", total)
+							uploading = true
+						}
+						runtime.progress.Set(transferred, total)
+					}
+				},
 			)
 			if publishErr != nil {
 				return publishErr
 			}
 			if policyErr := validateV2EffectivePolicy(policy, published.EffectivePolicy); policyErr != nil {
 				return policyErr
+			}
+			if runtime.progress != nil {
+				runtime.progress.Phase("verification and publication", 0)
 			}
 			return runtime.applyV2GranularControlResponse(published.ControlEvents)
 		}
@@ -794,6 +851,10 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 		if err != nil {
 			return err
 		}
+		var uploadTotal int64
+		for _, part := range queued.Parts {
+			uploadTotal += int64(part.CiphertextLength)
+		}
 		slot, slotErr := hex.DecodeString(queued.DataSlot)
 		createOperationID, createErr := hex.DecodeString(queued.CreateOperationID)
 		commitOperationID, commitErr := hex.DecodeString(queued.CommitOperationID)
@@ -812,6 +873,9 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 		}
 
 		if queued.UploadID == "" {
+			if runtime.progress != nil {
+				runtime.progress.Phase("connecting", 0)
+			}
 			proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
 			if proofErr != nil {
 				return proofErr
@@ -859,6 +923,9 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 			continue
 		}
 		if queued.CommitState != v2ChunkCommitAmbiguous && queued.LeaseExpiresAt <= uint64(time.Now().Add(5*time.Minute).Unix()) {
+			if runtime.progress != nil {
+				runtime.progress.Phase("connecting", 0)
+			}
 			if queued.RenewOperationID == "" {
 				renewID, randomErr := randomV2Bytes(16)
 				if randomErr != nil {
@@ -889,6 +956,15 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 				return err
 			}
 		}
+		var uploadedBase int64
+		for _, part := range queued.Parts {
+			if part.Uploaded {
+				uploadedBase += int64(part.CiphertextLength)
+			}
+		}
+		if runtime.progress != nil {
+			runtime.progress.PhaseResumed("uploading", uploadedBase, uploadTotal)
+		}
 		for index := range queued.Parts {
 			if queued.Parts[index].Uploaded {
 				continue
@@ -899,7 +975,12 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 			}
 			proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
 			if proofErr == nil {
-				proofErr = putV2ChunkUploadPart(ctx, runtime.transport, runtime.origin, uploadID, parts[index], file, proof)
+				base := uploadedBase
+				proofErr = putV2ChunkUploadPartObserved(ctx, runtime.transport, runtime.origin, uploadID, parts[index], file, proof, func(transferred, _ int64) {
+					if runtime.progress != nil {
+						runtime.progress.Set(base+transferred, uploadTotal)
+					}
+				})
 			}
 			closeErr := file.Close()
 			if proofErr != nil {
@@ -909,8 +990,9 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 				return closeErr
 			}
 			queued.Parts[index].Uploaded = true
+			uploadedBase += int64(queued.Parts[index].CiphertextLength)
 			if runtime.progress != nil {
-				fmt.Fprintf(runtime.progress, "Uploaded chunk %d/%d (%d bytes).\n", index+1, len(queued.Parts), queued.Parts[index].CiphertextLength)
+				runtime.progress.Set(uploadedBase, uploadTotal)
 			}
 			runtime.state.PendingChunkDeliveries[0] = queued
 			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
@@ -919,6 +1001,9 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 		}
 
 		{
+			if runtime.progress != nil {
+				runtime.progress.Phase("verification and publication", 0)
+			}
 			proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
 			if proofErr != nil {
 				return proofErr
@@ -1057,12 +1142,21 @@ func (a *app) cmdPeerSend(args []string) error {
 	if err := preflightV2PeerSendPayload(opts); err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.alias, 2*time.Minute, func(runtime *v2PeerRuntime) error {
+	return a.withV2Peer(opts.alias, 2*time.Minute, func(runtime *v2PeerRuntime) (resultErr error) {
+		runtime.progress = a.newV2ProgressReporter(opts.alias, opts.json, opts.progress)
+		defer func() {
+			if resultErr != nil {
+				runtime.progress.Fail()
+			} else {
+				runtime.progress.Complete()
+			}
+		}()
 		ctx := context.Background()
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
 		if len(runtime.state.PendingGranularDeliveries) != 0 || len(runtime.state.PendingChunkDeliveries) != 0 {
+			runtime.progress.Phase("connecting", 0)
 			if err := runtime.flushPendingDeliveries(ctx); err != nil {
 				return fmt.Errorf("retry pending atomic delivery: %w", err)
 			}
@@ -1106,7 +1200,15 @@ func (a *app) cmdPeerSend(args []string) error {
 			}
 		}
 		if plaintextSource == nil {
-			plaintext, payloadType, displayName, typeMetadata, archiveFormat, err = a.readV2PeerSendPayload(opts)
+			runtime.progress.Phase("preparing", 0)
+			reading := false
+			plaintext, payloadType, displayName, typeMetadata, archiveFormat, err = a.readV2PeerSendPayloadObserved(opts, func(transferred, total int64) {
+				if !reading {
+					runtime.progress.Phase("preparing", total)
+					reading = true
+				}
+				runtime.progress.Set(transferred, total)
+			})
 			if err != nil {
 				return err
 			}
@@ -1121,6 +1223,7 @@ func (a *app) cmdPeerSend(args []string) error {
 			}
 		}()
 		if runtime.supportsChunkedTransfers() && plaintextSize > chunkSize {
+			runtime.progress.Phase("preparing and encrypting", int64(plaintextSize))
 			available, availableErr := v2AvailableBytes(runtime.paths.StateDir)
 			if availableErr != nil {
 				return availableErr
@@ -1139,12 +1242,13 @@ func (a *app) cmdPeerSend(args []string) error {
 			if source == nil {
 				source = bytes.NewReader(plaintext)
 			}
-			chunkSpool, err = spoolV2ChunkedPayload(source, spoolDir, runtime.recipient, chunkSize)
+			chunkSpool, err = spoolV2ChunkedPayloadObserved(source, spoolDir, runtime.recipient, chunkSize, plaintextSize, runtime.progress.Set)
 			if err != nil {
 				return err
 			}
 		} else {
-			payloadCiphertext, err = encryptV2Payload(plaintext, runtime.recipient)
+			runtime.progress.Phase("preparing and encrypting", int64(plaintextSize))
+			payloadCiphertext, err = encryptV2PayloadObserved(plaintext, runtime.recipient, runtime.progress.Set)
 			if err != nil {
 				return err
 			}
@@ -1311,6 +1415,8 @@ func (a *app) cmdPeerSend(args []string) error {
 		if err := runtime.flushPendingDeliveries(ctx); err != nil {
 			return fmt.Errorf("delivery committed locally and will retry publication: %w", err)
 		}
+		runtime.progress.Phase("publication", 0)
+		runtime.progress.Complete()
 		status := v2DeliveryStatusOf(runtime.state)
 		if opts.json {
 			return writeJSON(a.out, status.merge(map[string]any{
@@ -1413,6 +1519,11 @@ func parseV2PeerReceiveOptions(args []string) (v2PeerReceiveOptions, error) {
 				return opts, err
 			}
 			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.progress.parse(args[0]); err != nil {
+				return opts, err
+			}
+			args = args[1:]
 		case "-v", "--verbose":
 			if err := markVerboseOption(&opts.verbose); err != nil {
 				return opts, err
@@ -1467,7 +1578,15 @@ func (a *app) cmdPeerReceive(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.alias, 2*time.Minute+opts.wait, func(runtime *v2PeerRuntime) error {
+	return a.withV2Peer(opts.alias, 2*time.Minute+opts.wait, func(runtime *v2PeerRuntime) (resultErr error) {
+		runtime.progress = a.newV2ProgressReporter(opts.alias, opts.json, opts.progress)
+		defer func() {
+			if resultErr != nil {
+				runtime.progress.Fail()
+			} else {
+				runtime.progress.Complete()
+			}
+		}()
 		ctx := context.Background()
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
@@ -1478,6 +1597,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 			}
 		}
 		if opts.id != "" {
+			runtime.progress.Stop()
 			return runtime.exportCommittedTransfer(a, opts)
 		}
 		// One invocation drains the whole queue. The server hands back the
@@ -1536,6 +1656,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 			case <-timer.C:
 			}
 		}
+		runtime.progress.Complete()
 		return a.renderV2ReceiveReport(opts, drained, stop, v2DeliveryStatusOf(runtime.state))
 	})
 }
@@ -1546,6 +1667,9 @@ func (a *app) cmdPeerReceive(args []string) error {
 // caller that drains has to tell "nothing waiting" apart from "waiting, but not
 // applicable" instead of polling the same entry forever.
 func (runtime *v2PeerRuntime) receiveAvailable(ctx context.Context, a *app, opts v2PeerReceiveOptions) (*v2ReceivedItem, bool, error) {
+	if runtime.progress != nil {
+		runtime.progress.Phase("connecting", 0)
+	}
 	now := time.Now()
 	dataProofs, err := runtime.granularDataQueryProofs(now)
 	if err != nil {
@@ -1559,9 +1683,21 @@ func (runtime *v2PeerRuntime) receiveAvailable(ctx context.Context, a *app, opts
 	if err != nil {
 		return nil, false, err
 	}
-	response, err := queryV2GranularInbox(ctx, runtime.transport, runtime.origin, dataProofs, controlProofs, processed)
+	downloading := false
+	response, err := queryV2GranularInboxObserved(ctx, runtime.transport, runtime.origin, dataProofs, controlProofs, processed, func(transferred, total int64) {
+		if runtime.progress != nil {
+			if !downloading {
+				runtime.progress.Phase("downloading", total)
+				downloading = true
+			}
+			runtime.progress.Set(transferred, total)
+		}
+	})
 	if err != nil {
 		return nil, false, err
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("verification", 0)
 	}
 	rawControls, controlsOK := response.Header[2].([]any)
 	if !controlsOK {
@@ -1819,7 +1955,20 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		if !bytes.Equal(expectedCipherDigest, actualCipherDigest[:]) {
 			return nil, errors.New("peer payload ciphertext digest does not match the signed descriptor")
 		}
-		plaintext, err = decryptV2Payload(payloadCiphertext, runtime.identity, v2MaximumObjectBytes)
+		plaintextTotal := int64(0)
+		if size, exists := envelope.Descriptor[kPlaintextSize]; exists {
+			if value, ok := asV2Uint(size); ok && value <= uint64(v2MaximumObjectBytes) {
+				plaintextTotal = int64(value)
+			}
+		}
+		if runtime.progress != nil {
+			runtime.progress.Phase("decrypting and verifying", plaintextTotal)
+		}
+		var observe func(int64, int64)
+		if runtime.progress != nil {
+			observe = runtime.progress.Set
+		}
+		plaintext, err = decryptV2PayloadObserved(payloadCiphertext, runtime.identity, v2MaximumObjectBytes, plaintextTotal, observe)
 		if err != nil {
 			return nil, err
 		}
@@ -1895,8 +2044,13 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		if err := validateV2CollectionNames(entries, names); err != nil {
 			return nil, err
 		}
-		if opts.interactive && !a.confirmV2CollectionExtraction(entries) {
-			return nil, errors.New("collection extraction cancelled")
+		if opts.interactive {
+			if runtime.progress != nil {
+				runtime.progress.Clear()
+			}
+			if !a.confirmV2CollectionExtraction(entries) {
+				return nil, errors.New("collection extraction cancelled")
+			}
 		}
 		destination := opts.outDir
 		if destination == "" {
@@ -2015,6 +2169,9 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		// This delivery is committed and acknowledged, so upkeep that fails must
 		// not fail it. Leaving the record's paths intact hands the removal back
 		// to the expiry pruner rather than losing track of plaintext on disk.
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		fmt.Fprintf(a.errOut, "WARNING: %v\n", discardErr)
 	}
 	if discarded {
@@ -2024,7 +2181,13 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		}
 	}
 	if err := runtime.flushPendingCompletions(ctx); err != nil {
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		fmt.Fprintf(a.errOut, "WARNING: output committed; atomic completion queued for automatic retry: %v\n", err)
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("completion", 0)
 	}
 	displayName, _ := envelope.Descriptor[kDisplayName].(string)
 	item := &v2ReceivedItem{
@@ -2051,6 +2214,9 @@ func (runtime *v2PeerRuntime) applyV2GranularDataDelivery(ctx context.Context, a
 		// rather than being held for the report. The report moves to stderr in
 		// response, which keeps a piped receive yielding only the messages.
 		item.Outcome = "message"
+		if runtime.progress != nil {
+			runtime.progress.Clear()
+		}
 		if _, err := a.out.Write(plaintext); err != nil {
 			return nil, err
 		}
@@ -2749,35 +2915,53 @@ func (runtime *v2PeerRuntime) publishPeerRevocation(ctx context.Context, reason 
 	return runtime.flushPendingControlPublications(ctx)
 }
 
-func (a *app) cmdSync(args []string) error {
-	jsonOutput := false
-	alias := ""
+type v2SyncOptions struct {
+	alias    string
+	json     bool
+	progress v2ProgressFlags
+}
+
+func parseV2SyncOptions(args []string) (v2SyncOptions, error) {
+	opts := v2SyncOptions{}
 	for len(args) != 0 {
 		switch args[0] {
 		case "--json":
-			if err := markJSONOption(&jsonOutput); err != nil {
-				return err
+			if err := markJSONOption(&opts.json); err != nil {
+				return opts, err
+			}
+			args = args[1:]
+		case "--progress", "--no-progress":
+			if err := opts.progress.parse(args[0]); err != nil {
+				return opts, err
 			}
 			args = args[1:]
 		case "--url", "--doh-url", "--ech-mode":
-			return v2PeerNetworkOptionError(args[0])
+			return opts, v2PeerNetworkOptionError(args[0])
 		default:
 			if strings.HasPrefix(args[0], "-") {
-				return fatalError("Unknown sync option: " + args[0])
+				return opts, fatalError("Unknown sync option: " + args[0])
 			}
-			if alias != "" {
-				return errors.New("dud sync accepts at most one peer")
+			if opts.alias != "" {
+				return opts, errors.New("dud sync accepts at most one peer")
 			}
-			alias, args = args[0], args[1:]
+			opts.alias, args = args[0], args[1:]
 		}
+	}
+	return opts, nil
+}
+
+func (a *app) cmdSync(args []string) error {
+	opts, err := parseV2SyncOptions(args)
+	if err != nil {
+		return err
 	}
 	cfg, _, err := loadV2Config()
 	if err != nil {
 		return err
 	}
 	aliases := []string{}
-	if alias != "" {
-		aliases = append(aliases, alias)
+	if opts.alias != "" {
+		aliases = append(aliases, opts.alias)
 	} else {
 		for name, peer := range cfg.Peers {
 			if peer.Status == "active" {
@@ -2792,7 +2976,16 @@ func (a *app) cmdSync(args []string) error {
 	for _, name := range aliases {
 		result := map[string]any{"peer": name}
 		var status *v2DeliveryStatus
-		err := a.withV2Peer(name, 30*time.Second, func(runtime *v2PeerRuntime) error {
+		err := a.withV2Peer(name, 30*time.Second, func(runtime *v2PeerRuntime) (resultErr error) {
+			runtime.progress = a.newV2ProgressReporter(name, opts.json, opts.progress)
+			defer func() {
+				if resultErr != nil {
+					runtime.progress.Fail()
+				} else {
+					runtime.progress.Complete()
+				}
+			}()
+			runtime.progress.Phase("connecting", 0)
 			drainErr := runtime.boundedControlDrain(context.Background())
 			completionErr := runtime.flushPendingCompletions(context.Background())
 			deliveryErr := runtime.flushPendingDeliveries(context.Background())
@@ -2828,7 +3021,7 @@ func (a *app) cmdSync(args []string) error {
 		results = append(results, result)
 		statuses = append(statuses, status)
 	}
-	if jsonOutput {
+	if opts.json {
 		if err := writeJSON(a.out, results); err != nil {
 			return err
 		}

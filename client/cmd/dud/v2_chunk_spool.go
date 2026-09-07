@@ -67,6 +67,10 @@ func removeV2TemporaryChunk(path string, cause error) error {
 }
 
 func spoolV2ChunkedPayload(source io.Reader, spoolDir string, recipient age.Recipient, chunkSize uint64) (_ *v2ChunkSpool, resultErr error) {
+	return spoolV2ChunkedPayloadObserved(source, spoolDir, recipient, chunkSize, 0, nil)
+}
+
+func spoolV2ChunkedPayloadObserved(source io.Reader, spoolDir string, recipient age.Recipient, chunkSize, plaintextTotal uint64, observe func(int64, int64)) (_ *v2ChunkSpool, resultErr error) {
 	if source == nil || recipient == nil {
 		return nil, errors.New("chunk spool source and recipient are required")
 	}
@@ -86,7 +90,12 @@ func spoolV2ChunkedPayload(source io.Reader, spoolDir string, recipient age.Reci
 			resultErr = errors.Join(resultErr, removeV2SpooledChunks(spool.Chunks))
 		}
 	}()
-	buffered := bufio.NewReaderSize(source, 64*1024)
+	observedSource := source
+	if observe != nil {
+		observe(0, int64(plaintextTotal))
+		observedSource = &v2ObservedReader{reader: source, total: int64(plaintextTotal), observe: observe}
+	}
+	buffered := bufio.NewReaderSize(observedSource, 64*1024)
 	plaintextHash := sha256.New()
 	copyBuffer := make([]byte, 64*1024)
 	for {

@@ -256,6 +256,10 @@ func encodeV2GranularInboxRequest(origin string, dataProofs, controlProofs []v2G
 }
 
 func queryV2GranularInbox(ctx context.Context, transport v2Transport, origin string, dataProofs, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte) (*v2GranularInboxResponse, error) {
+	return queryV2GranularInboxObserved(ctx, transport, origin, dataProofs, controlProofs, processedControlIDs, nil)
+}
+
+func queryV2GranularInboxObserved(ctx context.Context, transport v2Transport, origin string, dataProofs, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte, observe func(int64, int64)) (*v2GranularInboxResponse, error) {
 	body, err := encodeV2GranularInboxRequest(origin, dataProofs, controlProofs, processedControlIDs)
 	if err != nil {
 		return nil, err
@@ -271,6 +275,7 @@ func queryV2GranularInbox(ctx context.Context, transport v2Transport, origin str
 		},
 		Body:             body,
 		MaxResponseBytes: v2GranularFramePrefixBytes + v2GranularMaxHeaderBytes + v2GranularMaxPayloadBytes,
+		ObserveDownload:  observe,
 	})
 	if err != nil {
 		return nil, err
@@ -488,6 +493,10 @@ func encodeV2GranularDeliveryRequest(origin string, operationID, descriptor []by
 }
 
 func publishV2GranularDelivery(ctx context.Context, transport v2Transport, origin string, operationID, descriptor []byte, policy map[int]any, payload []byte, dataProof v2GranularSlotProofInput, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte) (*v2GranularDeliveryResponse, error) {
+	return publishV2GranularDeliveryObserved(ctx, transport, origin, operationID, descriptor, policy, payload, dataProof, controlProofs, processedControlIDs, nil)
+}
+
+func publishV2GranularDeliveryObserved(ctx context.Context, transport v2Transport, origin string, operationID, descriptor []byte, policy map[int]any, payload []byte, dataProof v2GranularSlotProofInput, controlProofs []v2GranularSlotProofInput, processedControlIDs [][]byte, observe func(int64, int64)) (*v2GranularDeliveryResponse, error) {
 	frame, err := encodeV2GranularDeliveryRequest(origin, operationID, descriptor, policy, payload, dataProof, controlProofs, processedControlIDs)
 	if err != nil {
 		return nil, err
@@ -506,6 +515,7 @@ func publishV2GranularDelivery(ctx context.Context, transport v2Transport, origi
 		Headers:          headers,
 		Body:             frame,
 		MaxResponseBytes: v2MaxDescriptorBytes,
+		ObserveUpload:    observe,
 	})
 	if err != nil {
 		return nil, err

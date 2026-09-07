@@ -17,9 +17,16 @@ and this project follows
 - Resume downloads from verified encrypted chunks when repeating
   `dud receive PEER`. The receiver verifies the complete plaintext and installs
   the output atomically before advancing its receive watermark.
-- Report chunk progress on stderr and resumable transfers with descriptor
-  digests and bytes remaining in `dud peer show`, `dud doctor`, and JSON output.
-  Add `dud peer abandon PEER --id DIGEST --yes` to discard a saved transfer.
+- Show live progress on stderr for peer `send`, `receive`, `sync`, and Git
+  push/fetch. This covers single payloads, work within resumable chunks,
+  verified reusable chunks, and queued retries. Terminals enable progress by
+  default; `--progress` forces newline-delimited output and `--no-progress`
+  disables it. Updates report the phase, encoded bytes, fixed-width percentage,
+  rate, ETA, and elapsed time without changing JSON or stdout results. Dead drop
+  commands keep their existing output.
+- Report resumable transfers with descriptor digests and bytes remaining in
+  `dud peer show`, `dud doctor`, and JSON output. Add
+  `dud peer abandon PEER --id DIGEST --yes` to discard a saved transfer.
 - Add durable upload leases, chunk storage, retry-safe commits, and cleanup
   across the memory, SQLite/filesystem, and D1/R2 backends. Uploads reserve
   their full ciphertext size and stay out of the inbox until commit.

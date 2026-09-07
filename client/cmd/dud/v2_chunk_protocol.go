@@ -154,6 +154,10 @@ func createV2ChunkUpload(ctx context.Context, transport v2Transport, origin stri
 }
 
 func putV2ChunkUploadPart(ctx context.Context, transport v2Transport, origin string, uploadID []byte, part v2ChunkManifestPart, body io.Reader, proof v2GranularSlotProofInput) error {
+	return putV2ChunkUploadPartObserved(ctx, transport, origin, uploadID, part, body, proof, nil)
+}
+
+func putV2ChunkUploadPartObserved(ctx context.Context, transport v2Transport, origin string, uploadID []byte, part v2ChunkManifestPart, body io.Reader, proof v2GranularSlotProofInput, observe func(int64, int64)) error {
 	if len(uploadID) != 16 || body == nil {
 		return errors.New("chunk upload part is invalid")
 	}
@@ -168,7 +172,7 @@ func putV2ChunkUploadPart(ctx context.Context, transport v2Transport, origin str
 	headers.Set("Content-Type", "application/octet-stream")
 	headers.Set("Content-Length", strconv.FormatUint(part.Length, 10))
 	headers.Set("DUD-Content-SHA256", hex.EncodeToString(part.Digest))
-	response, err := transport.Do(ctx, v2Request{Method: "PUT", Origin: origin, Path: path, Headers: headers, BodyStream: body, ContentLength: int64(part.Length), MaxResponseBytes: v2MaxDescriptorBytes})
+	response, err := transport.Do(ctx, v2Request{Method: "PUT", Origin: origin, Path: path, Headers: headers, BodyStream: body, ContentLength: int64(part.Length), MaxResponseBytes: v2MaxDescriptorBytes, ObserveUpload: observe})
 	if err != nil {
 		return err
 	}
@@ -317,6 +321,10 @@ func commitV2ChunkUpload(ctx context.Context, transport v2Transport, origin stri
 }
 
 func getV2DeliveryChunk(ctx context.Context, transport v2Transport, origin string, deliveryID []byte, part v2ChunkManifestPart, proof v2GranularSlotProofInput) (*v2ChunkStream, error) {
+	return getV2DeliveryChunkObserved(ctx, transport, origin, deliveryID, part, proof, nil)
+}
+
+func getV2DeliveryChunkObserved(ctx context.Context, transport v2Transport, origin string, deliveryID []byte, part v2ChunkManifestPart, proof v2GranularSlotProofInput, observe func(int64, int64)) (*v2ChunkStream, error) {
 	if len(deliveryID) != 16 || len(part.ID) != 16 || part.Length == 0 || len(part.Digest) != 32 {
 		return nil, errors.New("delivery chunk request is invalid")
 	}
@@ -325,7 +333,7 @@ func getV2DeliveryChunk(ctx context.Context, transport v2Transport, origin strin
 	if err != nil {
 		return nil, err
 	}
-	response, err := transport.Do(ctx, v2Request{Method: "GET", Origin: origin, Path: path, Headers: headers, StreamResponse: true})
+	response, err := transport.Do(ctx, v2Request{Method: "GET", Origin: origin, Path: path, Headers: headers, StreamResponse: true, ObserveDownload: observe})
 	if err != nil {
 		return nil, err
 	}

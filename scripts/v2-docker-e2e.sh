@@ -299,10 +299,12 @@ docker run -d --name "$CHUNK_SENDER" --network "$NETWORK" \
   -e DUD_CA_BUNDLE=/cert/root.crt \
   -v "$LAPTOP_STATE:/state" \
   -v "$ROOT_CERT:/cert/root.crt:ro" \
-  "$CLIENT_IMAGE" send desktop --file /state/resume-large.bin >/dev/null
+  "$CLIENT_IMAGE" send desktop --file /state/resume-large.bin --progress >/dev/null
 
 attempt=0
-while ! docker logs "$CHUNK_SENDER" 2>&1 | grep -q '^Uploaded chunk 1/4 '; do
+while ! docker exec "$CHUNK_SENDER" sh -c \
+  'grep -q '"'"'"uploaded"[[:space:]]*:[[:space:]]*true'"'"' /state/dud/default/state/deliveries/*.json &&
+   grep -q '"'"'"uploaded"[[:space:]]*:[[:space:]]*false'"'"' /state/dud/default/state/deliveries/*.json' 2>/dev/null; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 200 ]; then
     docker logs "$CHUNK_SENDER" >&2 || true
@@ -311,6 +313,11 @@ while ! docker logs "$CHUNK_SENDER" 2>&1 | grep -q '^Uploaded chunk 1/4 '; do
   fi
   sleep 0.05
 done
+docker logs "$CHUNK_SENDER" 2>&1 | grep -q '^desktop: uploading ' || {
+  docker logs "$CHUNK_SENDER" >&2 || true
+  echo "large peer send emitted no forced progress" >&2
+  exit 1
+}
 docker kill "$CHUNK_SENDER" >/dev/null
 docker wait "$CHUNK_SENDER" >/dev/null
 
@@ -324,8 +331,18 @@ docker run --rm --user 1000 --entrypoint /bin/sh \
 }
 docker rm "$CHUNK_SENDER" >/dev/null
 
-run_client "$LAPTOP_STATE" sync desktop
-run_client "$DESKTOP_STATE" receive laptop --wait 30s --out-dir /state/received
+RESUME_SYNC=$(run_client "$LAPTOP_STATE" sync desktop --progress 2>&1)
+printf '%s\n' "$RESUME_SYNC" | grep -q '^desktop: uploading .*MiB' || {
+  printf '%s\n' "$RESUME_SYNC" >&2
+  echo "resumed sync emitted no upload progress" >&2
+  exit 1
+}
+RESUME_RECEIVE=$(run_client "$DESKTOP_STATE" receive laptop --wait 30s --out-dir /state/received --progress 2>&1)
+printf '%s\n' "$RESUME_RECEIVE" | grep -q '^laptop: downloading .*MiB' || {
+  printf '%s\n' "$RESUME_RECEIVE" >&2
+  echo "resumed receive emitted no download progress" >&2
+  exit 1
+}
 docker run --rm --user 1000 --entrypoint /usr/bin/cmp \
   -v "$LAPTOP_STATE:/laptop:ro" \
   -v "$DESKTOP_STATE:/desktop:ro" \

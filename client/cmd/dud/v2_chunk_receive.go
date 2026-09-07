@@ -289,10 +289,23 @@ func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, deliv
 	if err != nil {
 		return "", resultDigest, v2InboundTransfer{}, resume, err
 	}
-	for index := range transfer.Chunks {
-		part := &transfer.Chunks[index]
+	var downloadTotal int64
+	reusable := make([]bool, len(transfer.Chunks))
+	var downloadedBase int64
+	for index, part := range transfer.Chunks {
+		downloadTotal += int64(part.CiphertextLength)
 		digest, _ := hex.DecodeString(part.CiphertextHash)
 		if verifyV2ChunkFile(part.Path, part.CiphertextLength, digest) {
+			reusable[index] = true
+			downloadedBase += int64(part.CiphertextLength)
+		}
+	}
+	if runtime.progress != nil {
+		runtime.progress.PhaseResumed("downloading", downloadedBase, downloadTotal)
+	}
+	for index := range transfer.Chunks {
+		part := &transfer.Chunks[index]
+		if reusable[index] {
 			if !part.Downloaded {
 				part.Downloaded = true
 				runtime.state.InboundTransfers[descriptorDigest] = transfer
@@ -309,7 +322,12 @@ func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, deliv
 		if err != nil {
 			return "", resultDigest, v2InboundTransfer{}, resume, err
 		}
-		stream, err := getV2DeliveryChunk(ctx, runtime.transport, runtime.origin, delivery.ID, delivery.Chunks[index], proof)
+		base := downloadedBase
+		stream, err := getV2DeliveryChunkObserved(ctx, runtime.transport, runtime.origin, delivery.ID, delivery.Chunks[index], proof, func(transferred, _ int64) {
+			if runtime.progress != nil {
+				runtime.progress.Set(base+transferred, downloadTotal)
+			}
+		})
 		if err != nil {
 			return "", resultDigest, v2InboundTransfer{}, resume, err
 		}
@@ -317,13 +335,17 @@ func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, deliv
 			return "", resultDigest, v2InboundTransfer{}, resume, err
 		}
 		part.Downloaded = true
+		downloadedBase += int64(part.CiphertextLength)
 		if runtime.progress != nil {
-			fmt.Fprintf(runtime.progress, "Downloaded chunk %d/%d (%d bytes).\n", index+1, len(transfer.Chunks), part.CiphertextLength)
+			runtime.progress.Set(downloadedBase, downloadTotal)
 		}
 		runtime.state.InboundTransfers[descriptorDigest] = transfer
 		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 			return "", resultDigest, v2InboundTransfer{}, resume, err
 		}
+	}
+	if runtime.progress != nil {
+		runtime.progress.Phase("verification and completion", 0)
 	}
 	if verifyV2ChunkFile(durableOutput, plaintextLength, plaintextHash) {
 		transfer.Phase = "payload-verified"

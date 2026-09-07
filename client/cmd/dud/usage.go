@@ -40,13 +40,13 @@ Peer commands (addressed by the local alias of a paired device):
   dud peer revoke NAME --yes [--json]
   dud peer remove NAME --yes [--json]
   dud peer enrollment-key [--json]
-  dud sync [PEER] [--json]
+  dud sync [PEER] [--progress | --no-progress] [--json]
   dud inbox [PEER] [--json]
-  dud send PEER (--file PATH ... | -m TEXT | --stdin) [--name NAME] [--ttl 168h] [--delete-after-read] [-v] [--json]
-  dud receive PEER [--out PATH | --out-dir DIR] [--wait DURATION] [--max N] [--on-conflict skip|refuse|overwrite] [--no-extract] [-v] [--json]
-  dud receive PEER --id DESCRIPTOR_DIGEST [--out PATH] [--on-conflict overwrite] [--json]
-  dud git push PEER [--branch NAME ... | --current] [--full | --incremental] [--ttl 168h] [-v] [--json]
-  dud git fetch PEER [--associate] [--allow-rewrite] [-v] [--json]
+  dud send PEER (--file PATH ... | -m TEXT | --stdin) [--name NAME] [--ttl 168h] [--delete-after-read] [--progress | --no-progress] [-v] [--json]
+  dud receive PEER [--out PATH | --out-dir DIR] [--wait DURATION] [--max N] [--on-conflict skip|refuse|overwrite] [--no-extract] [--progress | --no-progress] [-v] [--json]
+  dud receive PEER --id DESCRIPTOR_DIGEST [--out PATH] [--on-conflict overwrite] [--progress | --no-progress] [--json]
+  dud git push PEER [--branch NAME ... | --current] [--full | --incremental] [--ttl 168h] [--progress | --no-progress] [-v] [--json]
+  dud git fetch PEER [--associate] [--allow-rewrite] [--progress | --no-progress] [-v] [--json]
   dud git status [PEER] [--json]
 
 Peer receive:
@@ -75,6 +75,11 @@ Peer status reporting:
   A send returns after publishing. It does not wait for the peer. The peer signs
   an acknowledgement when it receives the delivery. 'dud sync PEER' collects
   that acknowledgement.
+
+Peer transfer progress:
+  Progress is shown on terminal stderr. --progress forces newline-delimited
+  updates when stderr is redirected. --no-progress disables progress without
+  suppressing warnings or results. --json disables automatic progress.
 
 Aliases:
   dud send, dud receive          a positional peer alias selects the peer
