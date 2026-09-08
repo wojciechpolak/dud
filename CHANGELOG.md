@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-08
+
 ### Added
 
 - Add `DUD_DROP_BASE_URL` and `DUD_PEER_BASE_URL` so each transfer mode can

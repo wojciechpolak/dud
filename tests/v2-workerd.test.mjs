@@ -100,7 +100,7 @@ async function startWorker(t) {
     d1Databases: { DB: 'dud-v2' },
     r2Buckets: ['FILES'],
     bindings: {
-      APP_VERSION: '2.1.0',
+      APP_VERSION: '2.2.0',
       DUD_DROP_ENABLED: 'true',
       DUD_DROP_SECRET: 'workerd-suite-v1-secret',
       DUD_PEER_ENABLED: 'true',
