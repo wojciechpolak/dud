@@ -13,7 +13,7 @@ import (
 const dropTestResponseLimit = 64 * 1024
 
 func (a *app) cmdTest(args []string) error {
-	targetURL := a.cfg.BaseURL + "/v1/test"
+	targetURL := a.cfg.DropBaseURL + "/v1/test"
 	jsonOutput := false
 	for len(args) > 0 {
 		switch args[0] {

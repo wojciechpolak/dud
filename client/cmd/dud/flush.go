@@ -20,7 +20,7 @@ type flushResponse struct {
 }
 
 func (a *app) cmdFlush(args []string) error {
-	baseURL := a.cfg.BaseURL
+	baseURL := a.cfg.DropBaseURL
 	jsonOutput := false
 	for len(args) > 0 {
 		switch args[0] {

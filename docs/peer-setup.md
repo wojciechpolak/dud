@@ -38,12 +38,12 @@ administration capability. `DUD_PEER_ADMIN_SECRET` and `v2-admin-capability` are
 reserved for actual server administration such as relationship revocation.
 
 A pairing code names a rendezvous, not a server. Each side reaches the origin
-its invocation resolves, so both must resolve the same one. `DUD_BASE_URL`
-selects the origin before the relationship exists. The origin used for pairing
-becomes the peer profile's pin and outranks that variable. To keep a separate
-identity for another deployment, use `DUD_PROFILE` (see
-[`client.md`](client.md#3-running-more-than-one-deployment)) rather than
-repointing the configuration this device already paired with.
+its invocation resolves, so both must resolve the same one. `DUD_PEER_BASE_URL`
+selects the origin before the relationship exists, with `DUD_BASE_URL` as its
+shared fallback. The origin used for pairing becomes the peer profile's pin and
+outranks both variables. To keep a separate identity for another deployment, use
+`DUD_PROFILE` (see [`client.md`](client.md#3-running-more-than-one-deployment))
+rather than repointing the configuration this device already paired with.
 
 ### Peer transfers need a public transport path
 
@@ -85,7 +85,7 @@ container:
 ```sh
 # Terminal 1 / desktop
 export DUD_PROFILE=desktop
-export DUD_BASE_URL=https://your-v2-host.example.com
+export DUD_PEER_BASE_URL=https://your-v2-host.example.com
 export DUD_ECH_MODE=hard
 
 dud init --device desktop
@@ -96,7 +96,7 @@ dud capabilities
 ```sh
 # Terminal 2 / laptop
 export DUD_PROFILE=laptop
-export DUD_BASE_URL=https://your-v2-host.example.com
+export DUD_PEER_BASE_URL=https://your-v2-host.example.com
 export DUD_ECH_MODE=hard
 
 dud init --device laptop

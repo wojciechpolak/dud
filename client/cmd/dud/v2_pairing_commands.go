@@ -79,7 +79,7 @@ func (a *app) cmdPeerInvite(args []string) error {
 	peer, exists := cfg.Peers[alias]
 	if !exists {
 		// An alias with no relationship pins nothing: copying the configuration
-		// into the peer layer here would make it outrank DUD_BASE_URL and
+		// into the peer layer here would make it outrank DUD_PEER_BASE_URL and
 		// DUD_ECH_MODE, which are the only way to invite against a deployment
 		// other than the one this configuration names.
 		peer = v2PeerProfile{

@@ -34,7 +34,7 @@ run_dud() {
     --add-host "doh.local.test:$DUD_DEMO_CADDY_IP" \
     -e DUD_HOME=/state/dud \
     -e "DUD_PROFILE=$DUD_PROFILE" \
-    -e DUD_BASE_URL=https://dud.local.test \
+    -e DUD_PEER_BASE_URL=https://dud.local.test \
     -e DUD_DOH_URL=https://doh.local.test/dns-query \
     -e DUD_ECH_MODE=off \
     -e "DUD_PEER_SECRET=$DUD_DEMO_ENROLLMENT_SECRET" \
@@ -81,7 +81,7 @@ spawn docker run --rm -it --network $env(DUD_DEMO_NETWORK) \
   --add-host doh.local.test:$env(DUD_DEMO_CADDY_IP) \
   -e DUD_HOME=/state/dud \
   -e DUD_PROFILE=$env(DUD_PROFILE) \
-  -e DUD_BASE_URL=https://dud.local.test \
+  -e DUD_PEER_BASE_URL=https://dud.local.test \
   -e DUD_DOH_URL=https://doh.local.test/dns-query \
   -e DUD_ECH_MODE=off \
   -e DUD_PEER_SECRET=$env(DUD_DEMO_ENROLLMENT_SECRET) \
@@ -106,7 +106,7 @@ exec docker run --rm \
   --add-host "doh.local.test:$DUD_DEMO_CADDY_IP" \
   -e DUD_HOME=/state/dud \
   -e "DUD_PROFILE=$DUD_PROFILE" \
-  -e DUD_BASE_URL=https://dud.local.test \
+  -e DUD_PEER_BASE_URL=https://dud.local.test \
   -e DUD_DOH_URL=https://doh.local.test/dns-query \
   -e DUD_ECH_MODE=off \
   -e "DUD_PEER_SECRET=$DUD_DEMO_ENROLLMENT_SECRET" \

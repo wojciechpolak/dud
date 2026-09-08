@@ -102,7 +102,7 @@ dud_docker_env_args() {
     args="$args $(dud_shell_quote -e) $(dud_shell_quote "$dud_pinned")"
   done
 
-  for name in DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO; do
+  for name in DUD_BASE_URL DUD_DROP_BASE_URL DUD_PEER_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO; do
     eval "value=\${$name-}"
     if [ -n "$value" ]; then
       if [ -n "$args" ]; then
@@ -802,7 +802,7 @@ dud() {
     dud_env_args="$dud_env_args $(_dud_shell_quote -e) $(_dud_shell_quote "$dud_pinned")"
   done
 
-  for name in DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO; do
+  for name in DUD_BASE_URL DUD_DROP_BASE_URL DUD_PEER_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO; do
     eval "value=\${$name-}"
     if [ -n "$value" ]; then
       if [ -n "$dud_env_args" ]; then

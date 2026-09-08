@@ -175,7 +175,7 @@ like.
 Once a deployment exists, point the client at it and confirm the transport:
 
 ```sh
-export DUD_BASE_URL=https://your-dud-host.example.com
+export DUD_DROP_BASE_URL=https://your-dud-host.example.com
 dud test
 ```
 

@@ -42,6 +42,7 @@ func TestV2NetworkOptionPrecedenceWalksEveryLayer(t *testing.T) {
 
 	// 1. The command line outranks every other layer.
 	t.Setenv("DUD_BASE_URL", "https://env.example.com")
+	t.Setenv("DUD_PEER_BASE_URL", "https://peer-env.example.com")
 	t.Setenv("DUD_DOH_URL", "https://dns.env.example.com/dns-query")
 	t.Setenv("DUD_ECH_MODE", "off")
 	settings, err := resolveV2Network(cfg, peer, cli)
@@ -74,11 +75,11 @@ func TestV2NetworkOptionPrecedenceWalksEveryLayer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if base, doh, ech := settings.values(); base != "https://env.example.com" ||
+	if base, doh, ech := settings.values(); base != "https://peer-env.example.com" ||
 		doh != "https://dns.env.example.com/dns-query" || ech != "off" {
 		t.Fatalf("environment layer = %q, %q, %q", base, doh, ech)
 	}
-	if settings.BaseURL.Source != v2NetworkSourceEnvironment {
+	if settings.BaseURL.Source != dudPeerBaseURLEnvironment {
 		t.Fatalf("environment source = %q", settings.BaseURL.Source)
 	}
 
@@ -140,6 +141,53 @@ func TestV2NetworkLayersMixIndependently(t *testing.T) {
 	}
 }
 
+func TestV2BaseURLEnvironmentPrecedenceAndIsolation(t *testing.T) {
+	clearV2NetworkEnvironment(t)
+	cfg := testV2NetworkConfig()
+	t.Setenv(dudBaseURLEnvironment, "https://shared.example.com")
+	t.Setenv(dudDropBaseURLEnvironment, "https://drop.example.com")
+	t.Setenv(dudPeerBaseURLEnvironment, "https://peer-env.example.com")
+
+	settings, err := resolveV2Network(cfg, nil, v2NetworkOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.BaseURL.Value != "https://peer-env.example.com" || settings.BaseURL.Source != dudPeerBaseURLEnvironment {
+		t.Fatalf("peer environment base URL = %#v", settings.BaseURL)
+	}
+	if settings.sources()["base_url"] != v2NetworkSourceEnvironment {
+		t.Fatalf("public base URL source = %v", settings.sources()["base_url"])
+	}
+
+	t.Setenv(dudPeerBaseURLEnvironment, "")
+	settings, err = resolveV2Network(cfg, nil, v2NetworkOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.BaseURL.Value != "https://shared.example.com" || settings.BaseURL.Source != dudBaseURLEnvironment {
+		t.Fatalf("shared environment fallback = %#v", settings.BaseURL)
+	}
+
+	t.Setenv(dudBaseURLEnvironment, "")
+	settings, err = resolveV2Network(cfg, nil, v2NetworkOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.BaseURL.Value != cfg.BaseURL || settings.BaseURL.Source != v2NetworkSourceConfig {
+		t.Fatalf("drop environment leaked into peer settings: %#v", settings.BaseURL)
+	}
+}
+
+func TestV2InvalidModeBaseURLWinsAndNamesItsVariable(t *testing.T) {
+	clearV2NetworkEnvironment(t)
+	t.Setenv(dudBaseURLEnvironment, "https://shared.example.com")
+	t.Setenv(dudPeerBaseURLEnvironment, "http://peer.example.com")
+	_, err := resolveV2Network(testV2NetworkConfig(), nil, v2NetworkOverrides{})
+	if err == nil || !strings.Contains(err.Error(), dudPeerBaseURLEnvironment) {
+		t.Fatalf("invalid peer base URL produced %v", err)
+	}
+}
+
 // A paired peer's transport is what its signed descriptors are bound to, so the
 // commands that carry no network options must ignore the ambient environment.
 func TestV2PeerCommandsUseThePinnedProfileOverTheEnvironment(t *testing.T) {
@@ -147,6 +195,8 @@ func TestV2PeerCommandsUseThePinnedProfileOverTheEnvironment(t *testing.T) {
 	cfg := testV2NetworkConfig()
 	peer := testV2NetworkPeer()
 	t.Setenv("DUD_BASE_URL", "https://env.example.com")
+	t.Setenv("DUD_PEER_BASE_URL", "https://peer-env.example.com")
+	t.Setenv("DUD_DROP_BASE_URL", "https://drop.example.com")
 	t.Setenv("DUD_DOH_URL", "https://dns.env.example.com/dns-query")
 	t.Setenv("DUD_ECH_MODE", "hard")
 	baseURL, dohURL, echMode, err := effectiveV2NetworkConfig(cfg, peer)
@@ -199,14 +249,14 @@ func TestV2NetworkReportsWhatTheProfilePinnedAndWhatItOverrode(t *testing.T) {
 
 	// A set variable the profile outranked is named, and a command-line
 	// override that beat the profile shows the pinned value it displaced.
-	t.Setenv("DUD_BASE_URL", "https://env.example.com")
+	t.Setenv("DUD_PEER_BASE_URL", "https://env.example.com")
 	t.Setenv("DUD_ECH_MODE", "hard")
 	settings, err = resolveV2Network(cfg, peer, v2NetworkOverrides{DOHURL: "https://dns.cli.example.com/dns-query"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if overridden := overriddenV2NetworkEnvironment(settings); len(overridden) != 2 ||
-		overridden[0] != "DUD_BASE_URL" || overridden[1] != "DUD_ECH_MODE" {
+		overridden[0] != "DUD_PEER_BASE_URL" || overridden[1] != "DUD_ECH_MODE" {
 		t.Fatalf("overridden environment = %v", overriddenV2NetworkEnvironment(settings))
 	}
 	report := &textReport{}
@@ -219,7 +269,7 @@ func TestV2NetworkReportsWhatTheProfilePinnedAndWhatItOverrode(t *testing.T) {
 	if strings.Contains(rendered, "pinned url") || strings.Contains(rendered, "pinned ech") {
 		t.Fatalf("rendered a pinned row for a value that did not diverge: %q", rendered)
 	}
-	if !strings.Contains(rendered, "DUD_BASE_URL, DUD_ECH_MODE set in the environment") {
+	if !strings.Contains(rendered, "DUD_PEER_BASE_URL, DUD_ECH_MODE set in the environment") {
 		t.Fatalf("overridden environment note missing from %q", rendered)
 	}
 }
@@ -276,6 +326,7 @@ func TestV2NetworkProvenanceNamesEveryLayerAndOmitsUnknownOnes(t *testing.T) {
 	}{
 		{v2NetworkSourceDefault, v2NetworkSourceDefault, " (target from the compiled default, ECH mode from the compiled default)"},
 		{v2NetworkSourceEnvironment, v2NetworkSourceEnvironment, " (target from DUD_BASE_URL, ECH mode from DUD_ECH_MODE)"},
+		{dudPeerBaseURLEnvironment, v2NetworkSourceEnvironment, " (target from DUD_PEER_BASE_URL, ECH mode from DUD_ECH_MODE)"},
 		{v2NetworkSourcePeer, v2NetworkSourceConfig, " (target from the peer profile, ECH mode from the local configuration)"},
 		{v2NetworkSourceCLI, "", " (target from --url)"},
 		{"", "", ""},
@@ -365,7 +416,7 @@ func TestV2DoctorSeparatesTheGlobalEnvironmentFromPinnedPeers(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DUD_BASE_URL", "https://env.example.com")
+	t.Setenv("DUD_PEER_BASE_URL", "https://env.example.com")
 
 	report, code, _ := runDoctorJSON(t)
 	if code != 0 {
@@ -402,9 +453,9 @@ func TestV2DoctorSeparatesTheGlobalEnvironmentFromPinnedPeers(t *testing.T) {
 		t.Fatalf("doctor code = %d", code)
 	}
 	for _, want := range []string{
-		"url        https://env.example.com       (environment)",
+		"url        https://env.example.com       (DUD_PEER_BASE_URL)",
 		"url        https://peer.example.com      (peer)",
-		"Note: DUD_BASE_URL set in the environment, but this peer pins its own",
+		"Note: DUD_PEER_BASE_URL set in the environment, but this peer pins its own",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("doctor text omitted %q: %s", want, stdout.String())

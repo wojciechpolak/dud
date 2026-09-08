@@ -57,13 +57,15 @@ func TestRemoveAllTempFilesDeletesRegisteredFiles(t *testing.T) {
 
 func TestLoadConfigDefaults(t *testing.T) {
 	t.Setenv("DUD_BASE_URL", "")
+	t.Setenv("DUD_DROP_BASE_URL", "")
+	t.Setenv("DUD_PEER_BASE_URL", "")
 	t.Setenv("DUD_DOH_URL", "")
 	t.Setenv("DUD_ECH_MODE", "")
 	t.Setenv("DUD_IMAGE", "")
 
 	cfg := loadConfig()
-	if cfg.BaseURL != "https://dud.example.com" {
-		t.Fatalf("BaseURL = %q", cfg.BaseURL)
+	if cfg.DropBaseURL != "https://dud.example.com" || cfg.PeerBaseURL != "https://dud.example.com" {
+		t.Fatalf("base URLs = %q, %q", cfg.DropBaseURL, cfg.PeerBaseURL)
 	}
 	if cfg.DOHURL != "https://cloudflare-dns.com/dns-query" {
 		t.Fatalf("DOHURL = %q", cfg.DOHURL)
@@ -73,6 +75,55 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.Image != "ghcr.io/wojciechpolak/dud/dud-client:latest" {
 		t.Fatalf("Image = %q", cfg.Image)
+	}
+}
+
+func TestLoadConfigSeparatesModeBaseURLs(t *testing.T) {
+	tests := []struct {
+		name     string
+		shared   string
+		drop     string
+		peer     string
+		wantDrop string
+		wantPeer string
+	}{
+		{
+			name:     "shared fallback",
+			shared:   "https://shared.example.com",
+			wantDrop: "https://shared.example.com",
+			wantPeer: "https://shared.example.com",
+		},
+		{
+			name:     "drop only",
+			drop:     "https://drop.example.com",
+			wantDrop: "https://drop.example.com",
+			wantPeer: v2DefaultBaseURL,
+		},
+		{
+			name:     "peer only",
+			peer:     "https://peer.example.com",
+			wantDrop: v2DefaultBaseURL,
+			wantPeer: "https://peer.example.com",
+		},
+		{
+			name:     "mode variables outrank shared fallback",
+			shared:   "https://shared.example.com",
+			drop:     "https://drop.example.com",
+			peer:     "https://peer.example.com",
+			wantDrop: "https://drop.example.com",
+			wantPeer: "https://peer.example.com",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(dudBaseURLEnvironment, test.shared)
+			t.Setenv(dudDropBaseURLEnvironment, test.drop)
+			t.Setenv(dudPeerBaseURLEnvironment, test.peer)
+			cfg := loadConfig()
+			if cfg.DropBaseURL != test.wantDrop || cfg.PeerBaseURL != test.wantPeer {
+				t.Fatalf("base URLs = %q, %q, want %q, %q", cfg.DropBaseURL, cfg.PeerBaseURL, test.wantDrop, test.wantPeer)
+			}
+		})
 	}
 }
 

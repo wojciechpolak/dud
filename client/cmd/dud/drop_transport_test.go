@@ -98,7 +98,7 @@ func newDropTestApp(t *testing.T, stdin string) (*app, *dropTestTransport, *byte
 	a := newApp(strings.NewReader(stdin), &stdout, &stderr)
 	a.cfg.AgeBin = writePassthroughAge(t)
 	a.cfg.SecretToken = "top-secret"
-	a.cfg.BaseURL = "https://dud.example.com"
+	a.cfg.DropBaseURL = "https://dud.example.com"
 	a.cfg.DOHURL = "https://cloudflare-dns.com/dns-query"
 	a.cfg.ECHMode = "hard"
 	a.newV2Transport = func(options v2TransportOptions) (v2Transport, error) {
@@ -230,12 +230,13 @@ func TestDropCommandsForwardConnectToSoTheTransportCanRefuseIt(t *testing.T) {
 // origin is what distinguishes an override from the configured base URL.
 func TestDropCommandsReportWhichLayerChoseTheTarget(t *testing.T) {
 	tests := []struct {
-		name          string
-		environment   string
-		echEnv        string
-		args          []string
-		wantOrigin    string
-		wantECHSource string
+		name            string
+		environmentName string
+		environment     string
+		echEnv          string
+		args            []string
+		wantOrigin      string
+		wantECHSource   string
 	}{
 		{
 			name:          "compiled defaults",
@@ -244,12 +245,22 @@ func TestDropCommandsReportWhichLayerChoseTheTarget(t *testing.T) {
 			wantECHSource: v2NetworkSourceDefault,
 		},
 		{
-			name:          "environment",
-			environment:   "https://drops.example.test",
-			echEnv:        "hard",
-			args:          []string{"flush"},
-			wantOrigin:    v2NetworkSourceEnvironment,
-			wantECHSource: v2NetworkSourceEnvironment,
+			name:            "shared environment",
+			environmentName: dudBaseURLEnvironment,
+			environment:     "https://drops.example.test",
+			echEnv:          "hard",
+			args:            []string{"flush"},
+			wantOrigin:      dudBaseURLEnvironment,
+			wantECHSource:   v2NetworkSourceEnvironment,
+		},
+		{
+			name:            "drop environment",
+			environmentName: dudDropBaseURLEnvironment,
+			environment:     "https://drops.example.test",
+			echEnv:          "hard",
+			args:            []string{"flush"},
+			wantOrigin:      dudDropBaseURLEnvironment,
+			wantECHSource:   v2NetworkSourceEnvironment,
 		},
 		{
 			name:          "command line",
@@ -260,12 +271,17 @@ func TestDropCommandsReportWhichLayerChoseTheTarget(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Setenv("DUD_BASE_URL", test.environment)
+			t.Setenv(dudBaseURLEnvironment, "")
+			t.Setenv(dudDropBaseURLEnvironment, "")
+			t.Setenv(dudPeerBaseURLEnvironment, "")
+			if test.environmentName != "" {
+				t.Setenv(test.environmentName, test.environment)
+			}
 			t.Setenv("DUD_ECH_MODE", test.echEnv)
 			a, transport, _, stderr := newDropTestApp(t, "")
 			transport.respond = uploadJSONResponder("aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa-aaaa")
 			if test.environment != "" {
-				a.cfg.BaseURL = test.environment
+				a.cfg.DropBaseURL = test.environment
 			}
 			if err := a.run(test.args); err != nil {
 				t.Fatalf("%v: %v (stderr %s)", test.args, err, stderr.String())

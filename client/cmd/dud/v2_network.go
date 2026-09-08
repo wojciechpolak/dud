@@ -51,9 +51,20 @@ func (settings v2NetworkSettings) values() (string, string, string) {
 
 func (settings v2NetworkSettings) sources() map[string]any {
 	return map[string]any{
-		"base_url": settings.BaseURL.Source,
-		"doh_url":  settings.DOHURL.Source,
-		"ech_mode": settings.ECHMode.Source,
+		"base_url": publicV2NetworkSource(settings.BaseURL.Source),
+		"doh_url":  publicV2NetworkSource(settings.DOHURL.Source),
+		"ech_mode": publicV2NetworkSource(settings.ECHMode.Source),
+	}
+}
+
+// Environment variable names are kept as internal sources so diagnostics can
+// identify the setting that won. JSON reports keep the stable layer name.
+func publicV2NetworkSource(source string) string {
+	switch source {
+	case dudBaseURLEnvironment, dudDropBaseURLEnvironment, dudPeerBaseURLEnvironment:
+		return v2NetworkSourceEnvironment
+	default:
+		return source
 	}
 }
 
@@ -77,6 +88,8 @@ func v2NetworkLayerName(source, option string) string {
 	switch source {
 	case v2NetworkSourceCLI:
 		return option
+	case dudBaseURLEnvironment, dudDropBaseURLEnvironment, dudPeerBaseURLEnvironment:
+		return source
 	case v2NetworkSourceEnvironment:
 		switch option {
 		case "--url":
@@ -114,18 +127,17 @@ func v2NetworkProvenance(originSource, echModeSource string) string {
 	return " (" + strings.Join(clauses, ", ") + ")"
 }
 
-// resolveV2Network applies one fixed precedence to every network option:
-// command line, peer profile, environment, local configuration, compiled
-// default. Values that did not come from the already-validated configuration
-// are canonicalized here so an override cannot introduce an origin form that
-// silently fails signature binding later.
+// resolveV2Network applies one fixed precedence to every network option. The
+// base URL has two environment layers: DUD_PEER_BASE_URL followed by the shared
+// DUD_BASE_URL fallback. Values that did not come from the already-validated
+// configuration are canonicalized here so an override cannot introduce an
+// origin form that silently fails signature binding later.
 //
-// The peer profile outranks the environment. A paired relationship
-// pins the origin that every one of its signed descriptors is bound to, and the
-// DUD_* variables are ambient: they are also the only way to point dead drop
-// commands at a deployment, so a shell that exports them for drops must not
-// silently retarget a peer. An explicit per-invocation override still wins,
-// which is why peer-scoped commands reject the command-line options outright.
+// The peer profile outranks the environment. A paired relationship pins the
+// origin that every one of its signed descriptors is bound to. Environment
+// variables select an origin outside that relationship, so they must not
+// silently retarget it. An explicit per-invocation override still wins, which
+// is why peer-scoped commands reject the command-line options outright.
 func resolveV2Network(
 	cfg *v2LocalConfig,
 	peer *v2PeerProfile,
@@ -143,7 +155,8 @@ func resolveV2Network(
 		BaseURL: firstV2NetworkLayer(
 			v2NetworkLayer{v2NetworkSourceCLI, cli.BaseURL},
 			v2NetworkLayer{v2NetworkSourcePeer, peerBaseURL},
-			v2NetworkLayer{v2NetworkSourceEnvironment, os.Getenv("DUD_BASE_URL")},
+			v2NetworkLayer{dudPeerBaseURLEnvironment, os.Getenv(dudPeerBaseURLEnvironment)},
+			v2NetworkLayer{dudBaseURLEnvironment, os.Getenv(dudBaseURLEnvironment)},
 			v2NetworkLayer{v2NetworkSourceConfig, configBaseURL},
 			v2NetworkLayer{v2NetworkSourceDefault, v2DefaultBaseURL},
 		),
@@ -211,17 +224,17 @@ func pinnedV2Network(peer v2PeerProfile) map[string]any {
 // resolveV2Network, so a spelling difference alone must not read as an override.
 func overriddenV2NetworkEnvironment(settings v2NetworkSettings) []string {
 	names := []string{}
+	_, peerBaseURLVariable := firstEnvironment(dudPeerBaseURLEnvironment, dudBaseURLEnvironment)
 	for _, resolved := range []struct {
 		option    v2NetworkOption
-		name      string
+		variable  string
 		canonical func(string) (string, error)
 	}{
-		{settings.BaseURL, "--url", canonicalV2Origin},
-		{settings.DOHURL, "--doh-url", canonicalV2DOHURL},
-		{settings.ECHMode, "--ech-mode", nil},
+		{settings.BaseURL, peerBaseURLVariable, canonicalV2Origin},
+		{settings.DOHURL, "DUD_DOH_URL", canonicalV2DOHURL},
+		{settings.ECHMode, "DUD_ECH_MODE", nil},
 	} {
-		variable := v2NetworkLayerName(v2NetworkSourceEnvironment, resolved.name)
-		value := os.Getenv(variable)
+		value := os.Getenv(resolved.variable)
 		if value == "" || resolved.option.Source != v2NetworkSourcePeer {
 			continue
 		}
@@ -231,7 +244,7 @@ func overriddenV2NetworkEnvironment(settings v2NetworkSettings) []string {
 			}
 		}
 		if value != resolved.option.Value {
-			names = append(names, variable)
+			names = append(names, resolved.variable)
 		}
 	}
 	return names

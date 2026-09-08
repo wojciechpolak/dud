@@ -8,8 +8,10 @@ This is the only way to reach someone you have not paired with. When you expect
 to keep exchanging data with the same device, pair it instead and use
 [`peer-setup.md`](peer-setup.md).
 
-Drop commands read no configuration file. They take their target from
-`DUD_BASE_URL` or `--url`, and `DUD_PROFILE` does not apply to them.
+Drop commands read no configuration file. They take their target from `--url`,
+`DUD_DROP_BASE_URL`, `DUD_BASE_URL`, or the compiled default, in that order.
+`DUD_PROFILE` does not apply to them. `DUD_BASE_URL` is the shared fallback when
+both modes use one origin.
 
 ## 1. Confirm the secure transport path
 

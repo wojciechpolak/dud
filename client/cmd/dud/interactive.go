@@ -420,19 +420,19 @@ func readLineOK(r *bufio.Reader) (string, bool) {
 }
 
 func (a *app) interactiveTest(r *bufio.Reader) ([]string, error) {
-	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.BaseURL)
+	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.DropBaseURL)
 	serverURL := readLine(r)
 	if serverURL == "" {
-		serverURL = a.cfg.BaseURL
+		serverURL = a.cfg.DropBaseURL
 	}
 	return []string{"test", "--url", serverURL + "/v1/test"}, nil
 }
 
 func (a *app) interactiveUpload(r *bufio.Reader) ([]string, error) {
-	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.BaseURL)
+	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.DropBaseURL)
 	serverURL := readLine(r)
 	if serverURL == "" {
-		serverURL = a.cfg.BaseURL
+		serverURL = a.cfg.DropBaseURL
 	}
 	// The drop upload reads this terminal whenever no source option is present,
 	// so its long-text entry contributes no argument.
@@ -496,10 +496,10 @@ func (a *app) interactiveEncryptionArgs(r *bufio.Reader) ([]string, error) {
 }
 
 func (a *app) interactiveDownload(r *bufio.Reader) ([]string, error) {
-	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.BaseURL)
+	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.DropBaseURL)
 	serverURL := readLine(r)
 	if serverURL == "" {
-		serverURL = a.cfg.BaseURL
+		serverURL = a.cfg.DropBaseURL
 	}
 	fmt.Fprint(a.out, "File ID: ")
 	id := readLine(r)
@@ -581,10 +581,10 @@ func (a *app) interactiveGit(r *bufio.Reader) ([]string, error) {
 }
 
 func (a *app) interactiveGitPush(r *bufio.Reader) ([]string, error) {
-	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.BaseURL)
+	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.DropBaseURL)
 	serverURL := readLine(r)
 	if serverURL == "" {
-		serverURL = a.cfg.BaseURL
+		serverURL = a.cfg.DropBaseURL
 	}
 	encryptionArgs, err := a.interactiveEncryptionArgs(r)
 	if err != nil {
@@ -609,10 +609,10 @@ func (a *app) interactiveGitPush(r *bufio.Reader) ([]string, error) {
 }
 
 func (a *app) interactiveGitFetch(r *bufio.Reader) ([]string, error) {
-	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.BaseURL)
+	fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.DropBaseURL)
 	serverURL := readLine(r)
 	if serverURL == "" {
-		serverURL = a.cfg.BaseURL
+		serverURL = a.cfg.DropBaseURL
 	}
 	fmt.Fprint(a.out, "File ID: ")
 	id := readLine(r)
@@ -850,10 +850,10 @@ func (a *app) interactiveSetupChoice(r *bufio.Reader, choice string) ([]string, 
 		if device == "" {
 			return nil, fatalError("device name required")
 		}
-		fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.BaseURL)
+		fmt.Fprintf(a.out, "Server URL [%s]: ", a.cfg.PeerBaseURL)
 		serverURL := readLine(r)
 		if serverURL == "" {
-			serverURL = a.cfg.BaseURL
+			serverURL = a.cfg.PeerBaseURL
 		}
 		fmt.Fprintf(a.out, "DoH URL [%s]: ", a.cfg.DOHURL)
 		dohURL := readLine(r)

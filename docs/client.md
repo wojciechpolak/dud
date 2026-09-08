@@ -90,7 +90,9 @@ environment variables.
 
 | Variable             | Default                                | Applies to                            |
 | -------------------- | -------------------------------------- | ------------------------------------- |
-| `DUD_BASE_URL`       | `https://dud.example.com`              | both modes                            |
+| `DUD_DROP_BASE_URL`  | unset                                  | dead drops, above the shared fallback |
+| `DUD_PEER_BASE_URL`  | unset                                  | peers, above the shared fallback      |
+| `DUD_BASE_URL`       | `https://dud.example.com`              | fallback for both modes               |
 | `DUD_DOH_URL`        | `https://cloudflare-dns.com/dns-query` | both modes                            |
 | `DUD_ECH_MODE`       | `hard`                                 | both modes                            |
 | `DUD_DROP_SECRET`    | unset                                  | `upload` and `flush`                  |
@@ -134,16 +136,21 @@ that sets each one:
 
 1. the command line (`--url`, `--doh-url`, `--ech-mode`)
 2. the peer profile in `config.toml` (`base_url`, `doh_url`, `ech_mode`)
-3. the environment (`DUD_BASE_URL`, `DUD_DOH_URL`, `DUD_ECH_MODE`)
-4. the local configuration (the same keys outside any peer table)
-5. the compiled defaults above
+3. the peer environment (`DUD_PEER_BASE_URL` for the base URL)
+4. the shared environment (`DUD_BASE_URL`, `DUD_DOH_URL`, `DUD_ECH_MODE`)
+5. the local configuration (the same keys outside any peer table)
+6. the compiled defaults above
+
+Dead drop commands resolve their target from `--url`, `DUD_DROP_BASE_URL`,
+`DUD_BASE_URL`, and the compiled default, in that order. They read no peer
+configuration. An empty mode-specific variable falls through to the shared
+variable.
 
 The peer profile sits above the environment on purpose. A paired relationship
 pins its own canonical origin, which is bound into every signed descriptor,
-while the `DUD_*` variables are ambient; they are also the only way to point
-dead drop commands at a deployment, since those commands read no configuration
-file. A shell that exports `DUD_BASE_URL` for drops therefore keeps working for
-drops without retargeting any paired peer.
+while the `DUD_*` variables are ambient. A shell can export `DUD_DROP_BASE_URL`
+for dead drops without changing peer initialization or pairing. `DUD_BASE_URL`
+is the shared fallback when both modes use one origin.
 
 Peer-scoped commands (`send`, `receive`, `sync`, `git push|fetch|status`) reject
 `--url`, `--doh-url`, and `--ech-mode` for the same reason. `dud doctor` and
@@ -152,9 +159,10 @@ it came from; where an explicit override displaced a pinned value they also
 print the pinned one, and they name any `DUD_*` variable the profile overrode.
 
 An alias that is not paired yet pins nothing, so `peer invite` and `peer accept`
-still follow the environment: exporting `DUD_BASE_URL` for one invitation is how
-a peer gets paired against a deployment other than the one `config.toml` names.
-The origin that invitation used becomes the profile's pin.
+still follow the environment. Exporting `DUD_PEER_BASE_URL` for one invitation
+pairs against a deployment other than the one `config.toml` names. If that
+variable is unset, `DUD_BASE_URL` supplies the compatible shared fallback. The
+origin that invitation used becomes the profile's pin.
 
 ## 3. Running more than one deployment
 
@@ -179,7 +187,7 @@ Leaving `DUD_PROFILE` unset selects `~/.dud/default`, and the worlds never see
 each other: exactly one of them is mounted, so a container opened for one
 profile cannot read another's seed or peer graph. Dead drop commands read no
 configuration file, so a profile changes nothing for them; point those at a
-deployment with `DUD_BASE_URL`.
+deployment with `DUD_DROP_BASE_URL`.
 
 ### Where peer state lives
 
@@ -309,26 +317,30 @@ eval "$(docker run --rm ghcr.io/wojciechpolak/dud/dud-client:latest shell-init)"
 ```
 
 Both wrappers add `--env-file .env` when `./.env` exists, and forward exported
-`DUD_BASE_URL`, `DUD_DOH_URL`, `DUD_ECH_MODE`, `DUD_DROP_SECRET`,
-`DUD_PEER_SECRET`, `DUD_CA_BUNDLE`, and `DUD_CONNECT_TO` into the container.
-Exported shell variables override values from `.env`. `DUD_HOME` is always set
-to the root the container mounts, and `DUD_PROFILE` is always passed, empty
-included, because the host decides which world directory is mounted and a value
-arriving from `.env` must not point the container at a directory that was never
-mounted. For the same reason, `.env` cannot choose which executable the
-container runs: `DUD_AGE_BIN`, `DUD_AGE_KEYGEN_BIN`, `DUD_GIT_BIN`,
-`DUD_QRENCODE_BIN`, `PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and `LD_AUDIT` are
-pinned to the image's own values after `--env-file`, so a helper always resolves
-to an image binary and never to something under the bind-mounted `/work`.
-Exported shell variables do not lift the pin either; to run a different helper,
-run the `dud` binary directly rather than through a wrapper.
+`DUD_BASE_URL`, `DUD_DROP_BASE_URL`, `DUD_PEER_BASE_URL`, `DUD_DOH_URL`,
+`DUD_ECH_MODE`, `DUD_DROP_SECRET`, `DUD_PEER_SECRET`, `DUD_CA_BUNDLE`, and
+`DUD_CONNECT_TO` into the container. An exported value overrides the same
+variable from `.env`. A mode-specific base URL still outranks `DUD_BASE_URL`
+regardless of which file supplied each one. `DUD_HOME` is always set to the root
+the container mounts, and `DUD_PROFILE` is always passed, empty included,
+because the host decides which world directory is mounted and a value arriving
+from `.env` must not point the container at a directory that was never mounted.
+For the same reason, `.env` cannot choose which executable the container runs:
+`DUD_AGE_BIN`, `DUD_AGE_KEYGEN_BIN`, `DUD_GIT_BIN`, `DUD_QRENCODE_BIN`, `PATH`,
+`LD_PRELOAD`, `LD_LIBRARY_PATH`, and `LD_AUDIT` are pinned to the image's own
+values after `--env-file`, so a helper always resolves to an image binary and
+never to something under the bind-mounted `/work`. Exported shell variables do
+not lift the pin either; to run a different helper, run the `dud` binary
+directly rather than through a wrapper.
 
 ```dotenv
 # Example .env
 DUD_DROP_SECRET=replace-me
 # Optional overrides:
 # DUD_PEER_SECRET=squid-lantern-rotate-9-mango
-# DUD_BASE_URL=https://dud.example.com
+# DUD_DROP_BASE_URL=https://drops.example.com
+# DUD_PEER_BASE_URL=https://peers.example.com
+# DUD_BASE_URL=https://dud.example.com  # shared fallback
 # DUD_DOH_URL=https://cloudflare-dns.com/dns-query
 # DUD_ECH_MODE=hard
 ```

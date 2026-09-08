@@ -22,7 +22,7 @@ func TestFlushRendersJSONTextPartialAndInvalidResponses(t *testing.T) {
 	} {
 		var stdout bytes.Buffer
 		a := newApp(strings.NewReader(""), &stdout, &bytes.Buffer{})
-		a.cfg.BaseURL = "https://dud.example.com"
+		a.cfg.DropBaseURL = "https://dud.example.com"
 		a.cfg.DOHURL = "https://dns.google/dns-query"
 		a.cfg.ECHMode = "off"
 		a.cfg.SecretToken = "secret"

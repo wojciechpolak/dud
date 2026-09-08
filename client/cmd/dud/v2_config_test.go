@@ -301,6 +301,8 @@ func TestV2PeerStatusIsUpperCaseOnlyWhereItIsRead(t *testing.T) {
 
 func TestInitAndConfigCommandsReportRedactedConfiguration(t *testing.T) {
 	setTestV2Homes(t)
+	t.Setenv("DUD_DROP_BASE_URL", "https://drop.example.com")
+	t.Setenv("DUD_PEER_BASE_URL", "https://peer.example.com")
 	var stdout, stderr bytes.Buffer
 	a := newApp(strings.NewReader(""), &stdout, &stderr)
 	if err := a.run([]string{"init", "--device", "desktop", "--json"}); err != nil {
@@ -308,6 +310,13 @@ func TestInitAndConfigCommandsReportRedactedConfiguration(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"initialized": true`) || strings.Contains(stdout.String(), "master_seed") {
 		t.Fatalf("init output = %s", stdout.String())
+	}
+	cfg, _, err := loadV2Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BaseURL != "https://peer.example.com" {
+		t.Fatalf("initialized base URL = %q", cfg.BaseURL)
 	}
 	stdout.Reset()
 	if err := a.run([]string{"config", "show", "--json"}); err != nil {
@@ -560,13 +569,14 @@ func (transport *stubV2Transport) Do(_ context.Context, request v2Request) (*v2R
 }
 
 // clearV2TestEnvironment removes the ambient DUD_* configuration. Every test
-// that plants its own DUD root must call it: the variables reach peer commands
-// too, so a developer shell that exports DUD_BASE_URL for dead drops would
-// otherwise change what the test under it resolves.
+// that plants its own DUD root must call it: the variables reach peer commands,
+// so a developer shell can otherwise change what the test under it resolves.
 func clearV2TestEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"DUD_BASE_URL",
+		"DUD_DROP_BASE_URL",
+		"DUD_PEER_BASE_URL",
 		"DUD_DOH_URL",
 		"DUD_ECH_MODE",
 		"DUD_CONNECT_TO",

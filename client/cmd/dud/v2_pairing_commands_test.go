@@ -399,16 +399,16 @@ func TestPeerInviteReportsAGatedServerAsAMissingCredential(t *testing.T) {
 	}
 }
 
-// An alias with no relationship pins nothing, so the ambient environment still
+// An alias with no relationship pins nothing, so the peer environment still
 // selects the deployment an invitation is created on. Only a paired profile
-// outranks DUD_BASE_URL, and seeding a fresh profile from the configuration would
-// quietly take that choice away.
+// outranks DUD_PEER_BASE_URL, and seeding a fresh profile from the configuration
+// would quietly take that choice away.
 func TestPeerInviteFollowsTheEnvironmentBeforeAnythingIsPinned(t *testing.T) {
 	setTestV2Homes(t)
 	if _, _, err := initializeV2Config("desktop", "https://config.example.com", "https://dns.google/dns-query", "hard"); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DUD_BASE_URL", "https://env.example.com")
+	t.Setenv("DUD_PEER_BASE_URL", "https://env.example.com")
 	t.Setenv("DUD_ECH_MODE", "off")
 	transport := &inviteTestTransport{}
 	a := newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})

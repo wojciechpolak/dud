@@ -103,6 +103,31 @@ func TestInteractiveEncryptionAndDownloadCoverAllChoices(t *testing.T) {
 	}
 }
 
+func TestInteractiveDefaultsUseTheMatchingModeBaseURL(t *testing.T) {
+	t.Setenv(dudDropBaseURLEnvironment, "https://drop.example.com")
+	t.Setenv(dudPeerBaseURLEnvironment, "https://peer.example.com")
+	a := newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+
+	dropArgs, err := a.interactiveTest(bufio.NewReader(strings.NewReader("\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(dropArgs, []string{"test", "--url", "https://drop.example.com/v1/test"}) {
+		t.Fatalf("interactive dead drop args = %q", dropArgs)
+	}
+
+	peerArgs, err := a.interactiveSetupChoice(
+		bufio.NewReader(strings.NewReader("desktop\n\n\n\n")),
+		"init",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(peerArgs[:5], []string{"init", "--device", "desktop", "--url", "https://peer.example.com"}) {
+		t.Fatalf("interactive peer args = %q", peerArgs)
+	}
+}
+
 func TestInteractiveKeygenCoversGenerateConvertAndValidation(t *testing.T) {
 	for _, test := range []struct {
 		input   string

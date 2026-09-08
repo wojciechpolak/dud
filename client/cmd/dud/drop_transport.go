@@ -62,10 +62,14 @@ func splitDropURL(raw string) (string, string, error) {
 // five option parsers. A --url that merely restates the configured base URL is
 // reported as the configuration, which is where a reader would look anyway.
 func (a *app) dropOriginSource(origin string) string {
-	if configured, _, err := splitDropURL(a.cfg.BaseURL); err != nil || origin != configured {
+	if configured, _, err := splitDropURL(a.cfg.DropBaseURL); err != nil || origin != configured {
 		return v2NetworkSourceCLI
 	}
-	return dropEnvironmentSource("DUD_BASE_URL")
+	_, variable := firstEnvironment(dudDropBaseURLEnvironment, dudBaseURLEnvironment)
+	if variable != "" {
+		return variable
+	}
+	return v2NetworkSourceDefault
 }
 
 // Dead drop commands read their network settings only from DUD_* and the

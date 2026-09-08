@@ -17,7 +17,7 @@ import (
 
 func (a *app) cmdInit(args []string) error {
 	device := ""
-	baseURL := a.cfg.BaseURL
+	baseURL := a.cfg.PeerBaseURL
 	dohURL := a.cfg.DOHURL
 	echMode := a.cfg.ECHMode
 	jsonOutput := false
@@ -654,11 +654,10 @@ func (a *app) renderDoctorReport(
 	}
 
 	for index, result := range results {
-		sources, _ := result["network_sources"].(map[string]any)
 		origin := out.section("Origin: " + doctorOriginTitle(result["label"]))
-		origin.addNote("url", fmt.Sprint(result["base_url"]), fmt.Sprint(sources["base_url"]))
-		origin.addNote("doh", fmt.Sprint(result["doh_url"]), fmt.Sprint(sources["doh_url"]))
-		origin.addNote("ech", fmt.Sprint(result["ech_mode"]), fmt.Sprint(sources["ech_mode"]))
+		origin.addNote("url", fmt.Sprint(result["base_url"]), targets[index].Settings.BaseURL.Source)
+		origin.addNote("doh", fmt.Sprint(result["doh_url"]), targets[index].Settings.DOHURL.Source)
+		origin.addNote("ech", fmt.Sprint(result["ech_mode"]), targets[index].Settings.ECHMode.Source)
 		renderPinnedV2Network(origin, targets[index].Pinned, targets[index].Settings)
 		if result["ok"] == true {
 			origin.addf("transport", "ok (HTTP %v)", result["transport_status"])

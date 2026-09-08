@@ -185,7 +185,7 @@ func (a *app) cmdGitPush(args []string) error {
 }
 
 func (a *app) cmdGitFetch(args []string) error {
-	opts, err := parseGitFetchOptions(args, a.cfg.BaseURL, a.cfg.DOHURL)
+	opts, err := parseGitFetchOptions(args, a.cfg.DropBaseURL, a.cfg.DOHURL)
 	if err != nil {
 		return err
 	}

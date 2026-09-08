@@ -30,7 +30,7 @@ exec docker run --rm \
   --add-host "dud.local.test:$DUD_DEMO_CADDY_IP" \
   --add-host "doh.local.test:$DUD_DEMO_CADDY_IP" \
   -e "DUD_DROP_SECRET=$DUD_DEMO_DROP_SECRET" \
-  -e DUD_BASE_URL=https://dud.local.test \
+  -e DUD_DROP_BASE_URL=https://dud.local.test \
   -e DUD_DOH_URL=https://doh.local.test/dns-query \
   -e DUD_ECH_MODE=off \
   -e DUD_CA_BUNDLE=/cert/root.crt \

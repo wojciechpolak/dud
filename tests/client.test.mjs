@@ -486,7 +486,7 @@ test('install command prints a TTY-aware wrapper', async () => {
   assert.match(result.stdout, /--env-file/);
   assert.match(
     result.stdout,
-    /DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO/,
+    /DUD_BASE_URL DUD_DROP_BASE_URL DUD_PEER_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO/,
   );
   assert.match(result.stdout, /dud_world_dir_name\(\)/);
   assert.match(result.stdout, /dud_docker_run_args\(\)/);
@@ -524,7 +524,7 @@ test('shell-init command prints a TTY-aware shell function', async () => {
   assert.match(result.stdout, /--env-file/);
   assert.match(
     result.stdout,
-    /DUD_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO/,
+    /DUD_BASE_URL DUD_DROP_BASE_URL DUD_PEER_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO/,
   );
   assert.match(result.stdout, /DUD_DOCKER_NETWORK/);
   assert.match(result.stdout, /_dud_shell_quote -e/);
@@ -551,6 +551,8 @@ printf '%s\n' "$@" > "${logFile}"
     ['-c', `eval "$(${CLIENT_BIN} shell-init)"; dud test`],
     {
       PATH: `${tmpDir}:${process.env.PATH ?? ''}`,
+      DUD_DROP_BASE_URL: 'https://drop.example.com',
+      DUD_PEER_BASE_URL: 'https://peer.example.com',
       DUD_DROP_SECRET: 'top-secret',
       DUD_DOCKER_NETWORK: 'dud_dev',
       DUD_CA_BUNDLE: '/work/.dud-dev/caddy-data/pki/authorities/local/root.crt',
@@ -566,6 +568,8 @@ printf '%s\n' "$@" > "${logFile}"
   assert.match(args, /test/);
   assert.match(args, /--network\ndud_dev/);
   assert.match(args, /-e\nDUD_DROP_SECRET=top-secret/);
+  assert.match(args, /-e\nDUD_DROP_BASE_URL=https:\/\/drop\.example\.com/);
+  assert.match(args, /-e\nDUD_PEER_BASE_URL=https:\/\/peer\.example\.com/);
   assert.match(
     args,
     /-e\nDUD_CA_BUNDLE=\/work\/\.dud-dev\/caddy-data\/pki\/authorities\/local\/root\.crt/,

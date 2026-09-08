@@ -167,6 +167,7 @@ run_client() {
     --add-host "dud.local.test:$CADDY_IP" \
     --add-host "doh.local.test:$CADDY_IP" \
     -e DUD_HOME=/state/dud \
+    -e DUD_PEER_BASE_URL="$ORIGIN" \
     -e DUD_CA_BUNDLE=/cert/root.crt \
     -v "$state:/state" \
     -v "$ROOT_CERT:/cert/root.crt:ro" \
@@ -183,8 +184,8 @@ state_file_matches() {
     -v "$state:/state" "$CLIENT_IMAGE" -q "$pattern" "$path"
 }
 
-run_client "$DESKTOP_STATE" init --device desktop --url "$ORIGIN" --doh-url "$DOH_URL" --ech-mode off
-run_client "$LAPTOP_STATE" init --device laptop --url "$ORIGIN" --doh-url "$DOH_URL" --ech-mode off
+run_client "$DESKTOP_STATE" init --device desktop --doh-url "$DOH_URL" --ech-mode off
+run_client "$LAPTOP_STATE" init --device laptop --doh-url "$DOH_URL" --ech-mode off
 for state in "$DESKTOP_STATE" "$LAPTOP_STATE"; do
   docker run --rm --user 1000 --entrypoint /bin/sh \
     -e CADDY_IP="$CADDY_IP" \
@@ -512,7 +513,7 @@ run_drop() {
   docker run --rm -i --network "$NETWORK" \
     --add-host "dud.local.test:$CADDY_IP" \
     --add-host "doh.local.test:$CADDY_IP" \
-    -e DUD_BASE_URL="$ORIGIN" \
+    -e DUD_DROP_BASE_URL="$ORIGIN" \
     -e DUD_DOH_URL="$DOH_URL" \
     -e DUD_ECH_MODE=off \
     -e DUD_DROP_SECRET="$DROP_SECRET" \

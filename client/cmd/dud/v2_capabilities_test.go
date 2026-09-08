@@ -182,6 +182,8 @@ func TestDecodeV2CapabilitiesRejectsNonDeterministicAndIncompleteResponses(t *te
 
 func TestCapabilitiesCommandUsesMandatoryTransportAndValidatesPayload(t *testing.T) {
 	setTestV2Homes(t)
+	t.Setenv("DUD_DROP_BASE_URL", "https://drop.example.com")
+	t.Setenv("DUD_PEER_BASE_URL", "https://peer.example.com")
 	if _, _, err := initializeV2Config("desktop", "https://dud.example.com", "https://dns.google/dns-query", "hard"); err != nil {
 		t.Fatal(err)
 	}
@@ -196,11 +198,13 @@ func TestCapabilitiesCommandUsesMandatoryTransportAndValidatesPayload(t *testing
 	if code := a.main([]string{"capabilities", "--json"}); code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if transport.called != 1 {
+	if transport.called != 1 || transport.origin != "https://peer.example.com" {
 		t.Fatalf("transport calls = %#v", transport)
 	}
 	if !strings.Contains(stdout.String(), `"atomic-delivery"`) ||
-		!strings.Contains(stdout.String(), `"quota_enforcement": "atomic"`) {
+		!strings.Contains(stdout.String(), `"quota_enforcement": "atomic"`) ||
+		!strings.Contains(stdout.String(), `"base_url": "https://peer.example.com"`) ||
+		!strings.Contains(stdout.String(), `"base_url": "environment"`) {
 		t.Fatalf("output = %s", stdout.String())
 	}
 }
@@ -249,10 +253,12 @@ type capabilitiesStubTransport struct {
 	contentType string
 	statusCode  int
 	called      int
+	origin      string
 }
 
 func (transport *capabilitiesStubTransport) Do(_ context.Context, request v2Request) (*v2Response, error) {
 	transport.called++
+	transport.origin = request.Origin
 	if request.Method != "GET" || request.Path != "/v2/capabilities" {
 		return nil, errors.New("unexpected capability request")
 	}

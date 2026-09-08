@@ -13,9 +13,16 @@ import (
 	"sync"
 )
 
+const (
+	dudBaseURLEnvironment     = "DUD_BASE_URL"
+	dudDropBaseURLEnvironment = "DUD_DROP_BASE_URL"
+	dudPeerBaseURLEnvironment = "DUD_PEER_BASE_URL"
+)
+
 func loadConfig() config {
 	return config{
-		BaseURL:      envDefault("DUD_BASE_URL", v2DefaultBaseURL),
+		DropBaseURL:  envDefaultChain(v2DefaultBaseURL, dudDropBaseURLEnvironment, dudBaseURLEnvironment),
+		PeerBaseURL:  envDefaultChain(v2DefaultBaseURL, dudPeerBaseURLEnvironment, dudBaseURLEnvironment),
 		DOHURL:       envDefault("DUD_DOH_URL", v2DefaultDOHURL),
 		ECHMode:      envDefault("DUD_ECH_MODE", v2DefaultECHMode),
 		SecretToken:  os.Getenv("DUD_DROP_SECRET"),
@@ -28,6 +35,22 @@ func loadConfig() config {
 		QREncodeBin:  envDefault("DUD_QRENCODE_BIN", "qrencode"),
 		Image:        envDefault("DUD_IMAGE", "ghcr.io/wojciechpolak/dud/dud-client:latest"),
 	}
+}
+
+func envDefaultChain(fallback string, names ...string) string {
+	if value, _ := firstEnvironment(names...); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func firstEnvironment(names ...string) (string, string) {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value, name
+		}
+	}
+	return "", ""
 }
 
 func envDefault(name, fallback string) string {

@@ -19,7 +19,8 @@ import (
 var version = "dev"
 
 type config struct {
-	BaseURL      string
+	DropBaseURL  string
+	PeerBaseURL  string
 	DOHURL       string
 	ECHMode      string
 	SecretToken  string

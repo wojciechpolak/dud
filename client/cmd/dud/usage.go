@@ -88,7 +88,10 @@ Aliases:
   dud git send, dud git receive  aliases for dud git push and dud git fetch
 
 Environment:
-  DUD_BASE_URL        Base Worker URL. Default: https://dud.example.com
+  DUD_DROP_BASE_URL   Base Worker URL for dead drops
+  DUD_PEER_BASE_URL   Base Worker URL for peers before an origin is pinned
+  DUD_BASE_URL        Shared fallback for both base URLs
+                      Default: https://dud.example.com
   DUD_DOH_URL         DNS-over-HTTPS resolver.
                       Default: https://cloudflare-dns.com/dns-query
   DUD_ECH_MODE        ECH mode. Allowed: hard, off. Default: hard
@@ -110,13 +113,18 @@ Environment:
                       or digit and may also contain '.', '_', or '-'. Dead drop
                       commands ignore it and read no configuration file
 
-Peer network options:
-  DUD resolves the base URL, DoH URL, and ECH mode in this order:
-  command line, peer profile, environment, local configuration, compiled
-  default.
+Dead drop network options:
+  DUD resolves the base URL in this order: command line, DUD_DROP_BASE_URL,
+  DUD_BASE_URL, compiled default.
 
-  Signed descriptors bind a paired peer to its origin. DUD_* variables may
-  point dead drop commands elsewhere, but they cannot retarget a paired peer.
+Peer network options:
+  DUD resolves the base URL in this order: command line, peer profile,
+  DUD_PEER_BASE_URL, DUD_BASE_URL, local configuration, compiled default.
+  DoH and ECH use command line, peer profile, environment, local configuration,
+  compiled default.
+
+  Signed descriptors bind a paired peer to its origin. DUD_PEER_BASE_URL and
+  DUD_BASE_URL select an origin before pairing, but cannot retarget a paired peer.
   Commands that target a paired peer reject --url, --doh-url, and --ech-mode.
   'dud doctor' and 'dud peer show' report where each value came from, any value
   pinned by the profile, and any DUD_* variable the profile overrode.

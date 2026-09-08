@@ -227,7 +227,7 @@ func (a *app) createBundleArchive(archivePath string, sources []string) error {
 }
 
 func (a *app) cmdUpload(args []string, receivePrefix string) error {
-	opts, err := parseUploadOptions(args, a.cfg.BaseURL, a.cfg.DOHURL)
+	opts, err := parseUploadOptions(args, a.cfg.DropBaseURL, a.cfg.DOHURL)
 	if err != nil {
 		return err
 	}

@@ -23,7 +23,8 @@ func TestV1EnvironmentContract(t *testing.T) {
 		value    string
 		read     func(config) string
 	}{
-		{"DUD_BASE_URL", "https://v1.example.test", func(c config) string { return c.BaseURL }},
+		{"DUD_BASE_URL", "https://v1.example.test", func(c config) string { return c.DropBaseURL }},
+		{"DUD_DROP_BASE_URL", "https://drop.example.test", func(c config) string { return c.DropBaseURL }},
 		{"DUD_DOH_URL", "https://resolver.example.test/dns-query", func(c config) string { return c.DOHURL }},
 		{"DUD_ECH_MODE", "off", func(c config) string { return c.ECHMode }},
 		{"DUD_DROP_SECRET", "shared", func(c config) string { return c.SecretToken }},
@@ -37,6 +38,9 @@ func TestV1EnvironmentContract(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.variable, func(t *testing.T) {
+			for _, name := range []string{dudBaseURLEnvironment, dudDropBaseURLEnvironment, dudPeerBaseURLEnvironment} {
+				t.Setenv(name, "")
+			}
 			t.Setenv(test.variable, test.value)
 			if got := test.read(loadConfig()); got != test.value {
 				t.Fatalf("%s = %q, want %q", test.variable, got, test.value)
@@ -62,7 +66,7 @@ func TestV1CurlBinaryOverrideIsInert(t *testing.T) {
 // environment at all still targets the same origin, resolver, and image.
 func TestV1CompiledDefaults(t *testing.T) {
 	for _, variable := range []string{
-		"DUD_BASE_URL", "DUD_DOH_URL", "DUD_ECH_MODE", "DUD_DROP_SECRET", "DUD_PEER_SECRET",
+		"DUD_BASE_URL", "DUD_DROP_BASE_URL", "DUD_PEER_BASE_URL", "DUD_DOH_URL", "DUD_ECH_MODE", "DUD_DROP_SECRET", "DUD_PEER_SECRET",
 		"DUD_CA_BUNDLE", "DUD_CONNECT_TO", "DUD_AGE_BIN",
 		"DUD_AGE_KEYGEN_BIN", "DUD_GIT_BIN", "DUD_QRENCODE_BIN", "DUD_IMAGE",
 	} {
@@ -70,7 +74,8 @@ func TestV1CompiledDefaults(t *testing.T) {
 	}
 	cfg := loadConfig()
 	want := config{
-		BaseURL:      "https://dud.example.com",
+		DropBaseURL:  "https://dud.example.com",
+		PeerBaseURL:  "https://dud.example.com",
 		DOHURL:       "https://cloudflare-dns.com/dns-query",
 		ECHMode:      "hard",
 		AgeBin:       "age",

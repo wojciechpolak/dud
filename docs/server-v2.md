@@ -433,10 +433,11 @@ same values as one document.
 
 A peer target reports the transport its own profile pins, which is the origin
 bound into its signed descriptors. The global target below follows
-`DUD_BASE_URL`, while the peer keeps its pinned origin and the report names the
-variable it overrode. A `pinned url` / `pinned doh` / `pinned ech` row appears
-whenever an explicit `--url`, `--doh-url`, or `--ech-mode` displaced a pinned
-value, so a diagnostic override is never silent.
+`DUD_PEER_BASE_URL`, with `DUD_BASE_URL` as a shared fallback. The peer keeps
+its pinned origin and the report names the variable it overrode. A `pinned url`,
+`pinned doh`, or `pinned ech` row appears whenever an explicit `--url`,
+`--doh-url`, or `--ech-mode` displaced a pinned value, so a diagnostic override
+is never silent.
 
 ```text
 Device  laptop (770c82f6fcb47a0d00e859d402347584)
@@ -455,7 +456,7 @@ Tools
   qrencode    ok
 
 Origin: global
-  url        https://dud.example.com               (environment)
+  url        https://dud.example.com               (DUD_PEER_BASE_URL)
   doh        https://cloudflare-dns.com/dns-query  (config)
   ech        hard                                  (environment)
   transport  ok (HTTP 200)
@@ -465,7 +466,7 @@ Origin: peer desktop
   doh        https://cloudflare-dns.com/dns-query  (config)
   ech        hard                                  (peer)
   transport  ok (HTTP 200)
-  Note: DUD_BASE_URL set in the environment, but this peer pins its own
+  Note: DUD_PEER_BASE_URL set in the environment, but this peer pins its own
   transport; the pinned values are the ones in use.
 
   Delivery
