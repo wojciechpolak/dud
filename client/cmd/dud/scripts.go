@@ -307,13 +307,16 @@ _dud_complete_wordlist() {
       printf '%%s\n' --yes --dry-run --json --repo
       ;;
     peer)
-      printf '%%s\n' invite accept list show rename revoke remove
+      printf '%%s\n' invite accept list show rename resume reset abandon revoke remove
       ;;
     peer-invite)
       printf '%%s\n' --expires --json
       ;;
     peer-accept)
       printf '%%s\n' --json
+      ;;
+    peer-reset)
+      printf '%%s\n' --yes --cancel --json
       ;;
     git)
       printf '%%s\n' push fetch send receive status
@@ -571,8 +574,11 @@ _dud_complete_candidates() {
         accept)
           _dud_complete_wordlist peer-accept
           ;;
-        show|rename|remove|confirm|revoke)
+        show|rename|remove|confirm|resume|reset|abandon|revoke)
           _dud_peer_aliases
+          if [ "$_dud_complete_subcommand" = "reset" ]; then
+            _dud_complete_wordlist peer-reset
+          fi
           ;;
       esac
       ;;

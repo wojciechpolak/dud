@@ -52,6 +52,7 @@ type v2PendingPairing struct {
 	CompletionSignature        string           `json:"completion_signature,omitempty"`
 	Completed                  bool             `json:"completed"`
 	ServerContract             v2ServerContract `json:"server_contract"`
+	PeerFeatures               []uint64         `json:"peer_features,omitempty"`
 }
 
 type v2ReplayEntry struct {
@@ -194,9 +195,72 @@ type v2InboundChunkPart struct {
 	Downloaded       bool   `json:"downloaded"`
 }
 
+// v2HaltEvidence retains the signed contradiction that stopped a relationship.
+// Operators need both values and the signed descriptor identity to distinguish
+// a peer rollback from a damaged local state file without erasing either one.
+type v2HaltEvidence struct {
+	Field              string `json:"field"`
+	PeerValue          uint64 `json:"peer_value"`
+	LocalValue         uint64 `json:"local_value"`
+	DescriptorSequence uint64 `json:"control_descriptor_sequence"`
+	DescriptorDigest   string `json:"control_descriptor_digest"`
+	RelationshipID     string `json:"relationship_id"`
+}
+
+type v2ResetDisposition struct {
+	QueuedDeliveries      int `json:"queued_deliveries"`
+	QueuedCompletions     int `json:"queued_completions"`
+	QueuedControlEvents   int `json:"queued_control_events"`
+	Unacknowledged        int `json:"unacknowledged_deliveries"`
+	InboundTransfers      int `json:"inbound_transfers"`
+	QuarantinedChains     int `json:"quarantined_chains"`
+	ResumableTransfers    int `json:"resumable_transfers"`
+	RefusedGitCheckpoints int `json:"refused_git_checkpoints"`
+}
+
+type v2RelationshipReset struct {
+	ResetID             string             `json:"reset_id"`
+	OldRelationshipID   string             `json:"old_relationship_id"`
+	NewRelationshipID   string             `json:"new_relationship_id"`
+	Generation          uint64             `json:"generation"`
+	InitiatorRole       uint64             `json:"initiator_role"`
+	Phase               string             `json:"phase"`
+	Proposal            string             `json:"proposal"`
+	ProposalSignature   string             `json:"proposal_signature"`
+	Acceptance          string             `json:"acceptance,omitempty"`
+	AcceptanceSignature string             `json:"acceptance_signature,omitempty"`
+	ServerReceipt       string             `json:"server_receipt,omitempty"`
+	Cancellation        string             `json:"cancellation,omitempty"`
+	CancellationSig     string             `json:"cancellation_signature,omitempty"`
+	LocalConsent        bool               `json:"local_consent"`
+	PeerConsent         bool               `json:"peer_consent"`
+	ServerActivated     bool               `json:"server_activated"`
+	LocalDisposition    v2ResetDisposition `json:"local_disposition"`
+	PeerDisposition     v2ResetDisposition `json:"peer_disposition"`
+	CreatedAt           uint64             `json:"created_at"`
+	ActivatedAt         uint64             `json:"activated_at,omitempty"`
+	RecoveryCommand     string             `json:"recovery_command,omitempty"`
+}
+
+type v2ResetAuditRecord struct {
+	ResetID             string             `json:"reset_id"`
+	OldRelationshipID   string             `json:"old_relationship_id"`
+	NewRelationshipID   string             `json:"new_relationship_id"`
+	Generation          uint64             `json:"generation"`
+	Proposal            string             `json:"proposal"`
+	ProposalSignature   string             `json:"proposal_signature"`
+	Acceptance          string             `json:"acceptance"`
+	AcceptanceSignature string             `json:"acceptance_signature"`
+	ServerReceipt       string             `json:"server_receipt"`
+	LocalDisposition    v2ResetDisposition `json:"local_disposition"`
+	PeerDisposition     v2ResetDisposition `json:"peer_disposition"`
+	ActivatedAt         uint64             `json:"activated_at"`
+}
+
 type v2PeerDeliveryState struct {
 	Version                    int                           `json:"version"`
 	RelationshipID             string                        `json:"relationship_id"`
+	Generation                 uint64                        `json:"generation"`
 	Role                       uint64                        `json:"role"`
 	OutboundRelationshipSecret string                        `json:"outbound_relationship_secret"`
 	InboundRelationshipSecret  string                        `json:"inbound_relationship_secret"`
@@ -221,6 +285,9 @@ type v2PeerDeliveryState struct {
 	ConsecutiveDrainFailures   uint64                        `json:"consecutive_drain_failures"`
 	Halted                     bool                          `json:"halted"`
 	HaltReason                 string                        `json:"halt_reason,omitempty"`
+	HaltEvidence               *v2HaltEvidence               `json:"halt_evidence,omitempty"`
+	Reset                      *v2RelationshipReset          `json:"relationship_reset,omitempty"`
+	ResetAudit                 []v2ResetAuditRecord          `json:"reset_audit,omitempty"`
 	SignedAcknowledgements     map[string]string             `json:"signed_acknowledgements"`
 	PeerFeatures               []uint64                      `json:"peer_features,omitempty"`
 }
@@ -306,6 +373,7 @@ func newV2PeerDeliveryState(pending *v2PendingPairing, capabilities map[string]s
 	return &v2PeerDeliveryState{
 		Version:                    v2DeliveryStateVersion,
 		RelationshipID:             pending.RelationshipID,
+		Generation:                 0,
 		Role:                       pending.Role,
 		OutboundRelationshipSecret: pending.OutboundRelationshipSecret,
 		InboundRelationshipSecret:  pending.InboundRelationshipSecret,
@@ -329,6 +397,7 @@ func newV2PeerDeliveryState(pending *v2PendingPairing, capabilities map[string]s
 		ControlScanEpoch:           v2SlotEpoch(time.Now()),
 		PendingDataEpochs:          []uint64{},
 		PendingControlEventIDs:     []string{},
+		PeerFeatures:               append([]uint64(nil), pending.PeerFeatures...),
 	}
 }
 
@@ -461,6 +530,71 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 	}
 	if state.PendingDataEpochs == nil || state.PendingControlEventIDs == nil {
 		return errors.New("peer delivery scan state is incomplete")
+	}
+	if evidence := state.HaltEvidence; evidence != nil {
+		digest, digestErr := hex.DecodeString(evidence.DescriptorDigest)
+		if !state.Halted ||
+			(evidence.Field != "hwm_in_data" && evidence.Field != "hwm_in_control") ||
+			evidence.RelationshipID != state.RelationshipID ||
+			digestErr != nil || len(digest) != 32 {
+			return errors.New("peer delivery halt evidence is invalid")
+		}
+	}
+	if len(state.ResetAudit) > 8 {
+		return errors.New("peer relationship reset audit exceeds its bound")
+	}
+	validateResetIdentity := func(resetID, oldID, newID string, generation uint64) error {
+		for _, encoded := range []string{resetID, oldID, newID} {
+			decoded, err := hex.DecodeString(encoded)
+			if err != nil || len(decoded) != 16 {
+				return errors.New("peer relationship reset identity is invalid")
+			}
+		}
+		if generation == 0 {
+			return errors.New("peer relationship reset generation is invalid")
+		}
+		return nil
+	}
+	if reset := state.Reset; reset != nil {
+		if err := validateResetIdentity(reset.ResetID, reset.OldRelationshipID, reset.NewRelationshipID, reset.Generation); err != nil {
+			return err
+		}
+		if reset.Phase != "proposed" && reset.Phase != "accepted" && reset.Phase != "activating" && reset.Phase != "active" && reset.Phase != "cancelled" {
+			return errors.New("peer relationship reset phase is invalid")
+		}
+		if reset.Phase == "active" {
+			if reset.NewRelationshipID != state.RelationshipID || reset.Generation != state.Generation {
+				return errors.New("active peer relationship reset generation is inconsistent")
+			}
+		} else if reset.OldRelationshipID != state.RelationshipID || reset.Generation != state.Generation+1 {
+			return errors.New("pending peer relationship reset generation is inconsistent")
+		}
+		if reset.Proposal == "" || reset.ProposalSignature == "" {
+			return errors.New("peer relationship reset transcript is incomplete")
+		}
+		if reset.Phase == "active" && (!reset.ServerActivated || reset.Acceptance == "" || reset.AcceptanceSignature == "" || reset.ServerReceipt == "") {
+			return errors.New("active peer relationship reset is incomplete")
+		}
+		if reset.Phase == "activating" && (!reset.ServerActivated || reset.Acceptance == "" || reset.AcceptanceSignature == "" || reset.ServerReceipt == "") {
+			return errors.New("activating peer relationship reset is incomplete")
+		}
+		if reset.Phase == "cancelled" && (reset.Cancellation == "" || reset.CancellationSig == "") {
+			return errors.New("cancelled peer relationship reset is incomplete")
+		}
+	}
+	for _, audit := range state.ResetAudit {
+		if err := validateResetIdentity(audit.ResetID, audit.OldRelationshipID, audit.NewRelationshipID, audit.Generation); err != nil {
+			return err
+		}
+		for _, encoded := range []string{audit.Proposal, audit.ProposalSignature, audit.Acceptance, audit.AcceptanceSignature, audit.ServerReceipt} {
+			value, err := decodeV2Base64URL(encoded, -1)
+			if err != nil || len(value) == 0 || len(value) > v2MaxDescriptorBytes {
+				return errors.New("peer relationship reset audit transcript is invalid")
+			}
+		}
+		if audit.ActivatedAt == 0 {
+			return errors.New("peer relationship reset audit activation time is invalid")
+		}
 	}
 	for _, id := range state.PendingControlEventIDs {
 		decoded, err := hex.DecodeString(id)

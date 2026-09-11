@@ -40,6 +40,7 @@ function validateState(value: unknown): V2StoredState {
   // in memory and are persisted on the next transaction.
   state.invitations ??= {};
   state.relationships ??= {};
+  state.relationshipResets ??= {};
   state.legacyObjects ??= {};
   state.legacyCommittedBytes ??= 0;
   if (

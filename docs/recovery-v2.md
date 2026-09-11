@@ -95,8 +95,66 @@ reason if any.
   `inbox`, or `git fetch` refreshes it, so after a send it still describes the
   previous check. `dud inbox PEER` reads it now, without committing anything.
 - **A halted relationship** means the client detected state it will not act on
-  without a human. Read the halt reason before doing anything; it names the
-  invariant that failed.
+  without a human. Read the halt evidence before doing anything. JSON output
+  names the watermark field, signed peer value, corresponding local value,
+  control descriptor sequence and digest, and relationship ID.
+
+An outgoing watermark is only an advertisement and cannot halt the relationship.
+A rollback halt requires either a peer claim that exceeds a local send sequence
+or a peer incoming-data watermark below an acknowledgement or refusal already
+retained by this device. The acknowledgement being processed is not earlier
+retained evidence because its watermark is signed before the sender persists
+that receive step.
+
+### Resetting trusted peers after a sequencing disagreement
+
+Use a peer relationship reset only when both devices and their existing trust
+binding remain trustworthy. Compromise, seed disclosure, or uncertainty about
+the peer identity requires revocation and fresh pairing in §6.
+
+On the first device, preview the exact abandoned work and then confirm:
+
+```sh
+dud peer reset PEER
+dud peer reset PEER --yes
+```
+
+The preview counts queued small and chunked deliveries, ambiguous or pending
+completions, queued control events, unacknowledged and inbound transfers,
+quarantined chains, resumable transfers, and refused Git checkpoints. The first
+confirmed command signs a proposal but does not activate it. On the other
+device, run the command twice in the same way to inspect its own disposition and
+sign acceptance. Either side can then repeat the exact recovery command shown by
+`dud peer show PEER`, `dud doctor`, or JSON output:
+
+```sh
+dud peer reset PEER --yes
+```
+
+The command remains available while delivery is halted. It reads reset status
+through the old signing identity without advancing either delivery chain. Once
+the server has both signatures, it atomically creates the next generation and
+revokes the old relationship. Retrying after a timeout or crash reads the same
+signed transcript and activation receipt; it does not create a second
+generation.
+
+Before server activation, either operator may cancel the proposal:
+
+```sh
+dud peer reset PEER --cancel --yes
+```
+
+Cancellation after server activation is refused. If both devices proposed at the
+same time, the lower reset ID is the winner and both status reads converge on
+it.
+
+Local activation preserves the alias, device trust, canonical origin, repository
+ID, and DUD-managed remote-tracking refs. In the Git repository where the
+command runs, it removes only that peer's incremental bases, acknowledgements,
+pending checkpoint records, refused-checkpoint alerts, and associated quarantine
+files. Both Git directions then require a complete checkpoint. The first
+`dud git push PEER` sends one, and the receiver still requires `--allow-rewrite`
+when the advertised refs rewrite accepted history.
 
 ### A receive that stops before the queue is empty
 
@@ -121,8 +179,8 @@ report prints the command that writes it out.
 dud receive PEER --id DESCRIPTOR_DIGEST --out /work/recovered --on-conflict overwrite
 ```
 
-If the relationship is unusable, revoke and re-pair (§6) rather than editing
-local state by hand.
+If trust remains intact, use the peer relationship reset above rather than
+editing state by hand. If trust is in doubt, revoke and re-pair (§6).
 
 ### An interrupted large transfer
 
@@ -195,6 +253,13 @@ the same offline:
 npm run v2:admin -- revoke --data-dir ./dud-data --relationship HEX \
     [--direction NAME] [--scope NAME]
 ```
+
+A halted relationship takes the same command. The client does not drain or
+advance either chain in that state. It uses the administrative capability to
+revoke the server relationship, marks the local profile revoked after the server
+confirms, and retains the halt evidence. For a relationship that is not halted,
+failure to flush queued work or publish the signed peer notification does not
+block the administrative revocation.
 
 Three commands sound similar and do quite different things:
 

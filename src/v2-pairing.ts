@@ -309,6 +309,28 @@ function requireText(
   return value;
 }
 
+function requirePeerFeatures(map: Map<number, CborValue>): void {
+  const raw = map.get(128);
+  if (raw === undefined) {
+    return;
+  }
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 64) {
+    throw new PairingError(1, 'Peer feature advertisement is invalid.');
+  }
+  let previous = 0;
+  for (const value of raw) {
+    if (
+      typeof value !== 'number' ||
+      !Number.isSafeInteger(value) ||
+      value <= previous ||
+      value > 65535
+    ) {
+      throw new PairingError(1, 'Peer feature advertisement is invalid.');
+    }
+    previous = value;
+  }
+}
+
 function parseVerifier(value: CborValue, name: string): V2BearerVerifier {
   const map = requireCborMap(value, [1, 2], [1, 2]);
   return {
@@ -326,7 +348,7 @@ function decodeStoredMap(value: string): Map<number, CborValue> {
       maxMapPairs: 32,
       requireDeterministic: true,
     }),
-    Array.from({ length: 32 }, (_, index) => index),
+    [...Array.from({ length: 32 }, (_, index) => index), 128],
     [],
   );
 }
@@ -419,7 +441,7 @@ function assertInvitationMap(
 ): { map: Map<number, CborValue>; bootstrap: Uint8Array; id: string } {
   const map = requireCborMap(
     value,
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 128],
     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
   );
   if (
@@ -448,6 +470,7 @@ function assertInvitationMap(
   );
   requireBytes(map, 11, 32, 'Inviter nonce');
   const expiresAt = requireUint(map, 12, 'Invitation expiry');
+  requirePeerFeatures(map);
   if (expiresAt !== expectedExpiry || expiresAt <= now) {
     throw new PairingError(7, 'Pairing code is invalid or expired.');
   }
@@ -1006,7 +1029,7 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
       }
       const acceptance = requireCborMap(
         wrapper.get(2)!,
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 128],
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
       );
       const signature = requireBytes(wrapper, 3, 64, 'Acceptance signature');
@@ -1051,6 +1074,7 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
       requireBytes(acceptance, 9, 32, 'Invitee nonce');
       requireBytes(acceptance, 11, 1120, 'enc_B');
       requireBytes(acceptance, 13, 32, 'Invitee pairing binder');
+      requirePeerFeatures(acceptance);
       if (
         !(await verifyPairingSignature(
           inviteeSigningKey,

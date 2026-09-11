@@ -74,11 +74,10 @@ const (
 // bump. See protocol-v2.md §2.
 const v2MinimumExtensionKey = 128
 
-// kPeerFeatures is the acknowledgement type_meta extension carrying the feature
-// IDs the acknowledging peer implements. It exists because the protocol
-// negotiates capabilities between a client and a server but never between two
-// peers, so this is the only channel by which a sender learns what its peer can
-// accept. An absent key means "assume nothing beyond the 2.0.0 baseline".
+// kPeerFeatures carries the feature IDs a peer implements in pairing maps and
+// acknowledgement metadata. Pairing establishes the initial authenticated
+// advertisement; acknowledgements refresh it after an upgrade. An absent key
+// means "assume nothing beyond the 2.0.0 baseline".
 const kPeerFeatures = 128
 
 // kGitBaseSequence is the git-bundle type_meta extension that binds an
@@ -118,13 +117,13 @@ func validateV2MetadataKeys(keys []int, required, optional []int) error {
 // than guess, so this never reports an error.
 func v2MetadataFeatures(metadata map[int]any) []uint64 {
 	raw, ok := metadata[kPeerFeatures].([]any)
-	if !ok || len(raw) == 0 {
+	if !ok || len(raw) == 0 || len(raw) > 64 {
 		return nil
 	}
 	features := make([]uint64, 0, len(raw))
 	for _, entry := range raw {
 		value, valid := asV2Uint(entry)
-		if !valid || len(features) != 0 && value <= features[len(features)-1] {
+		if !valid || value == 0 || value > 65535 || len(features) != 0 && value <= features[len(features)-1] {
 			return nil
 		}
 		features = append(features, value)

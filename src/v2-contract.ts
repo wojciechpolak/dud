@@ -13,6 +13,7 @@ export const V2_FEATURE = {
   atomicDelivery: 9,
   batchedInbox: 10,
   inlineControl: 11,
+  relationshipReset: 12,
 } as const;
 
 /**
@@ -28,6 +29,7 @@ export const V2_SERVER_FEATURES = [
   V2_FEATURE.atomicDelivery,
   V2_FEATURE.batchedInbox,
   V2_FEATURE.inlineControl,
+  V2_FEATURE.relationshipReset,
 ] as const;
 
 export const V2_REQUIRED_PEER_FEATURES = [
@@ -50,6 +52,7 @@ export const V2_ENDPOINT = {
   controlEvents: '/v2/control-events',
   pairing: '/v2/pairing',
   capabilityReissue: '/v2/capabilities/reissue',
+  relationshipReset: '/v2/relationships/reset',
 } as const;
 
 /** Fixed ceilings for the feature-7 wire and storage contract. */

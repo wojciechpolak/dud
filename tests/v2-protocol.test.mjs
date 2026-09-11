@@ -291,7 +291,7 @@ test('framed delivery reader streams a content-addressed payload', async () => {
 });
 
 test('v2 capability and error registries are frozen', () => {
-  assert.deepEqual(V2_SERVER_FEATURES, [2, 3, 5, 6, 7, 9, 10, 11]);
+  assert.deepEqual(V2_SERVER_FEATURES, [2, 3, 5, 6, 7, 9, 10, 11, 12]);
   assert.deepEqual(V2_REQUIRED_PEER_FEATURES, [2, 3, 9, 10, 11]);
   assert.deepEqual(V2_REQUIRED_GIT_FEATURES, [2, 3, 9, 10, 11, 5]);
   assert.equal(V2_SERVER_FEATURES.includes(6), true);
@@ -299,6 +299,7 @@ test('v2 capability and error registries are frozen', () => {
   assert.equal(hasRequiredV2Features([2, 3, 5, 9, 10]), false);
   assert.equal(V2_ERROR_HTTP_STATUS[V2_ERROR.unsupportedContract], 409);
   assert.equal(V2_ENDPOINT.inbox, '/v2/inbox');
+  assert.equal(V2_ENDPOINT.relationshipReset, '/v2/relationships/reset');
   assert.equal(
     v2CompletionEndpoint('0123456789abcdef0123456789abcdef'),
     '/v2/deliveries/0123456789abcdef0123456789abcdef/complete',

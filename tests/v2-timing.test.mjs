@@ -122,6 +122,7 @@ test('every v2 route maps to a fixed timing label', () => {
     ['POST', '/v2/capabilities/reissue', 'capability-reissue'],
     ['POST', '/v2/pairing/rendezvous', 'pairing'],
     ['GET', `/v2/pairing/rendezvous/${'a'.repeat(32)}`, 'pairing'],
+    ['POST', '/v2/relationships/reset', 'relationship-reset'],
     ['POST', '/v2/deliveries', 'delivery-publish'],
     ['POST', '/v2/inbox', 'delivery-inbox'],
     ['POST', `/v2/deliveries/${'a'.repeat(32)}/complete`, 'delivery-complete'],
@@ -227,6 +228,10 @@ test('every v2 route reports one timing record through the service', async () =>
     [
       'capability-reissue',
       new Request(`${V2_ORIGIN}/v2/capabilities/reissue`, { method: 'POST' }),
+    ],
+    [
+      'relationship-reset',
+      new Request(`${V2_ORIGIN}/v2/relationships/reset`, { method: 'POST' }),
     ],
     ['unknown', new Request(`${V2_ORIGIN}/v2/nothing`, { method: 'POST' })],
   ];

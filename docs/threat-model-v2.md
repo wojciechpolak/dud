@@ -237,18 +237,48 @@ messages verify.
 
 ### 3.16 Restored or Rolled-Back Local State
 
-**Detected** by four peer-echoed watermarks carried in signed control
-descriptors: inbound and outbound marks for both data and control chains. A peer
-reporting a mark ahead of local state proves the local side rewound; a peer
-reporting a mark behind an acknowledgement held signed locally proves the peer
-rewound. Detection is symmetric.
+**Detected** by causally conclusive peer-echoed watermarks in signed control
+descriptors. A peer's `hwm_in_data` or `hwm_in_control` above the corresponding
+local send sequence claims receipt of a descriptor the local device never
+created and proves local rollback. A peer's `hwm_in_data` below a signed
+acknowledgement or refusal whose result is already retained locally contradicts
+its earlier committed receipt and proves peer rollback. The acknowledgement
+under evaluation is excluded because it is signed before its sender persists the
+corresponding receive-watermark advance.
 
-On detection the relationship halts and is revoked. The only recovery is fresh
-out-of-band pairing under a new relationship ID. A non-zero key epoch is
-rejected outright, because an in-band resync would need a two-party activation
-state machine that DUD 2.0 does not specify, and half of one is worse than none.
-Separately, a non-fast-forward update to a peer remote-tracking ref requires
-explicit confirmation, so replay-driven rollback is never silent.
+`hwm_out_data` and `hwm_out_control` are advertisements, not rollback proofs.
+The peer may have created data that this device has not consumed, and the data
+and control chains are delivered independently. Treating either advertised head
+as a committed local receive watermark lets ordinary cross-chain ordering halt a
+healthy relationship. The enclosing signed descriptor and predecessor digest
+perform control-chain sequence validation without that comparison.
+
+On detection the relationship halts and retains the signed evidence. The
+operator can revoke it through the administrative endpoint even though neither
+delivery chain may advance. If both devices and their trust binding remain
+sound, an authenticated peer relationship reset can instead create a fresh
+relationship ID. Both operators sign one transcript committing to the old
+relationship, the immediate successor generation, both chain snapshots, new
+public identities, and the counts of work they abandon. The server activates it
+atomically with complete old-capability revocation. Delivery stays blocked until
+local activation observes that receipt.
+
+The fresh relationship ID changes identity, signature, relationship-secret,
+slot, capability, nonce, descriptor, and chain-genesis domains. Old-generation
+artifacts cannot validate in the successor. Reset IDs select a deterministic
+winner before activation; consent binds the proposal digest; cancellation is
+signed and permitted only before activation. Clients retain a bounded audit and
+accept only their immediate successor generation, so replaying an older
+completed transcript cannot lower live local state. A server metadata rollback
+is detected when it conflicts with the locally retained generation or signed
+transcript. A client and server both restored behind that evidence still need an
+external monotonic store to detect the joint rollback.
+
+A reset does not make exposed keys trustworthy. Device compromise, seed
+disclosure, or doubt about peer identity requires administrative revocation and
+fresh out-of-band pairing. Separately, a non-fast-forward update to a peer
+remote-tracking ref requires explicit confirmation, so replay-driven rollback is
+never silent.
 
 **Residual:** detection happens at the next peer contact. A device that is
 rolled back and then operated entirely offline against a malicious server can

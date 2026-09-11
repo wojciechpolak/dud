@@ -833,6 +833,7 @@ func TestV2CompletionRetriesOnceWithFreshAuthorizationNonces(t *testing.T) {
 
 func TestV2SignedWatermarksDetectLocalAndPeerRollback(t *testing.T) {
 	state := &v2PeerDeliveryState{
+		RelationshipID: strings.Repeat("45", 16),
 		Chains: map[string]*v2ChainState{
 			"out:data":    emptyV2ChainState(),
 			"out:control": emptyV2ChainState(),
@@ -841,28 +842,50 @@ func TestV2SignedWatermarksDetectLocalAndPeerRollback(t *testing.T) {
 		},
 		Sent: map[string]v2SentDelivery{},
 	}
-	state.Chains["out:data"].SendSequence = 2
 	runtime := &v2PeerRuntime{state: state}
-	if err := runtime.validatePeerWatermarks([4]uint64{0, 1, 3, 0}); err == nil ||
+	evidence := v2WatermarkEvidence{sequence: 7, digest: strings.Repeat("ab", 32)}
+	if err := runtime.validatePeerWatermarks([4]uint64{5, 6, 0, 0}, evidence); err != nil || state.Halted {
+		t.Fatalf("outgoing advertisements halted a healthy relationship: %v, %#v", err, state.HaltEvidence)
+	}
+	state.Chains["out:data"].SendSequence = 2
+	if err := runtime.validatePeerWatermarks([4]uint64{8, 9, 3, 0}, evidence); err == nil ||
 		!strings.Contains(err.Error(), "local rollback") {
 		t.Fatalf("local rollback error = %v", err)
 	}
-	if !state.Halted {
-		t.Fatal("local rollback did not halt the relationship")
+	if !state.Halted || state.HaltEvidence == nil ||
+		state.HaltEvidence.Field != "hwm_in_data" ||
+		state.HaltEvidence.PeerValue != 3 || state.HaltEvidence.LocalValue != 2 ||
+		state.HaltEvidence.DescriptorSequence != 7 || state.HaltEvidence.DescriptorDigest != evidence.digest ||
+		state.HaltEvidence.RelationshipID != state.RelationshipID {
+		t.Fatalf("local rollback evidence = %#v", state.HaltEvidence)
 	}
 
 	state.Halted = false
 	state.HaltReason = ""
+	state.HaltEvidence = nil
 	state.Sent["proof"] = v2SentDelivery{
 		Sequence:     2,
 		Acknowledged: true,
 	}
-	if err := runtime.validatePeerWatermarks([4]uint64{0, 1, 1, 0}); err == nil ||
+	if err := runtime.validatePeerWatermarks([4]uint64{12, 13, 1, 0}, evidence); err == nil ||
 		!strings.Contains(err.Error(), "peer rollback") {
 		t.Fatalf("peer rollback error = %v", err)
 	}
-	if !state.Halted {
-		t.Fatal("peer rollback did not halt the relationship")
+	if !state.Halted || state.HaltEvidence == nil || state.HaltEvidence.Field != "hwm_in_data" ||
+		state.HaltEvidence.PeerValue != 1 || state.HaltEvidence.LocalValue != 2 {
+		t.Fatalf("peer rollback evidence = %#v", state.HaltEvidence)
+	}
+
+	state.Halted = false
+	state.HaltReason = ""
+	state.HaltEvidence = nil
+	state.Sent = map[string]v2SentDelivery{
+		"refusal-proof": {Sequence: 4, Rejected: true},
+	}
+	state.Chains["out:data"].SendSequence = 4
+	if err := runtime.validatePeerWatermarks([4]uint64{12, 13, 3, 0}, evidence); err == nil ||
+		!strings.Contains(err.Error(), "peer rollback") || state.HaltEvidence.LocalValue != 4 {
+		t.Fatalf("retained refusal rollback evidence = %#v, %v", state.HaltEvidence, err)
 	}
 }
 

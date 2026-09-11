@@ -166,7 +166,7 @@ func (a *app) cmdMigrate(args []string) error {
 
 func (a *app) cmdPeer(args []string) error {
 	if len(args) == 0 {
-		return fatalError("Usage: dud peer invite|accept|list|show|rename|resume|abandon|revoke|remove|enrollment-key ...")
+		return fatalError("Usage: dud peer invite|accept|list|show|rename|resume|reset|abandon|revoke|remove|enrollment-key ...")
 	}
 	switch args[0] {
 	case "enrollment-key":
@@ -185,6 +185,8 @@ func (a *app) cmdPeer(args []string) error {
 		return a.cmdPeerInvite(args[1:])
 	case "resume":
 		return a.cmdPeerResume(args[1:])
+	case "reset":
+		return a.cmdPeerReset(args[1:])
 	case "abandon":
 		return a.cmdPeerAbandon(args[1:])
 	case "revoke":
@@ -343,6 +345,7 @@ func (a *app) cmdPeerShow(args []string) error {
 
 	profile := report.section("Profile")
 	profile.addf("key epoch", "%d", peer.KeyEpoch)
+	profile.addf("generation", "%d", peer.Generation)
 	profile.addNote("url", settings.BaseURL.Value, settings.BaseURL.Source)
 	profile.addNote("doh", settings.DOHURL.Value, settings.DOHURL.Source)
 	profile.addNote("ech", settings.ECHMode.Value, settings.ECHMode.Source)
@@ -715,6 +718,7 @@ func redactedV2Peer(alias string, peer v2PeerProfile) map[string]any {
 		"status":                  peer.Status,
 		"relationship_id":         peer.RelationshipID,
 		"key_epoch":               peer.KeyEpoch,
+		"generation":              peer.Generation,
 		"peer_pseudonymous_id":    peer.PeerPseudonymousID,
 		"peer_age_recipient":      peer.PeerAgeRecipient,
 		"peer_signing_public_key": peer.PeerSigningPublicKey,

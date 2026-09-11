@@ -204,6 +204,7 @@ async function establishPairing(service, overrides = {}) {
     [10, bootstrap],
     [11, fixed(0x61, 32)],
     [12, now + 900],
+    [128, overrides.invitationFeatures ?? [5, 6, 7, 12]],
   ]);
   const createBody = encodeCbor(
     new Map([
@@ -281,6 +282,7 @@ async function establishPairing(service, overrides = {}) {
     [12, sha256(inviteeStatus)],
     [13, fixed(0x91, 32)],
     [14, locator],
+    [128, overrides.acceptanceFeatures ?? [5, 6, 7, 12]],
   ]);
   const acceptanceSignature = signPairing(
     'acceptance',
@@ -303,7 +305,10 @@ async function establishPairing(service, overrides = {}) {
       acceptBody,
     ),
   );
-  assert.equal(accept.status, 202);
+  assert.equal(accept.status, overrides.acceptStatus ?? 202);
+  if (accept.status !== 202) {
+    return { accept, invitation, acceptance };
+  }
 
   const inviteePublic = await exportSuite.kem.importKey(
     'raw',
@@ -349,7 +354,15 @@ async function establishPairing(service, overrides = {}) {
       confirmationBody,
     ),
   );
-  assert.equal(confirm.status, 202);
+  assert.equal(
+    confirm.status,
+    202,
+    confirm.status === 202
+      ? undefined
+      : JSON.stringify(
+          Array.from(decodeMap(await confirm.clone().arrayBuffer()).entries()),
+        ),
+  );
 
   const completeRole = async (role, statusBearer, signingKey) => {
     const completion = new Map([
@@ -395,6 +408,22 @@ async function establishPairing(service, overrides = {}) {
     transcriptHash,
   };
 }
+
+test('pairing rejects malformed peer feature advertisements', async () => {
+  for (const [field, value] of [
+    ['invitationFeatures', []],
+    ['invitationFeatures', [12, 7]],
+    ['acceptanceFeatures', [12, 12]],
+    ['acceptanceFeatures', [65536]],
+  ]) {
+    const { service } = await createV2TestService(new MemoryV2Store());
+    const pairing = await establishPairing(service, {
+      [field]: value,
+      acceptStatus: 400,
+    });
+    assert.equal(decodeMap(await pairing.accept.arrayBuffer()).get(1), 1);
+  }
+});
 
 test('server age grant decrypts with the Go hybrid relationship identity', async () => {
   const masterSeed = fixed(0x42, 32);
@@ -845,7 +874,7 @@ test('pairing rejects a conflicting rendezvous claim and transcript completion',
   const altered = decodeMap(pairing.acceptBody);
   const alteredAcceptance = requireCborMap(
     altered.get(2),
-    Array.from({ length: 15 }, (_, index) => index),
+    [...Array.from({ length: 15 }, (_, index) => index), 128],
     [],
   );
   alteredAcceptance.set(9, fixed(0xee, 32));

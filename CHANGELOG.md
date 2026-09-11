@@ -8,6 +8,33 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add `dud peer reset PEER` for an authenticated peer relationship reset. Both
+  devices sign the same transcript before the server atomically activates a
+  fresh relationship ID and cryptographic generation. Reset preserves the peer
+  alias, device trust, canonical origin, repository identity, and managed Git
+  refs. The next Git push sends a complete checkpoint.
+- Advertise peer relationship reset support during pairing and reject reset
+  proposals before changing local state when either endpoint lacks it. Peer
+  status, doctor, and JSON output report the proposal ID, both consents, server
+  activation, exact abandoned-delivery counts, and the recovery command for an
+  interrupted reset.
+- Add durable peer relationship reset records to the memory, SQLite, and D1
+  backends. D1 deployments must apply migration `0003_relationship_resets.sql`
+  before serving reset requests.
+
+### Fixed
+
+- Fix rollback detection across the independent peer data and control chains.
+  Signed outgoing high-water marks advertise queued work and do not halt a peer
+  that has not read it. Contradictions against retained signed acknowledgements
+  still halt the relationship and record both values, the field name, control
+  descriptor, and relationship ID.
+- Allow `dud peer revoke PEER --yes` to revoke a halted relationship without
+  advancing either delivery chain. The client preserves the halt evidence and
+  records the local profile as revoked after the server confirms revocation.
+
 ## [2.2.0] - 2026-09-08
 
 ### Added

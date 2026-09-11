@@ -106,6 +106,48 @@ export interface V2RelationshipRepository {
   ): Promise<V2CapabilityReissueOutcome>;
 }
 
+export interface V2StoredRelationshipReset {
+  oldRelationshipId: string;
+  resetId: string;
+  newRelationshipId: string;
+  state: 'proposed' | 'active' | 'cancelled';
+  encryptedState: Uint8Array;
+  createdAt: number;
+  updatedAt: number;
+  activatedAt?: number;
+}
+
+export interface V2RelationshipResetRepository {
+  findRelationshipReset(
+    oldRelationshipId: string,
+  ): Promise<V2StoredRelationshipReset | null>;
+  proposeRelationshipReset(input: {
+    oldRelationshipId: string;
+    resetId: string;
+    newRelationshipId: string;
+    encryptedState: Uint8Array;
+    now: number;
+  }): Promise<V2StoredRelationshipReset>;
+  activateRelationshipReset(input: {
+    oldRelationshipId: string;
+    resetId: string;
+    newRelationship: {
+      id: string;
+      canonicalOrigin: string;
+      encryptedState: Uint8Array;
+      createdAt: number;
+    };
+    encryptedResetState: Uint8Array;
+    now: number;
+  }): Promise<'accepted' | 'already_active' | 'revoked' | 'conflict'>;
+  cancelRelationshipReset(input: {
+    oldRelationshipId: string;
+    resetId: string;
+    encryptedResetState: Uint8Array;
+    now: number;
+  }): Promise<'accepted' | 'already_cancelled' | 'active' | 'conflict'>;
+}
+
 export type V2CapabilityReissueOutcome =
   | 'accepted'
   | 'replayed'

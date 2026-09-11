@@ -36,6 +36,7 @@ test('v2 SQLite migrations create the normalized schema', () => {
     'rate_windows',
     'relationship_nonces',
     'relationship_rate_windows',
+    'relationship_resets',
     'relationships',
     'reservations',
     'revocations',

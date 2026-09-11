@@ -28,6 +28,7 @@ import type {
   V2RepositoryControlEvent,
   V2RepositoryDelivery,
   V2RepositoryAuthorization,
+  V2StoredRelationshipReset,
 } from './v2-repository.js';
 import type {
   D1PairingRecord,
@@ -792,6 +793,193 @@ export class SQLiteV2Database {
             : { revokedAt: Number(row.revoked_at) }),
         }
       : null;
+  }
+
+  findRelationshipReset(
+    oldRelationshipId: string,
+  ): V2StoredRelationshipReset | null {
+    const row = this.requireDatabase()
+      .prepare(
+        'SELECT old_relationship_id, reset_id, new_relationship_id, state, encrypted_state, created_at, updated_at, activated_at FROM relationship_resets WHERE old_relationship_id = ?',
+      )
+      .get(oldRelationshipId) as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+    return {
+      oldRelationshipId: String(row.old_relationship_id),
+      resetId: String(row.reset_id),
+      newRelationshipId: String(row.new_relationship_id),
+      state: String(row.state) as V2StoredRelationshipReset['state'],
+      encryptedState: Uint8Array.from(row.encrypted_state as Uint8Array),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      ...(row.activated_at == null
+        ? {}
+        : { activatedAt: Number(row.activated_at) }),
+    };
+  }
+
+  proposeRelationshipReset(input: {
+    oldRelationshipId: string;
+    resetId: string;
+    newRelationshipId: string;
+    encryptedState: Uint8Array;
+    now: number;
+  }): V2StoredRelationshipReset {
+    this.requireDatabase()
+      .prepare(
+        `INSERT INTO relationship_resets(old_relationship_id, reset_id, new_relationship_id, state, encrypted_state, created_at, updated_at)
+		 SELECT ?, ?, ?, 'proposed', ?, ?, ? WHERE EXISTS (SELECT 1 FROM relationships WHERE id = ? AND state = 'active')
+		 ON CONFLICT(old_relationship_id) DO UPDATE SET reset_id = excluded.reset_id, new_relationship_id = excluded.new_relationship_id, encrypted_state = excluded.encrypted_state, created_at = excluded.created_at, updated_at = excluded.updated_at
+		 WHERE relationship_resets.state = 'cancelled' OR (relationship_resets.state = 'proposed' AND excluded.reset_id < relationship_resets.reset_id)`,
+      )
+      .run(
+        input.oldRelationshipId,
+        input.resetId,
+        input.newRelationshipId,
+        input.encryptedState,
+        input.now,
+        input.now,
+        input.oldRelationshipId,
+      );
+    const stored = this.findRelationshipReset(input.oldRelationshipId);
+    if (!stored) {
+      throw new Error('Relationship is not active.');
+    }
+    return stored;
+  }
+
+  activateRelationshipReset(input: {
+    oldRelationshipId: string;
+    resetId: string;
+    newRelationship: {
+      id: string;
+      canonicalOrigin: string;
+      encryptedState: Uint8Array;
+      createdAt: number;
+    };
+    encryptedResetState: Uint8Array;
+    now: number;
+  }): 'accepted' | 'already_active' | 'revoked' | 'conflict' {
+    const database = this.requireDatabase();
+    const stored = this.findRelationshipReset(input.oldRelationshipId);
+    if (
+      !stored ||
+      stored.resetId !== input.resetId ||
+      stored.newRelationshipId !== input.newRelationship.id
+    ) {
+      return 'conflict';
+    }
+    if (stored.state === 'active') {
+      return 'already_active';
+    }
+    if (stored.state !== 'proposed') {
+      return 'conflict';
+    }
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const old = database
+        .prepare(
+          "SELECT 1 AS present FROM relationships WHERE id = ? AND state = 'active'",
+        )
+        .get(input.oldRelationshipId);
+      if (!old) {
+        database.exec('ROLLBACK');
+        return 'revoked';
+      }
+      const inserted = database
+        .prepare(
+          "INSERT OR IGNORE INTO relationships(id, canonical_origin, state, encrypted_state, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?)",
+        )
+        .run(
+          input.newRelationship.id,
+          input.newRelationship.canonicalOrigin,
+          input.newRelationship.encryptedState,
+          input.newRelationship.createdAt,
+          input.now,
+        ) as { changes: number };
+      if (inserted.changes !== 1) {
+        database.exec('ROLLBACK');
+        return 'conflict';
+      }
+      database
+        .prepare(
+          "UPDATE relationship_resets SET state = 'active', encrypted_state = ?, updated_at = ?, activated_at = ? WHERE old_relationship_id = ? AND reset_id = ? AND state = 'proposed'",
+        )
+        .run(
+          input.encryptedResetState,
+          input.now,
+          input.now,
+          input.oldRelationshipId,
+          input.resetId,
+        );
+      database
+        .prepare(
+          'UPDATE capabilities SET revoked_at = ? WHERE relationship_id = ? AND revoked_at IS NULL',
+        )
+        .run(input.now, input.oldRelationshipId);
+      database
+        .prepare(
+          'INSERT OR IGNORE INTO revocations(id, relationship_id, direction, scope, created_at, expires_at, encrypted_envelope) VALUES (?, ?, NULL, NULL, ?, 2147483647, ?)',
+        )
+        .run(
+          input.resetId,
+          input.oldRelationshipId,
+          input.now,
+          new Uint8Array(),
+        );
+      database
+        .prepare(
+          "UPDATE relationships SET state = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(input.now, input.now, input.oldRelationshipId);
+      database.exec('COMMIT');
+      return 'accepted';
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  cancelRelationshipReset(input: {
+    oldRelationshipId: string;
+    resetId: string;
+    encryptedResetState: Uint8Array;
+    now: number;
+  }): 'accepted' | 'already_cancelled' | 'active' | 'conflict' {
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const stored = this.findRelationshipReset(input.oldRelationshipId);
+      if (!stored || stored.resetId !== input.resetId) {
+        database.exec('ROLLBACK');
+        return 'conflict';
+      }
+      if (stored.state === 'active') {
+        database.exec('ROLLBACK');
+        return 'active';
+      }
+      if (stored.state === 'cancelled') {
+        database.exec('ROLLBACK');
+        return 'already_cancelled';
+      }
+      database
+        .prepare(
+          "UPDATE relationship_resets SET state = 'cancelled', encrypted_state = ?, updated_at = ? WHERE old_relationship_id = ? AND reset_id = ? AND state = 'proposed'",
+        )
+        .run(
+          input.encryptedResetState,
+          input.now,
+          input.oldRelationshipId,
+          input.resetId,
+        );
+      database.exec('COMMIT');
+      return 'accepted';
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   /**

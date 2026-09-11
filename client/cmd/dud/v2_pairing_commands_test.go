@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -221,6 +222,45 @@ func TestPeerRevokePublishesControlEventThenDisablesPeer(t *testing.T) {
 	}
 	if !stored.Halted || stored.HaltReason != "relationship revoked locally" {
 		t.Fatalf("delivery state = %#v", stored)
+	}
+}
+
+func TestPeerRevokeBypassesAHaltedDeliveryChain(t *testing.T) {
+	paths, state := newPairedV2TestPeer(t, "laptop")
+	state.Halted = true
+	state.HaltReason = "signed peer hwm_in_data 1 is inconsistent with local value 2 and proves peer rollback"
+	state.HaltEvidence = &v2HaltEvidence{
+		Field: "hwm_in_data", PeerValue: 1, LocalValue: 2,
+		DescriptorSequence: 5, DescriptorDigest: strings.Repeat("ab", 32),
+		RelationshipID: state.RelationshipID,
+	}
+	if err := writeV2PeerDeliveryState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.AdminCapability, []byte(v2Base64URL(bytes.Repeat([]byte{0x84}, 32))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transport := &revocationTestTransport{}
+	a := newDrainingV2TestApp(t, transport, &bytes.Buffer{}, &bytes.Buffer{})
+	if err := a.run([]string{"peer", "revoke", "laptop", "--yes", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if transport.controlEvents != 0 || transport.adminRequests != 1 {
+		t.Fatalf("halted revoke requests: controls=%d admin=%d", transport.controlEvents, transport.adminRequests)
+	}
+	stored, err := loadV2PeerDeliveryState(paths, state.RelationshipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.HaltEvidence == nil || stored.HaltEvidence.DescriptorDigest != state.HaltEvidence.DescriptorDigest {
+		t.Fatalf("halt evidence was not retained: %#v", stored.HaltEvidence)
+	}
+	cfg, _, err := loadV2Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Peers["laptop"].Status != "revoked" {
+		t.Fatalf("peer = %#v", cfg.Peers["laptop"])
 	}
 }
 
@@ -623,6 +663,9 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !slices.Equal(inviteePending.PeerFeatures, v2LocalPeerFeatures) {
+		t.Fatalf("invitee retained peer features %#v, want %#v", inviteePending.PeerFeatures, v2LocalPeerFeatures)
+	}
 	var acceptWrapper map[int]any
 	if err := v2DecMode.Unmarshal(acceptTransport.acceptBody, &acceptWrapper); err != nil {
 		t.Fatal(err)
@@ -648,6 +691,9 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 		confirmTransport,
 	); err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(inviterPending.PeerFeatures, v2LocalPeerFeatures) {
+		t.Fatalf("inviter retained peer features %#v, want %#v", inviterPending.PeerFeatures, v2LocalPeerFeatures)
 	}
 	var confirmWrapper map[int]any
 	if err := v2DecMode.Unmarshal(confirmTransport.confirmBody, &confirmWrapper); err != nil {

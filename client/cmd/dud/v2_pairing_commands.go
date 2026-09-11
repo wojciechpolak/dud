@@ -253,18 +253,19 @@ func (a *app) newV2Invitation(cfg *v2LocalConfig, paths v2Paths, alias, origin s
 		return nil, "", nil, err
 	}
 	invitation := map[int]any{
-		1:  uint64(2),
-		2:  uint64(1),
-		3:  uint64(1),
-		4:  invitationID,
-		5:  relationshipID,
-		6:  pairingID,
-		7:  hpkeKey.PublicKey().Bytes(),
-		8:  append([]byte(nil), signingKey.Public().(ed25519.PublicKey)...),
-		9:  origin,
-		10: bootstrap,
-		11: nonce,
-		12: expiresAt,
+		1:             uint64(2),
+		2:             uint64(1),
+		3:             uint64(1),
+		4:             invitationID,
+		5:             relationshipID,
+		6:             pairingID,
+		7:             hpkeKey.PublicKey().Bytes(),
+		8:             append([]byte(nil), signingKey.Public().(ed25519.PublicKey)...),
+		9:             origin,
+		10:            bootstrap,
+		11:            nonce,
+		12:            expiresAt,
+		kPeerFeatures: v2LocalPeerFeatureList(),
 	}
 	invitationCBOR, err := encodeV2Invitation(invitation)
 	if err != nil {
@@ -491,18 +492,19 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 	statusHash := sha256.Sum256(statusCapability)
 	invitationDigest := sha256.Sum256(invitationCBOR)
 	acceptanceForBinder := map[int]any{
-		1:  uint64(2),
-		2:  uint64(1),
-		3:  uint64(1),
-		4:  cloneV2Bytes(invitation[4]),
-		5:  cloneV2Bytes(invitation[5]),
-		6:  localPairingID,
-		7:  localHPKE.PublicKey().Bytes(),
-		8:  append([]byte(nil), localSigning.Public().(ed25519.PublicKey)...),
-		9:  localNonce,
-		10: invitationDigest[:],
-		12: statusHash[:],
-		14: locator,
+		1:             uint64(2),
+		2:             uint64(1),
+		3:             uint64(1),
+		4:             cloneV2Bytes(invitation[4]),
+		5:             cloneV2Bytes(invitation[5]),
+		6:             localPairingID,
+		7:             localHPKE.PublicKey().Bytes(),
+		8:             append([]byte(nil), localSigning.Public().(ed25519.PublicKey)...),
+		9:             localNonce,
+		10:            invitationDigest[:],
+		12:            statusHash[:],
+		14:            locator,
+		kPeerFeatures: v2LocalPeerFeatureList(),
 	}
 	binderBytes, err := v2EncMode.Marshal(acceptanceForBinder)
 	if err != nil {
@@ -574,6 +576,7 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 		PeerNonce:            v2Base64URL(invitation[11].([]byte)),
 		PeerAgeRecipient:     v2Base64URL(invitation[7].([]byte)),
 		PeerSigningPublicKey: v2Base64URL(invitation[8].([]byte)),
+		PeerFeatures:         v2MetadataFeatures(invitation),
 		EncB:                 v2Base64URL(encB),
 		SecretB:              v2Base64URL(secretB),
 		ServerContract:       serverContract,
@@ -882,6 +885,7 @@ func (a *app) completeInviterKeyConfirmation(paths v2Paths, pending *v2PendingPa
 	pending.PeerNonce = v2Base64URL(acceptance[9].([]byte))
 	pending.PeerAgeRecipient = v2Base64URL(acceptance[7].([]byte))
 	pending.PeerSigningPublicKey = v2Base64URL(peerSigning)
+	pending.PeerFeatures = v2MetadataFeatures(acceptance)
 	pending.EncA = v2Base64URL(encA)
 	pending.EncB = v2Base64URL(encB)
 	pending.SecretA = v2Base64URL(secretA)
@@ -1224,69 +1228,44 @@ func (a *app) cmdPeerRevoke(args []string) error {
 	if !confirmed {
 		return fatalError("peer revocation preserves but disables pending delivery state; rerun with --yes")
 	}
-	if err := a.withV2Peer(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
-		_ = runtime.boundedControlDrain(context.Background())
-		if err := runtime.flushPendingCompletions(context.Background()); err != nil {
-			return fmt.Errorf("flush queued completions before revocation: %w", err)
+	if err := a.withV2PeerForRecovery(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
+		ctx := context.Background()
+		if !runtime.state.Halted {
+			_ = runtime.boundedControlDrain(ctx)
 		}
-		if err := runtime.flushPendingDeliveries(context.Background()); err != nil {
-			return fmt.Errorf("flush queued deliveries before revocation: %w", err)
-		}
-		if err := runtime.flushPendingControlPublications(context.Background()); err != nil {
-			return fmt.Errorf("flush queued control events before revocation: %w", err)
-		}
-		if err := runtime.publishPeerRevocation(context.Background(), 0); err != nil {
-			return fmt.Errorf("publish signed peer revocation before disabling its capabilities: %w", err)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	cfg, paths, err := loadV2Config()
-	if err != nil {
-		return err
-	}
-	peer, exists := cfg.Peers[alias]
-	if !exists {
-		return fmt.Errorf("unknown peer %q", alias)
-	}
-	relationshipID, err := hex.DecodeString(peer.RelationshipID)
-	if err != nil || len(relationshipID) != 16 {
-		return errors.New("peer relationship ID is invalid")
-	}
-	admin, err := loadV2AdminCapability(paths)
-	if err != nil {
-		return err
-	}
-	transport, err := newV2PeerTransport(a, cfg, &peer, 30*time.Second)
-	if err != nil {
-		return err
-	}
-	body, err := v2EncMode.Marshal(map[int]any{1: relationshipID})
-	if err != nil {
-		return err
-	}
-	if _, err := doV2CBORRequest(
-		context.Background(),
-		transport,
-		"POST",
-		peer.BaseURL,
-		"/v2/admin/relationships/revoke",
-		admin,
-		body,
-		v2MaxDescriptorBytes,
-	); err != nil {
-		return err
-	}
-	if peer.Status == "active" {
-		state, stateErr := loadV2PeerDeliveryState(paths, peer.RelationshipID)
-		if stateErr == nil {
-			state.Halted = true
-			state.HaltReason = "relationship revoked locally"
-			if err := writeV2PeerDeliveryState(paths, state); err != nil {
-				return err
+		if !runtime.state.Halted {
+			chainReady := true
+			flushes := []struct {
+				label string
+				run   func(context.Context) error
+			}{
+				{"queued completions", runtime.flushPendingCompletions},
+				{"queued deliveries", runtime.flushPendingDeliveries},
+				{"queued control events", runtime.flushPendingControlPublications},
+			}
+			for _, flush := range flushes {
+				if err := flush.run(ctx); err != nil {
+					chainReady = false
+					fmt.Fprintf(a.errOut, "WARNING: could not flush %s before revocation: %v\n", flush.label, err)
+					break
+				}
+			}
+			if chainReady {
+				if err := runtime.publishPeerRevocation(ctx, 0); err != nil {
+					fmt.Fprintf(a.errOut, "WARNING: could not publish signed peer revocation: %v\n", err)
+				}
 			}
 		}
+		if err := runtime.revokeHaltedRelationship(ctx); err != nil {
+			return fmt.Errorf("revoke relationship on server: %w", err)
+		}
+		runtime.state.Halted = true
+		if runtime.state.HaltReason == "" {
+			runtime.state.HaltReason = "relationship revoked locally"
+		}
+		return writeV2PeerDeliveryState(runtime.paths, runtime.state)
+	}); err != nil {
+		return err
 	}
 	if _, err := updateV2Config(func(current *v2LocalConfig) error {
 		value := current.Peers[alias]

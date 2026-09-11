@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newV2GitTestCheckpoint builds a real complete checkpoint from a repository and
@@ -67,12 +68,43 @@ func TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues(t *testing.T) {
 	bundle, metadata := newV2GitTestCheckpoint(t, source)
 
 	paths, state := newPairedV2TestPeer(t, "laptop")
+	ackedDigest := bytes.Repeat([]byte{0x42}, 32)
+	state.Chains["out:data"].SendSequence = 1
+	state.Sent[hex.EncodeToString(ackedDigest)] = v2SentDelivery{
+		Sequence: 1, DescriptorDigest: hex.EncodeToString(ackedDigest), PayloadType: 4,
+	}
 	if err := writeV2PeerDeliveryState(paths, state); err != nil {
 		t.Fatal(err)
 	}
 	crypto := newV2TestPeerCrypto(t, paths, state, "laptop")
 	unapplicable := buildInboundV2GitDeliveryAt(t, crypto, *metadata, bundle, 1, strings.Repeat("00", 32), unapplicableV2GitMetadata)
 	applicable := buildInboundV2GitDeliveryAt(t, crypto, *metadata, bundle, 2, unapplicable.digest, nil)
+
+	// The peer created both Git checkpoints before its refusal control message
+	// arrived. Its hwm_out_data therefore advertises sequence 2 while this
+	// receiver is still at zero. Data and control are independent chains, so the
+	// actual control handler must accept that ordering and leave both Git
+	// descriptors available to the normal fetch path.
+	control := buildInboundV2ControlEnvelope(t, crypto, 5, map[int]any{
+		1: uint64(1), 2: ackedDigest, 3: uint64(1), 4: make([]byte, 32),
+		5: uint64(2), 6: uint64(1), 7: uint64(0), 8: uint64(0),
+	})
+	controlApp := newDrainingV2TestApp(t, &emptySlotTransport{}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err := controlApp.withV2Peer("laptop", time.Second, func(runtime *v2PeerRuntime) error {
+		if err := runtime.applyV2GranularControlEnvelope(control); err != nil {
+			return err
+		}
+		return writeV2PeerDeliveryState(runtime.paths, runtime.state)
+	}); err != nil {
+		t.Fatalf("control-first Git ordering halted the relationship: %v", err)
+	}
+	ordered, err := loadV2PeerDeliveryState(paths, state.RelationshipID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordered.Halted || !ordered.Sent[hex.EncodeToString(ackedDigest)].Rejected {
+		t.Fatalf("control-first Git state = %#v", ordered)
+	}
 	transport := &drainingInboxTransport{queue: []stubbedV2Delivery{unapplicable, applicable}}
 
 	var stdout, stderr bytes.Buffer
@@ -356,7 +388,7 @@ func TestV2PeerFeaturesAreAdvertisedAndParsed(t *testing.T) {
 			t.Fatalf("advertised features = %#v, want %#v", features, v2LocalPeerFeatures)
 		}
 	}
-	if len(features) != 3 || features[0] != 5 || features[1] != 6 || features[2] != 7 {
+	if len(features) != 4 || features[0] != 5 || features[1] != 6 || features[2] != 7 || features[3] != 12 {
 		t.Fatalf("incremental peer features = %#v", features)
 	}
 	if v2MetadataFeatures(map[int]any{1: uint64(1)}) != nil {

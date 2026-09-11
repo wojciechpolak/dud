@@ -5,6 +5,7 @@ package main
 import (
 	"crypto/hkdf"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -47,6 +48,19 @@ func deriveV2Slot(secret []byte, chain string, epoch uint64) ([]byte, error) {
 		nil,
 		fmt.Sprintf("dud/v2/slot|%s|%d", chain, epoch),
 		16,
+	)
+}
+
+func deriveV2ResetRelationshipSecret(secret, resetID, relationshipID []byte, direction uint64) ([]byte, error) {
+	if len(secret) != 32 || len(resetID) != 16 || len(relationshipID) != 16 || direction > 1 {
+		return nil, errors.New("relationship reset secret input is invalid")
+	}
+	return hkdf.Key(
+		sha256.New,
+		secret,
+		resetID,
+		fmt.Sprintf("dud/v2/relationship-reset|%s|%d", hex.EncodeToString(relationshipID), direction),
+		32,
 	)
 }
 

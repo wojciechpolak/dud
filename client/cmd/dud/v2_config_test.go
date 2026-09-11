@@ -77,6 +77,33 @@ func TestV2ConfigRejectsReadableSeed(t *testing.T) {
 	}
 }
 
+func TestV2ConfigUpdateCanJoinAnExistingWorldLock(t *testing.T) {
+	setTestV2Homes(t)
+	_, paths, err := initializeV2Config("desktop", "https://dud.example.com", "https://dns.google/dns-query", "hard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireV2ConfigLock(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	updated, err := updateV2ConfigLocked(paths, func(cfg *v2LocalConfig) error {
+		cfg.Device = "desktop-after-activation"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Device != "desktop-after-activation" {
+		t.Fatalf("locked configuration update = %#v", updated)
+	}
+	loaded, _, err := loadV2Config()
+	if err != nil || loaded.Device != updated.Device {
+		t.Fatalf("locked configuration reload = %#v, %v", loaded, err)
+	}
+}
+
 func TestV2ConfigParserRejectsDuplicateKeys(t *testing.T) {
 	_, err := parseV2Config([]byte("version = 2\nversion = 2\n"))
 	if err == nil || !strings.Contains(err.Error(), "duplicate key") {

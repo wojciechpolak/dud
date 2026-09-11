@@ -467,6 +467,113 @@ docker run --rm --user 1000 --entrypoint /bin/sh \
   exit 1
 }
 
+# A clean peer relationship reset needs independent consent on both devices.
+# The activated generation keeps the aliases, canonical origin, repository ID,
+# and managed remote-tracking refs while replacing the cryptographic
+# relationship and restarting both delivery directions at sequence one.
+run_client "$DESKTOP_STATE" sync laptop >/dev/null
+run_client "$LAPTOP_STATE" sync desktop >/dev/null
+OLD_RELATIONSHIP=$(run_client "$DESKTOP_STATE" peer show laptop --json |
+  sed -n 's/.*"relationship_id": "\([0-9a-f]*\)".*/\1/p')
+[ -n "$OLD_RELATIONSHIP" ] || {
+  echo "peer status omitted the relationship ID before reset" >&2
+  exit 1
+}
+
+RESET_PROPOSAL=$(run_client "$DESKTOP_STATE" peer reset laptop --yes --json)
+printf '%s\n' "$RESET_PROPOSAL" | grep -q '"phase": "proposed"' || {
+  printf '%s\n' "$RESET_PROPOSAL" >&2
+  echo "first reset consent did not leave a durable proposal" >&2
+  exit 1
+}
+RESET_ACCEPTANCE=$(run_client "$LAPTOP_STATE" peer reset desktop --yes --json)
+printf '%s\n' "$RESET_ACCEPTANCE" | grep -q '"server_activated": true' || {
+  printf '%s\n' "$RESET_ACCEPTANCE" >&2
+  echo "second reset consent did not activate the fresh generation" >&2
+  exit 1
+}
+RESET_COMPLETION=$(run_client "$DESKTOP_STATE" peer reset laptop --yes --json)
+printf '%s\n' "$RESET_COMPLETION" | grep -q '"server_activated": true' || {
+  printf '%s\n' "$RESET_COMPLETION" >&2
+  echo "reset initiator did not converge on server activation" >&2
+  exit 1
+}
+
+DESKTOP_AFTER_RESET=$(run_client "$DESKTOP_STATE" peer show laptop --json)
+LAPTOP_AFTER_RESET=$(run_client "$LAPTOP_STATE" peer show desktop --json)
+for status in "$DESKTOP_AFTER_RESET" "$LAPTOP_AFTER_RESET"; do
+  printf '%s\n' "$status" | grep -q '"generation": 1' || {
+    printf '%s\n' "$status" >&2
+    echo "peer status did not report reset generation one" >&2
+    exit 1
+  }
+  printf '%s\n' "$status" | grep -q '"status": "active"' || {
+    printf '%s\n' "$status" >&2
+    echo "peer alias was not active after reset" >&2
+    exit 1
+  }
+done
+NEW_DESKTOP_RELATIONSHIP=$(printf '%s\n' "$DESKTOP_AFTER_RESET" |
+  sed -n 's/.*"relationship_id": "\([0-9a-f]*\)".*/\1/p')
+NEW_LAPTOP_RELATIONSHIP=$(printf '%s\n' "$LAPTOP_AFTER_RESET" |
+  sed -n 's/.*"relationship_id": "\([0-9a-f]*\)".*/\1/p')
+if [ -z "$NEW_DESKTOP_RELATIONSHIP" ] ||
+  [ "$NEW_DESKTOP_RELATIONSHIP" != "$NEW_LAPTOP_RELATIONSHIP" ] ||
+  [ "$NEW_DESKTOP_RELATIONSHIP" = "$OLD_RELATIONSHIP" ]; then
+  echo "peer reset did not converge on one fresh relationship ID" >&2
+  exit 1
+fi
+
+# The laptop-to-desktop direction has not sent in this generation, so this
+# message must be its first data descriptor.
+RESET_MESSAGE=$(run_client "$LAPTOP_STATE" send desktop -m after-reset --json)
+printf '%s\n' "$RESET_MESSAGE" | grep -q '"sequence": 1' || {
+  printf '%s\n' "$RESET_MESSAGE" >&2
+  echo "post-reset message did not restart its data chain at sequence one" >&2
+  exit 1
+}
+RESET_RECEIVE=$(run_client "$DESKTOP_STATE" receive laptop --wait 30s)
+printf '%s\n' "$RESET_RECEIVE" | grep -q '^after-reset$' || {
+  printf '%s\n' "$RESET_RECEIVE" >&2
+  echo "post-reset message did not round-trip" >&2
+  exit 1
+}
+
+# Reset cleanup must preserve the accepted remote-tracking ref until another
+# checkpoint replaces it.
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$LAPTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'test "$(git -C /state/repo show refs/remotes/desktop/main:README.md)" = incremental' || {
+  echo "peer reset removed a managed remote-tracking ref" >&2
+  exit 1
+}
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$DESKTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'printf "after reset\n" > /state/repo/README.md && git -C /state/repo add README.md && git -C /state/repo commit -m reset-generation >/dev/null'
+RESET_GIT_PUSH=$(run_git_client "$DESKTOP_STATE" git push laptop --json)
+printf '%s\n' "$RESET_GIT_PUSH" | grep -q '"sequence": 1' || {
+  printf '%s\n' "$RESET_GIT_PUSH" >&2
+  echo "post-reset Git checkpoint did not restart its data chain at sequence one" >&2
+  exit 1
+}
+printf '%s\n' "$RESET_GIT_PUSH" | grep -q '"checkpoint_mode": "full"' || {
+  printf '%s\n' "$RESET_GIT_PUSH" >&2
+  echo "first post-reset Git push was not a complete checkpoint" >&2
+  exit 1
+}
+RESET_GIT_FETCH=$(run_git_client "$LAPTOP_STATE" git fetch desktop --json)
+printf '%s\n' "$RESET_GIT_FETCH" | grep -q '"checkpoint_mode": "full"' || {
+  printf '%s\n' "$RESET_GIT_FETCH" >&2
+  echo "first post-reset Git fetch did not apply the complete checkpoint" >&2
+  exit 1
+}
+docker run --rm --user 1000 --entrypoint /bin/sh \
+  -v "$LAPTOP_STATE:/state" "$CLIENT_IMAGE" -c \
+  'test "$(git -C /state/repo show refs/remotes/desktop/main:README.md)" = "after reset"' || {
+  echo "post-reset Git fetch did not update the isolated remote ref" >&2
+  exit 1
+}
+
 # A Git bundle does not carry the repository's shallow-boundary file. Rejecting
 # the repository before creating DUD state prevents a bundle that looks complete
 # but still references parent commits the sender does not have.
@@ -563,4 +670,4 @@ if docker run --rm --entrypoint /bin/sh "$CLIENT_IMAGE" -c \
   exit 1
 fi
 
-echo "V2 Docker pairing, resumable delivery, incremental Git, shallow-repository rejection, and dead drop transport passed."
+echo "V2 Docker pairing, resumable delivery, peer relationship reset, incremental Git, shallow-repository rejection, and dead drop transport passed."

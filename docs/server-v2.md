@@ -12,9 +12,10 @@ step-by-step first deployment lives in the repository
 
 A v2 server is a blind relay with an accounting ledger. It holds:
 
-- **Metadata.** Relationships, capability lookup records, delivery and control
-  event rows, staged reservations, nonce claims, and quota counters. On
-  Cloudflare this is D1; self-hosted it is SQLite.
+- **Metadata.** Relationships, encrypted peer relationship reset transcripts,
+  capability lookup records, delivery and control event rows, staged
+  reservations, nonce claims, and quota counters. On Cloudflare this is D1;
+  self-hosted it is SQLite.
 - **Bodies.** Opaque ciphertext. On Cloudflare this is R2; self-hosted it is the
   filesystem under the data directory.
 - **Whole-state records.** Revocations, encrypted verifier secrets, and pairing
@@ -43,6 +44,10 @@ never has to probe.
 
 `GET /v2/capabilities` is the only unauthenticated v2 route and is safe to
 expose to a health checker.
+
+Feature 12 advertises the authenticated peer relationship reset endpoint. It is
+part of the server build rather than a deployment flag. Clients also require the
+peer's signed feature-12 advertisement before they write a proposal.
 
 ## 3. Credentials
 
@@ -191,7 +196,11 @@ npx wrangler d1 migrations apply dud-v2 --remote
 npx wrangler d1 migrations list dud-v2 --remote
 ```
 
-Use `--local` to prepare the database that `npx wrangler dev` uses.
+Use `--local` to prepare the database that `npx wrangler dev` uses. Migration
+`0003_relationship_resets.sql` adds the durable reset state used to select one
+proposal, activate one successor generation, and retain the old relationship
+tombstone. The self-hosted SQLite migrator applies the equivalent table
+transactionally.
 
 ### Recreating the database
 

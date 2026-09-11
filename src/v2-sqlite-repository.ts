@@ -11,6 +11,7 @@ import type {
   V2RepositoryControlEvent,
   V2RepositoryDelivery,
   V2RelationshipRepository,
+  V2RelationshipResetRepository,
   V2ReconciliationRepository,
 } from './v2-repository.js';
 import { SQLiteV2Database } from './v2-sqlite.js';
@@ -30,6 +31,7 @@ export class SQLiteV2Repository
     V2Repository,
     V2AdministrativeRepository,
     V2RelationshipRepository,
+    V2RelationshipResetRepository,
     V2PairingRepository,
     V2ReconciliationRepository
 {
@@ -97,6 +99,34 @@ export class SQLiteV2Repository
 
   async findRelationship(id: string) {
     return this.database.findRelationship(id);
+  }
+
+  async findRelationshipReset(oldRelationshipId: string) {
+    return this.database.findRelationshipReset(oldRelationshipId);
+  }
+
+  async proposeRelationshipReset(
+    input: Parameters<
+      V2RelationshipResetRepository['proposeRelationshipReset']
+    >[0],
+  ) {
+    return this.database.proposeRelationshipReset(input);
+  }
+
+  async activateRelationshipReset(
+    input: Parameters<
+      V2RelationshipResetRepository['activateRelationshipReset']
+    >[0],
+  ) {
+    return this.database.activateRelationshipReset(input);
+  }
+
+  async cancelRelationshipReset(
+    input: Parameters<
+      V2RelationshipResetRepository['cancelRelationshipReset']
+    >[0],
+  ) {
+    return this.database.cancelRelationshipReset(input);
   }
 
   async commitCapabilityReissue(

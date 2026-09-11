@@ -34,13 +34,14 @@ function additionalData(relationshipId: string): Uint8Array {
 function value(record: V2RelationshipRecord): Uint8Array {
   return encodeCbor(
     new Map<number, CborValue>([
-      [1, 1],
+      [1, 2],
       [2, record.canonicalOrigin],
       [3, record.inviterSigningPublicKey],
       [4, record.inviterAgeRecipient],
       [5, record.inviteeSigningPublicKey],
       [6, record.inviteeAgeRecipient],
       [7, record.createdAt],
+      [8, record.generation ?? 0],
     ]),
   );
 }
@@ -114,15 +115,24 @@ export async function decryptV2RelationshipState(
         arrayBuffer(encryptedState.subarray(12)),
       ),
     );
+    const raw = decodeCbor(plaintext);
+    if (!(raw instanceof Map)) {
+      throw new Error('invalid');
+    }
+    const version = raw.get(1);
     decoded = requireCborMap(
-      decodeCbor(plaintext),
-      [1, 2, 3, 4, 5, 6, 7],
-      [1, 2, 3, 4, 5, 6, 7],
+      raw,
+      version === 1 ? [1, 2, 3, 4, 5, 6, 7] : [1, 2, 3, 4, 5, 6, 7, 8],
+      version === 1 ? [1, 2, 3, 4, 5, 6, 7] : [1, 2, 3, 4, 5, 6, 7, 8],
     );
   } catch {
     throw new Error('Encrypted relationship state failed authentication.');
   }
-  if (decoded.get(1) !== 1 || typeof decoded.get(7) !== 'number') {
+  if (
+    (decoded.get(1) !== 1 && decoded.get(1) !== 2) ||
+    typeof decoded.get(7) !== 'number' ||
+    (decoded.get(1) === 2 && typeof decoded.get(8) !== 'number')
+  ) {
     throw new Error('Encrypted relationship state is invalid.');
   }
   return {
@@ -133,5 +143,6 @@ export async function decryptV2RelationshipState(
     inviteeSigningPublicKey: text(decoded, 5),
     inviteeAgeRecipient: text(decoded, 6),
     createdAt: decoded.get(7) as number,
+    generation: decoded.get(1) === 2 ? (decoded.get(8) as number) : 0,
   };
 }
