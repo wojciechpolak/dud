@@ -30,6 +30,7 @@ those see the [README](../README.md#quick-start).
 | `npm run check:docs`    | required documents, links, and terminology         |
 | `npm run check:vectors` | protocol test vectors on both sides                |
 | `npm run test:e2e:v2`   | Dockerized end-to-end integration                  |
+| `npm version minor`     | prepare, commit, and tag the next minor release    |
 | `npx wrangler dev`      | run the Worker locally                             |
 
 Run a single test file:
@@ -42,6 +43,13 @@ node --test tests/worker.test.mjs
 `test:client`, `test:client:race`, and `npm test`. Run it before handing off a
 broad change; run `npm run test:e2e:v2` as well when deployment or end-to-end
 peer behavior changes.
+
+Use `npm version major`, `npm version minor`, or `npm version patch` to cut a
+release commit and its `vMAJOR.MINOR.PATCH` tag. The command updates the package
+manifest and lockfile, copies the version to the server defaults, examples, and
+tests, and adds a dated heading below `Unreleased` in the changelog. It stops
+before editing those files if any checked-in version has drifted from
+`package.json`.
 
 ## 3. Coverage
 

@@ -28,6 +28,8 @@
     "test:coverage:client": "node scripts/test-coverage.mjs client",
     "test:coverage:server": "node scripts/test-coverage.mjs server",
     "test:e2e:v2": "./scripts/v2-docker-e2e.sh",
+    "preversion": "node scripts/prepare-release.mjs check",
+    "version": "node scripts/prepare-release.mjs update",
     "check:pins": "node scripts/check-pins.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "check:vectors": "node scripts/check-vectors.mjs",
