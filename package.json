@@ -44,10 +44,10 @@
   "devDependencies": {
     "c8": "^10.1.3",
     "esbuild": "0.28.1",
-    "miniflare": "5.20260801.1-alpha",
+    "miniflare": "5.20260910.0-alpha",
     "oxfmt": "^0.60.0",
     "oxlint": "^1.60.0",
     "typescript": "^7.0.2",
-    "wrangler": "^4.94.0"
+    "wrangler": "^4.131.0"
   }
 }
