@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-11
+
 ### Added
 
 - Add `dud peer reset PEER` for an authenticated peer relationship reset. Both
