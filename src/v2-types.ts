@@ -98,6 +98,25 @@ export interface V2RelationshipRecord {
   inviteeSigningPublicKey: string;
   inviteeAgeRecipient: string;
   createdAt: number;
+  generation?: number;
+}
+
+export interface V2RelationshipResetRecord {
+  oldRelationshipId: string;
+  resetId: string;
+  newRelationshipId: string;
+  state: 'proposed' | 'active' | 'cancelled';
+  proposal: string;
+  proposalSignature: string;
+  acceptance?: string;
+  acceptanceSignature?: string;
+  receipt?: string;
+  cancellation?: string;
+  cancellationSignature?: string;
+  createdAt: number;
+  updatedAt: number;
+  activatedAt?: number;
+  relationship: V2RelationshipRecord;
 }
 
 export interface V2StoredState {
@@ -108,6 +127,7 @@ export interface V2StoredState {
   rateWindows: Record<string, V2RateWindow>;
   invitations: Record<string, V2PairingInvitationRecord>;
   relationships: Record<string, V2RelationshipRecord>;
+  relationshipResets: Record<string, V2RelationshipResetRecord>;
   legacyObjects: Record<string, V2LegacyObjectRecord>;
   legacyCommittedBytes: number;
 }
@@ -121,6 +141,7 @@ export function emptyV2State(): V2StoredState {
     rateWindows: {},
     invitations: {},
     relationships: {},
+    relationshipResets: {},
     legacyObjects: {},
     legacyCommittedBytes: 0,
   };

@@ -44,6 +44,7 @@ type v2PeerProfile struct {
 	Status                   string
 	RelationshipID           string
 	KeyEpoch                 uint64
+	Generation               uint64
 	PeerPseudonymousID       string
 	PeerAgeRecipient         string
 	PeerSigningPublicKey     string
@@ -348,7 +349,7 @@ func writeV2Config(paths v2Paths, cfg *v2LocalConfig) error {
 }
 
 func updateV2Config(mutator func(*v2LocalConfig) error) (*v2LocalConfig, error) {
-	cfg, paths, err := loadV2Config()
+	_, paths, err := loadV2Config()
 	if err != nil {
 		return nil, err
 	}
@@ -357,12 +358,20 @@ func updateV2Config(mutator func(*v2LocalConfig) error) (*v2LocalConfig, error) 
 		return nil, err
 	}
 	defer unlock()
+	return updateV2ConfigLocked(paths, mutator)
+}
+
+// updateV2ConfigLocked reloads and replaces the configuration while its caller
+// holds the world lock. Relationship activation already holds that lock across
+// delivery-state and profile writes, so acquiring it again would reject the
+// same process and strand the activated generation.
+func updateV2ConfigLocked(paths v2Paths, mutator func(*v2LocalConfig) error) (*v2LocalConfig, error) {
 	// Reload after acquiring the lock so a completed writer cannot be lost.
 	body, err := os.ReadFile(paths.Config)
 	if err != nil {
 		return nil, err
 	}
-	cfg, err = parseV2Config(body)
+	cfg, err := parseV2Config(body)
 	if err != nil {
 		return nil, err
 	}
@@ -443,6 +452,7 @@ func formatV2Config(cfg *v2LocalConfig) []byte {
 			writeV2TOMLString(&output, "relationship_id", peer.RelationshipID)
 		}
 		fmt.Fprintf(&output, "key_epoch = %d\n", peer.KeyEpoch)
+		fmt.Fprintf(&output, "generation = %d\n", peer.Generation)
 		writeV2TOMLStringIfSet(&output, "peer_pseudonymous_id", peer.PeerPseudonymousID)
 		writeV2TOMLStringIfSet(&output, "peer_age_recipient", peer.PeerAgeRecipient)
 		writeV2TOMLStringIfSet(&output, "peer_signing_public_key", peer.PeerSigningPublicKey)
@@ -585,9 +595,13 @@ func assignV2ConfigValue(cfg *v2LocalConfig, section, alias, name, raw string) e
 		return nil
 	}
 	peer := cfg.Peers[alias]
-	if name == "key_epoch" {
+	if name == "key_epoch" || name == "generation" {
 		value, err := parseUint()
-		peer.KeyEpoch = value
+		if name == "key_epoch" {
+			peer.KeyEpoch = value
+		} else {
+			peer.Generation = value
+		}
 		cfg.Peers[alias] = peer
 		return err
 	}
@@ -692,6 +706,7 @@ func redactedV2Config(cfg *v2LocalConfig) map[string]any {
 			"status":             peer.Status,
 			"relationship_id":    peer.RelationshipID,
 			"key_epoch":          peer.KeyEpoch,
+			"generation":         peer.Generation,
 			"base_url":           peer.BaseURL,
 			"doh_url":            peer.DOHURL,
 			"ech_mode":           peer.ECHMode,

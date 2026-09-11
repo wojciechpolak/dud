@@ -394,18 +394,18 @@ func decodeV2Invitation(encoded []byte) (map[int]any, error) {
 }
 
 func validateV2InvitationMap(invitation map[int]any) error {
-	if len(invitation) != 12 {
-		return errors.New("invitation must contain exactly 12 core fields")
-	}
 	for key := 1; key <= 12; key++ {
 		if _, ok := invitation[key]; !ok {
 			return fmt.Errorf("invitation is missing core field %d", key)
 		}
 	}
 	for key := range invitation {
-		if key < 1 || key > 12 {
+		if key < 1 || key > 12 && key < v2MinimumExtensionKey {
 			return fmt.Errorf("invitation contains unknown core field %d", key)
 		}
+	}
+	if _, exists := invitation[kPeerFeatures]; exists && len(v2MetadataFeatures(invitation)) == 0 {
+		return errors.New("invitation peer feature advertisement is invalid")
 	}
 	if !v2UintEquals(invitation[1], 2) || !v2UintEquals(invitation[2], 1) || !v2UintEquals(invitation[3], 1) {
 		return errors.New("invitation version or algorithms are unsupported")
@@ -506,13 +506,18 @@ func v2PreTranscript(invitation, acceptance map[int]any) (map[int]any, error) {
 }
 
 func validateV2AcceptanceMap(invitation, acceptance map[int]any) error {
-	if len(acceptance) != 14 {
-		return errors.New("acceptance must contain exactly 14 core fields")
-	}
 	for key := 1; key <= 14; key++ {
 		if _, ok := acceptance[key]; !ok {
 			return fmt.Errorf("acceptance is missing core field %d", key)
 		}
+	}
+	for key := range acceptance {
+		if key < 1 || key > 14 && key < v2MinimumExtensionKey {
+			return fmt.Errorf("acceptance contains unknown core field %d", key)
+		}
+	}
+	if _, exists := acceptance[kPeerFeatures]; exists && len(v2MetadataFeatures(acceptance)) == 0 {
+		return errors.New("acceptance peer feature advertisement is invalid")
 	}
 	if !v2UintEquals(acceptance[1], 2) || !v2UintEquals(acceptance[2], 1) || !v2UintEquals(acceptance[3], 1) {
 		return errors.New("acceptance version or algorithms are unsupported")

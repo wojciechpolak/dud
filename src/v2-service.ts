@@ -18,6 +18,7 @@ import {
 import { createV2PairingHandlers } from './v2-pairing.js';
 import type { V2PairingRepository } from './v2-d1-pairing-repository.js';
 import { createV2ReissueHandler } from './v2-reissue.js';
+import { createV2ResetHandler } from './v2-reset.js';
 import { V2_CHUNK_LIMITS, V2_SERVER_FEATURES } from './v2-contract.js';
 import {
   createV2DeliveryHandler,
@@ -647,6 +648,14 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
           monotonicMs: dependencies.monotonicMs,
         })
       : undefined;
+  const reset = createV2ResetHandler({
+    store: dependencies.store,
+    repository: dependencies.repository,
+    deploymentKey: dependencies.deploymentKey,
+    limits: dependencies.limits,
+    now: dependencies.now ?? (() => Date.now()),
+    randomBytes,
+  });
   const reissue = createV2ReissueHandler({
     store: dependencies.store,
     repository: dependencies.repository,
@@ -723,6 +732,10 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
     );
     if (pairingResponse) {
       return pairingResponse;
+    }
+    const resetResponse = await reset.route(request, origin, url.pathname);
+    if (resetResponse) {
+      return resetResponse;
     }
     if (
       request.method === 'POST' &&

@@ -52,6 +52,7 @@ var v2FeatureNames = map[uint64]string{
 	9:  "atomic-delivery",
 	10: "batched-inbox",
 	11: "inline-control",
+	12: "relationship-reset",
 }
 
 // v2LocalPeerFeatures names the registered feature IDs this device implements
@@ -59,7 +60,7 @@ var v2FeatureNames = map[uint64]string{
 // the server feature list: a server feature says what the relay will carry,
 // while this says what the peer at the far end can actually process. Only
 // features with peer-visible behaviour belong here.
-var v2LocalPeerFeatures = []uint64{5, 6, 7}
+var v2LocalPeerFeatures = []uint64{5, 6, 7, 12}
 
 func v2LocalPeerFeatureList() []any {
 	features := make([]any, 0, len(v2LocalPeerFeatures))

@@ -74,6 +74,17 @@ type v2PeerReceiveOptions struct {
 }
 
 func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2PeerRuntime) error) error {
+	return a.withV2PeerMode(alias, timeout, false, true, operation)
+}
+
+// withV2PeerForRecovery loads enough relationship state to revoke or reset it.
+// It skips delivery feature checks, capability renewal, and the halted-state
+// guard because recovery must remain available when delivery cannot advance.
+func (a *app) withV2PeerForRecovery(alias string, timeout time.Duration, operation func(*v2PeerRuntime) error) error {
+	return a.withV2PeerMode(alias, timeout, true, false, operation)
+}
+
+func (a *app) withV2PeerMode(alias string, timeout time.Duration, allowHalted, prepareDelivery bool, operation func(*v2PeerRuntime) error) error {
 	cfg, paths, err := loadV2Config()
 	if err != nil {
 		return err
@@ -98,6 +109,9 @@ func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2
 	if err != nil {
 		return err
 	}
+	if state.Generation != peer.Generation {
+		return errors.New("peer relationship generation does not match its delivery state")
+	}
 	changed, pruneProblems := pruneV2ExpiredInboundTransfers(state, uint64(time.Now().Unix()))
 	if changed {
 		if err := writeV2PeerDeliveryState(paths, state); err != nil {
@@ -107,7 +121,10 @@ func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2
 	for _, problem := range pruneProblems {
 		fmt.Fprintf(a.errOut, "WARNING: %v; the plaintext stays on disk and the next peer operation retries it\n", problem)
 	}
-	if state.Halted {
+	if state.Reset != nil && state.Reset.Phase != "active" && state.Reset.Phase != "cancelled" && !allowHalted {
+		return fmt.Errorf("peer relationship reset %s is %s; run 'dud peer reset %s --yes' to resume it", state.Reset.ResetID, state.Reset.Phase, alias)
+	}
+	if state.Halted && !allowHalted {
 		return fmt.Errorf("peer relationship is halted: %s; revoke and pair again", state.HaltReason)
 	}
 	seed, err := loadV2MasterSeed(paths)
@@ -161,20 +178,22 @@ func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2
 		origin:         origin,
 		transport:      transport,
 	}
-	if err := runtime.requirePeerFeatures(); err != nil {
-		return err
-	}
-	serverExpiry := state.CapabilitiesIssuedAt + runtime.maxTTL
-	if state.CapabilitiesIssuedAt > 0 &&
-		(state.CapabilitiesExpireAt == 0 || state.CapabilitiesExpireAt > serverExpiry) {
-		state.CapabilitiesExpireAt = serverExpiry
-		if err := writeV2PeerDeliveryState(paths, state); err != nil {
+	if prepareDelivery {
+		if err := runtime.requirePeerFeatures(); err != nil {
 			return err
 		}
-	}
-	if state.CapabilitiesExpireAt <= uint64(time.Now().Add(24*time.Hour).Unix()) {
-		if err := runtime.reissueCapabilities(context.Background()); err != nil {
-			return fmt.Errorf("recover expiring peer capabilities: %w", err)
+		serverExpiry := state.CapabilitiesIssuedAt + runtime.maxTTL
+		if state.CapabilitiesIssuedAt > 0 &&
+			(state.CapabilitiesExpireAt == 0 || state.CapabilitiesExpireAt > serverExpiry) {
+			state.CapabilitiesExpireAt = serverExpiry
+			if err := writeV2PeerDeliveryState(paths, state); err != nil {
+				return err
+			}
+		}
+		if state.CapabilitiesExpireAt <= uint64(time.Now().Add(24*time.Hour).Unix()) {
+			if err := runtime.reissueCapabilities(context.Background()); err != nil {
+				return fmt.Errorf("recover expiring peer capabilities: %w", err)
+			}
 		}
 	}
 	return operation(runtime)
@@ -2607,7 +2626,7 @@ func (runtime *v2PeerRuntime) applyV2GranularControlEnvelope(ciphertext []byte) 
 				return err
 			}
 		}
-		if err := runtime.validatePeerWatermarks(watermarks); err != nil {
+		if err := runtime.validatePeerWatermarks(watermarks, v2ControlWatermarkEvidence(envelope)); err != nil {
 			return err
 		}
 		runtime.state.Halted = true
@@ -2674,13 +2693,13 @@ func (runtime *v2PeerRuntime) applySignedAcknowledgement(envelope *validatedV2En
 			return err
 		}
 	}
-	if err := runtime.validatePeerWatermarks(hwm); err != nil {
-		return err
-	}
 	key := hex.EncodeToString(ackedDigest)
 	sent, exists := runtime.state.Sent[key]
 	if !exists || sent.Sequence != ackedSequence {
 		return errors.New("acknowledgement does not match a committed outbound delivery")
+	}
+	if err := runtime.validatePeerWatermarks(hwm, v2ControlWatermarkEvidence(envelope)); err != nil {
+		return err
 	}
 	fullCheckpointRequired := false
 	if retry, valid := asV2Uint(metadata[kGitRetry]); valid && retry == 1 && result == 1 && sent.PayloadType == 4 {
@@ -2729,30 +2748,58 @@ func (runtime *v2PeerRuntime) applySignedAcknowledgement(envelope *validatedV2En
 	return nil
 }
 
-func (runtime *v2PeerRuntime) validatePeerWatermarks(hwm [4]uint64) error {
-	local := [4]uint64{
-		runtime.state.Chains["in:data"].ReceiveWatermark,
-		runtime.state.Chains["in:control"].ReceiveWatermark + 1,
-		runtime.state.Chains["out:data"].SendSequence,
-		runtime.state.Chains["out:control"].SendSequence,
+type v2WatermarkEvidence struct {
+	sequence uint64
+	digest   string
+}
+
+func v2ControlWatermarkEvidence(envelope *validatedV2Envelope) v2WatermarkEvidence {
+	sequence, _ := descriptorUint(envelope.Descriptor, kSequence, "sequence")
+	return v2WatermarkEvidence{
+		sequence: sequence,
+		digest:   hex.EncodeToString(envelope.DescriptorDigest[:]),
 	}
-	for index := range hwm {
-		if hwm[index] > local[index] {
-			runtime.state.Halted = true
-			runtime.state.HaltReason = fmt.Sprintf("signed peer watermark %d proves local rollback", index+5)
-			return errors.New(runtime.state.HaltReason)
-		}
+}
+
+func (runtime *v2PeerRuntime) haltForWatermark(field string, peerValue, localValue uint64, cause string, evidence v2WatermarkEvidence) error {
+	relationshipID := runtime.state.RelationshipID
+	if relationshipID == "" && len(runtime.relationshipID) == 16 {
+		relationshipID = hex.EncodeToString(runtime.relationshipID)
+	}
+	runtime.state.Halted = true
+	runtime.state.HaltEvidence = &v2HaltEvidence{
+		Field: field, PeerValue: peerValue, LocalValue: localValue,
+		DescriptorSequence: evidence.sequence, DescriptorDigest: evidence.digest,
+		RelationshipID: relationshipID,
+	}
+	runtime.state.HaltReason = fmt.Sprintf(
+		"signed peer %s %d is inconsistent with local value %d and proves %s rollback",
+		field, peerValue, localValue, cause,
+	)
+	return errors.New(runtime.state.HaltReason)
+}
+
+func (runtime *v2PeerRuntime) validatePeerWatermarks(hwm [4]uint64, descriptor v2WatermarkEvidence) error {
+	// hwm_out_data and hwm_out_control advertise work the peer has signed or
+	// queued. Independent data and control delivery means either value may lead
+	// this receiver without any state loss. Only a peer claim about what it has
+	// received can exceed a sequence this device never created.
+	localOutData := runtime.state.Chains["out:data"].SendSequence
+	if hwm[2] > localOutData {
+		return runtime.haltForWatermark("hwm_in_data", hwm[2], localOutData, "local", descriptor)
+	}
+	localOutControl := runtime.state.Chains["out:control"].SendSequence
+	if hwm[3] > localOutControl {
+		return runtime.haltForWatermark("hwm_in_control", hwm[3], localOutControl, "local", descriptor)
 	}
 	var highestAcknowledged uint64
 	for _, sent := range runtime.state.Sent {
-		if sent.Acknowledged && sent.Sequence > highestAcknowledged {
+		if (sent.Acknowledged || sent.Rejected) && sent.Sequence > highestAcknowledged {
 			highestAcknowledged = sent.Sequence
 		}
 	}
 	if hwm[2] < highestAcknowledged {
-		runtime.state.Halted = true
-		runtime.state.HaltReason = "signed peer incoming-data watermark proves peer rollback"
-		return errors.New(runtime.state.HaltReason)
+		return runtime.haltForWatermark("hwm_in_data", hwm[2], highestAcknowledged, "peer", descriptor)
 	}
 	return nil
 }

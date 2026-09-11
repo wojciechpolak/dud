@@ -148,6 +148,16 @@ export const V2_SQLITE_MIGRATIONS = [
   CREATE UNIQUE INDEX chunk_upload_part_write_token ON chunk_upload_parts(write_token);`,
   `ALTER TABLE staged_bodies ADD COLUMN capability_id TEXT;
   CREATE INDEX staged_body_capability_usage ON staged_bodies(capability_id, expires_at);`,
+  `CREATE TABLE relationship_resets (
+    old_relationship_id TEXT PRIMARY KEY,
+    reset_id TEXT NOT NULL UNIQUE,
+    new_relationship_id TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK(state IN ('proposed','active','cancelled')),
+    encrypted_state BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    activated_at INTEGER
+  );`,
 ] as const;
 
 export interface V2SQLiteDatabase {

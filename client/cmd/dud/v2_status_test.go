@@ -126,6 +126,11 @@ func TestV2DeliveryStatusNamesEveryCategory(t *testing.T) {
 		LastSuccessfulDrain: 1_700_000_000,
 		Halted:              true,
 		HaltReason:          "relationship revoked locally",
+		HaltEvidence: &v2HaltEvidence{
+			Field: "hwm_in_data", PeerValue: 1, LocalValue: 2,
+			DescriptorSequence: 5, DescriptorDigest: strings.Repeat("ab", 32),
+			RelationshipID: strings.Repeat("45", 16),
+		},
 		Chains: map[string]*v2ChainState{
 			"out:data":   {},
 			"in:data":    {Quarantined: true, QuarantineReason: "gap before sequence 4"},
@@ -151,6 +156,9 @@ func TestV2DeliveryStatusNamesEveryCategory(t *testing.T) {
 		"- in:control (fork at sequence 2)",
 		"- in:data (gap before sequence 4)",
 		"halted                     yes (relationship revoked locally)",
+		"rollback field             hwm_in_data",
+		"signed peer value          1",
+		"corresponding local value  2",
 	} {
 		if !strings.Contains(block, fragment) {
 			t.Fatalf("status block %q omitted %q", block, fragment)
@@ -173,6 +181,58 @@ func TestV2DeliveryStatusNamesEveryCategory(t *testing.T) {
 	}
 	if _, exists := fields["quarantined_chains"]; !exists {
 		t.Fatal("status fields omitted quarantined_chains")
+	}
+	if evidence, ok := fields["halt_evidence"].(*v2HaltEvidence); !ok || evidence.Field != "hwm_in_data" {
+		t.Fatalf("status halt evidence = %#v", fields["halt_evidence"])
+	}
+}
+
+func TestV2DeliveryStatusReportsRelationshipReset(t *testing.T) {
+	reset := &v2RelationshipReset{
+		ResetID:         strings.Repeat("61", 16),
+		Generation:      3,
+		Phase:           "accepted",
+		LocalConsent:    true,
+		PeerConsent:     true,
+		ServerActivated: false,
+		LocalDisposition: v2ResetDisposition{
+			QueuedDeliveries: 1, QueuedCompletions: 2, QueuedControlEvents: 3,
+			Unacknowledged: 4, InboundTransfers: 5, QuarantinedChains: 6,
+			ResumableTransfers: 7, RefusedGitCheckpoints: 8,
+		},
+		PeerDisposition: v2ResetDisposition{
+			QueuedDeliveries: 8, QueuedCompletions: 7, QueuedControlEvents: 6,
+			Unacknowledged: 5, InboundTransfers: 4, QuarantinedChains: 3,
+			ResumableTransfers: 2, RefusedGitCheckpoints: 1,
+		},
+		RecoveryCommand: "dud peer reset laptop --yes",
+	}
+	status := v2DeliveryStatus{Generation: 2, RelationshipReset: reset}
+	if !status.needsAttention() {
+		t.Fatal("an accepted peer relationship reset reported nothing to attend to")
+	}
+	block := status.report("Status").String()
+	for _, fragment := range []string{
+		"active generation          2",
+		"peer relationship reset    accepted",
+		"reset proposal ID          " + reset.ResetID,
+		"reset local consent        yes",
+		"reset peer consent         yes",
+		"reset server activation    no",
+		"reset local abandoned      queued 1, completions 2, control 3, unacknowledged 4, inbound 5, quarantined chains 6, resumable 7, refused Git checkpoints 8",
+		"reset peer abandoned       queued 8, completions 7, control 6, unacknowledged 5, inbound 4, quarantined chains 3, resumable 2, refused Git checkpoints 1",
+		"reset recovery command     dud peer reset laptop --yes",
+	} {
+		if !strings.Contains(block, fragment) {
+			t.Fatalf("status block %q omitted %q", block, fragment)
+		}
+	}
+	fields := status.fields()
+	if fields["generation"] != uint64(2) || fields["relationship_reset"] != reset {
+		t.Fatalf("reset status fields = %#v", fields)
+	}
+	if fields["relationship_reset_recovery_command"] != reset.RecoveryCommand {
+		t.Fatalf("reset recovery command = %#v", fields["relationship_reset_recovery_command"])
 	}
 }
 

@@ -15,6 +15,7 @@ DROP TABLE IF EXISTS reservations;
 DROP TABLE IF EXISTS invitations;
 DROP TABLE IF EXISTS relationship_nonces;
 DROP TABLE IF EXISTS relationship_rate_windows;
+DROP TABLE IF EXISTS relationship_resets;
 DROP TABLE IF EXISTS capabilities;
 DROP TABLE IF EXISTS relationships;
 DROP TABLE IF EXISTS deliveries;

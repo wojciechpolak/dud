@@ -26,6 +26,8 @@ type v2ResumableTransfer struct {
 // facts, so text and JSON output render them from this one value rather than
 // from per-command ad-hoc maps.
 type v2DeliveryStatus struct {
+	Generation                 uint64
+	RelationshipReset          *v2RelationshipReset
 	PendingDeliveries          int
 	PendingChunkTransfers      int
 	PendingChunkBytes          uint64
@@ -43,6 +45,7 @@ type v2DeliveryStatus struct {
 	QuarantinedChains   []v2QuarantinedChain
 	Halted              bool
 	HaltReason          string
+	HaltEvidence        *v2HaltEvidence
 	LastSuccessfulDrain uint64
 }
 
@@ -86,6 +89,8 @@ func v2DeliveryStatusOf(state *v2PeerDeliveryState) v2DeliveryStatus {
 		return resumableTransfers[left].DescriptorDigest < resumableTransfers[right].DescriptorDigest
 	})
 	status := v2DeliveryStatus{
+		Generation:                 state.Generation,
+		RelationshipReset:          state.Reset,
 		PendingDeliveries:          len(state.PendingGranularDeliveries) + len(state.PendingChunkDeliveries),
 		PendingChunkTransfers:      len(state.PendingChunkDeliveries),
 		PendingChunkBytes:          pendingChunkBytes,
@@ -100,6 +105,7 @@ func v2DeliveryStatusOf(state *v2PeerDeliveryState) v2DeliveryStatus {
 		QuarantinedChains:          []v2QuarantinedChain{},
 		Halted:                     state.Halted,
 		HaltReason:                 state.HaltReason,
+		HaltEvidence:               state.HaltEvidence,
 		LastSuccessfulDrain:        state.LastSuccessfulDrain,
 	}
 	for name, chain := range state.Chains {
@@ -132,7 +138,8 @@ func unacknowledgedV2Deliveries(state *v2PeerDeliveryState) int {
 
 // fields renders the JSON keys shared by every command that reports status.
 func (status v2DeliveryStatus) fields() map[string]any {
-	return map[string]any{
+	fields := map[string]any{
+		"generation":                   status.Generation,
 		"pending_deliveries":           status.PendingDeliveries,
 		"pending_chunk_transfers":      status.PendingChunkTransfers,
 		"pending_chunk_bytes":          status.PendingChunkBytes,
@@ -149,6 +156,16 @@ func (status v2DeliveryStatus) fields() map[string]any {
 		"halt_reason":                  status.HaltReason,
 		"last_successful_drain":        status.LastSuccessfulDrain,
 	}
+	if status.RelationshipReset != nil {
+		fields["relationship_reset"] = status.RelationshipReset
+		if status.RelationshipReset.Phase != "active" && status.RelationshipReset.Phase != "cancelled" {
+			fields["relationship_reset_recovery_command"] = status.RelationshipReset.RecoveryCommand
+		}
+	}
+	if status.HaltEvidence != nil {
+		fields["halt_evidence"] = status.HaltEvidence
+	}
+	return fields
 }
 
 func (status v2DeliveryStatus) merge(target map[string]any) map[string]any {
@@ -170,7 +187,8 @@ func (status v2DeliveryStatus) needsAttention() bool {
 		status.PendingControlPublications != 0 ||
 		status.UndrainedControl ||
 		len(status.QuarantinedChains) != 0 ||
-		status.Halted
+		status.Halted ||
+		(status.RelationshipReset != nil && status.RelationshipReset.Phase != "active" && status.RelationshipReset.Phase != "cancelled")
 }
 
 // rows renders the counters that send, receive, sync, doctor, peer show, and
@@ -207,7 +225,7 @@ func (status v2DeliveryStatus) rows() []textRow {
 			halted = "yes (" + status.HaltReason + ")"
 		}
 	}
-	return []textRow{
+	rows := []textRow{
 		{Label: "queued deliveries", Value: strconv.Itoa(status.PendingDeliveries)},
 		uploads,
 		{Label: "resumable upload bytes", Value: strconv.FormatUint(status.PendingChunkBytes, 10)},
@@ -220,7 +238,46 @@ func (status v2DeliveryStatus) rows() []textRow {
 		{Label: "undrained control", Value: v2YesNo(status.UndrainedControl)},
 		quarantined,
 		{Label: "halted", Value: halted},
+		{Label: "active generation", Value: strconv.FormatUint(status.Generation, 10)},
 	}
+	if reset := status.RelationshipReset; reset != nil {
+		rows = append(rows,
+			textRow{Label: "peer relationship reset", Value: reset.Phase},
+			textRow{Label: "reset proposal ID", Value: reset.ResetID},
+			textRow{Label: "reset local consent", Value: v2YesNo(reset.LocalConsent)},
+			textRow{Label: "reset peer consent", Value: v2YesNo(reset.PeerConsent)},
+			textRow{Label: "reset server activation", Value: v2YesNo(reset.ServerActivated)},
+			textRow{Label: "reset local abandoned", Value: formatV2ResetDisposition(reset.LocalDisposition)},
+			textRow{Label: "reset peer abandoned", Value: formatV2ResetDisposition(reset.PeerDisposition)},
+		)
+		if reset.Phase != "active" && reset.Phase != "cancelled" {
+			rows = append(rows, textRow{Label: "reset recovery command", Value: reset.RecoveryCommand})
+		}
+	}
+	if evidence := status.HaltEvidence; evidence != nil {
+		rows = append(rows,
+			textRow{Label: "rollback field", Value: evidence.Field},
+			textRow{Label: "signed peer value", Value: strconv.FormatUint(evidence.PeerValue, 10)},
+			textRow{Label: "corresponding local value", Value: strconv.FormatUint(evidence.LocalValue, 10)},
+			textRow{Label: "control descriptor", Value: fmt.Sprintf("sequence %d, digest %s", evidence.DescriptorSequence, evidence.DescriptorDigest)},
+			textRow{Label: "relationship ID", Value: evidence.RelationshipID},
+		)
+	}
+	return rows
+}
+
+func formatV2ResetDisposition(value v2ResetDisposition) string {
+	return fmt.Sprintf(
+		"queued %d, completions %d, control %d, unacknowledged %d, inbound %d, quarantined chains %d, resumable %d, refused Git checkpoints %d",
+		value.QueuedDeliveries,
+		value.QueuedCompletions,
+		value.QueuedControlEvents,
+		value.Unacknowledged,
+		value.InboundTransfers,
+		value.QuarantinedChains,
+		value.ResumableTransfers,
+		value.RefusedGitCheckpoints,
+	)
 }
 
 // renderInto attaches the counters as a titled block under the given section.

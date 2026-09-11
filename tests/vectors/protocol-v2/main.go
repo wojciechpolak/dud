@@ -113,6 +113,133 @@ func deriveIdentityBytes(seed []byte, relationshipID string, keyEpoch uint32) []
 	return deriveMaterial(seed, "identity", relationshipID, keyEpoch, 32)
 }
 
+func resetSnapshot(start uint64, digestStart byte) []any {
+	names := []string{"out:data", "out:control", "in:data", "in:control"}
+	result := make([]any, len(names))
+	for index, name := range names {
+		result[index] = map[int]any{
+			1: name,
+			2: start + uint64(index),
+			3: fixedBytes(digestStart+byte(index), 32),
+		}
+	}
+	return result
+}
+
+func resetDisposition(start uint64) map[int]any {
+	result := make(map[int]any, 8)
+	for key := 1; key <= 8; key++ {
+		result[key] = start + uint64(key-1)
+	}
+	return result
+}
+
+func resetSignature(label string, value map[int]any, key ed25519.PrivateKey) ([]byte, []byte) {
+	encoded, err := detEnc().Marshal(value)
+	must(err)
+	digest := sha256.Sum256(encoded)
+	input := append([]byte("dud/v2/relationship-reset/"+label+"\x00"), digest[:]...)
+	return encoded, ed25519.Sign(key, input)
+}
+
+func resetRelationshipSecret(oldSecret, resetID, relationshipID []byte, direction uint64) []byte {
+	secret, err := hkdf.Key(
+		sha256.New,
+		oldSecret,
+		resetID,
+		fmt.Sprintf("dud/v2/relationship-reset|%s|%d", h(relationshipID), direction),
+		32,
+	)
+	must(err)
+	return secret
+}
+
+func resetChainGenesis(relationshipID []byte, direction, chain byte) []byte {
+	input := append([]byte("dud/v2/chain-genesis\x00"), relationshipID...)
+	input = append(input, direction, chain)
+	digest := sha256.Sum256(input)
+	return digest[:]
+}
+
+func relationshipResetVectors(inviterSeed, inviteeSeed, oldRelationshipID, oldForward, oldReverse []byte) {
+	resetID := fixedBytes(0xa0, 16)
+	newRelationshipID := fixedBytes(0xc0, 16)
+	newRelationshipHex := h(newRelationshipID)
+	newInviterSigning := ed25519.NewKeyFromSeed(deriveMaterial(inviterSeed, "signing", newRelationshipHex, 0, 32))
+	newInviteeSigning := ed25519.NewKeyFromSeed(deriveMaterial(inviteeSeed, "signing", newRelationshipHex, 0, 32))
+	kem := hpke.MLKEM768X25519()
+	newInviterIdentity, err := kem.NewPrivateKey(deriveIdentityBytes(inviterSeed, newRelationshipHex, 0))
+	must(err)
+	newInviteeIdentity, err := kem.NewPrivateKey(deriveIdentityBytes(inviteeSeed, newRelationshipHex, 0))
+	must(err)
+	proposal := map[int]any{
+		1: uint64(1), 2: oldRelationshipID, 3: resetID, 4: newRelationshipID,
+		5: uint64(0), 6: uint64(1), 7: "https://dud.example.com",
+		8:  resetSnapshot(4, 0x20),
+		9:  deriveMaterial(inviterSeed, "deviceid", h(oldRelationshipID), 0, 16),
+		10: deriveMaterial(inviteeSeed, "deviceid", h(oldRelationshipID), 0, 16),
+		11: deriveMaterial(inviterSeed, "deviceid", newRelationshipHex, 0, 16),
+		12: newInviterSigning.Public().(ed25519.PublicKey),
+		13: newInviterIdentity.PublicKey().Bytes(),
+		14: resetDisposition(1), 15: uint64(1_800_003_600), 16: uint64(0),
+	}
+	oldInviterSigning := ed25519.NewKeyFromSeed(deriveMaterial(inviterSeed, "signing", h(oldRelationshipID), 0, 32))
+	oldInviteeSigning := ed25519.NewKeyFromSeed(deriveMaterial(inviteeSeed, "signing", h(oldRelationshipID), 0, 32))
+	proposalCBOR, proposalSignature := resetSignature("proposal", proposal, oldInviterSigning)
+	proposalDigest := sha256.Sum256(proposalCBOR)
+	acceptance := map[int]any{
+		1: uint64(1), 2: proposalDigest[:], 3: uint64(1),
+		4: deriveMaterial(inviteeSeed, "deviceid", newRelationshipHex, 0, 16),
+		5: newInviteeSigning.Public().(ed25519.PublicKey),
+		6: newInviteeIdentity.PublicKey().Bytes(),
+		7: resetSnapshot(8, 0x50), 8: resetDisposition(9), 9: uint64(1_800_003_600),
+	}
+	acceptanceCBOR, acceptanceSignature := resetSignature("acceptance", acceptance, oldInviteeSigning)
+	acceptanceDigest := sha256.Sum256(acceptanceCBOR)
+	transcript, err := detEnc().Marshal(map[int]any{
+		1: proposal, 2: proposalSignature, 3: acceptance, 4: acceptanceSignature,
+	})
+	must(err)
+	transcriptDigest := sha256.Sum256(transcript)
+	receipt, err := detEnc().Marshal(map[int]any{
+		1: uint64(1), 2: resetID, 3: oldRelationshipID, 4: newRelationshipID,
+		5: uint64(1), 6: transcriptDigest[:], 7: uint64(1_800_000_010),
+	})
+	must(err)
+	receiptDigest := sha256.Sum256(receipt)
+	newForward := resetRelationshipSecret(oldForward, resetID, newRelationshipID, 0)
+	newReverse := resetRelationshipSecret(oldReverse, resetID, newRelationshipID, 1)
+
+	fmt.Printf("\n### Vector 13 — peer relationship reset (deterministic)\n")
+	fmt.Printf("reset_id                  = %s\n", h(resetID))
+	fmt.Printf("new_relationship_id       = %s\n", newRelationshipHex)
+	fmt.Printf("proposal_cbor_len          = %d bytes\n", len(proposalCBOR))
+	fmt.Printf("proposal_digest            = %s\n", h(proposalDigest[:]))
+	fmt.Printf("proposal_signature         = %s\n", h(proposalSignature))
+	fmt.Printf("acceptance_cbor_len        = %d bytes\n", len(acceptanceCBOR))
+	fmt.Printf("acceptance_digest          = %s\n", h(acceptanceDigest[:]))
+	fmt.Printf("acceptance_signature       = %s\n", h(acceptanceSignature))
+	fmt.Printf("transcript_digest          = %s\n", h(transcriptDigest[:]))
+	fmt.Printf("activation_receipt_digest  = %s\n", h(receiptDigest[:]))
+	fmt.Printf("relationship_secret[0]     = %s\n", h(newForward))
+	fmt.Printf("relationship_secret[1]     = %s\n", h(newReverse))
+	for direction := byte(0); direction <= 1; direction++ {
+		for chain := byte(0); chain <= 1; chain++ {
+			fmt.Printf("chain_genesis[%d,%d]        = %s\n", direction, chain, h(resetChainGenesis(newRelationshipID, direction, chain)))
+		}
+	}
+	if bytes.Equal(newForward, oldForward) || bytes.Equal(newReverse, oldReverse) || bytes.Equal(newForward, newReverse) {
+		fmt.Fprintln(os.Stderr, "FAIL: reset relationship secrets are not distinct")
+		os.Exit(1)
+	}
+	if !ed25519.Verify(oldInviterSigning.Public().(ed25519.PublicKey), append([]byte("dud/v2/relationship-reset/proposal\x00"), proposalDigest[:]...), proposalSignature) ||
+		!ed25519.Verify(oldInviteeSigning.Public().(ed25519.PublicKey), append([]byte("dud/v2/relationship-reset/acceptance\x00"), acceptanceDigest[:]...), acceptanceSignature) {
+		fmt.Fprintln(os.Stderr, "FAIL: reset transcript signature does not verify")
+		os.Exit(1)
+	}
+	fmt.Println("PASS: both signatures verify, receipt binds the transcript, and the fresh namespace is disjoint")
+}
+
 func main() {
 	inviterSeed := make([]byte, 32)
 	inviteeSeed := make([]byte, 32)
@@ -177,18 +304,19 @@ func main() {
 	relationshipIDBytes, err := hex.DecodeString(relationshipID)
 	must(err)
 	invitationMap := map[int]any{
-		1:  uint64(2),
-		2:  uint64(1),
-		3:  uint64(1),
-		4:  fixedBytes(0x10, 32),
-		5:  relationshipIDBytes,
-		6:  fixedBytes(0x20, 16),
-		7:  inviterKey.PublicKey().Bytes(),
-		8:  inviterSignKey.Public().(ed25519.PublicKey),
-		9:  "https://dud.example.com",
-		10: fixedBytes(0xA0, 32),
-		11: fixedBytes(0x60, 32),
-		12: uint64(1_800_000_000),
+		1:   uint64(2),
+		2:   uint64(1),
+		3:   uint64(1),
+		4:   fixedBytes(0x10, 32),
+		5:   relationshipIDBytes,
+		6:   fixedBytes(0x20, 16),
+		7:   inviterKey.PublicKey().Bytes(),
+		8:   inviterSignKey.Public().(ed25519.PublicKey),
+		9:   "https://dud.example.com",
+		10:  fixedBytes(0xA0, 32),
+		11:  fixedBytes(0x60, 32),
+		12:  uint64(1_800_000_000),
+		128: []uint64{5, 6, 7, 12},
 	}
 	invitationCBOR, err := detEnc().Marshal(invitationMap)
 	must(err)
@@ -210,20 +338,21 @@ func main() {
 	inviteeStatusCapability := fixedBytes(0xD0, 32)
 	statusCapabilityHash := sha256.Sum256(inviteeStatusCapability)
 	acceptanceMap := map[int]any{
-		1:  uint64(2),
-		2:  uint64(1),
-		3:  uint64(1),
-		4:  fixedBytes(0x10, 32),
-		5:  relationshipIDBytes,
-		6:  fixedBytes(0x30, 16),
-		7:  inviteeKey.PublicKey().Bytes(),
-		8:  inviteeSignKey.Public().(ed25519.PublicKey),
-		9:  fixedBytes(0x70, 32),
-		10: invitationDigest[:],
-		11: fixedBytes(0x81, 1120),
-		12: statusCapabilityHash[:],
-		13: fixedBytes(0xE0, 32),
-		14: locator[:],
+		1:   uint64(2),
+		2:   uint64(1),
+		3:   uint64(1),
+		4:   fixedBytes(0x10, 32),
+		5:   relationshipIDBytes,
+		6:   fixedBytes(0x30, 16),
+		7:   inviteeKey.PublicKey().Bytes(),
+		8:   inviteeSignKey.Public().(ed25519.PublicKey),
+		9:   fixedBytes(0x70, 32),
+		10:  invitationDigest[:],
+		11:  fixedBytes(0x81, 1120),
+		12:  statusCapabilityHash[:],
+		13:  fixedBytes(0xE0, 32),
+		14:  locator[:],
+		128: []uint64{5, 6, 7, 12},
 	}
 	acceptanceCBOR, err := detEnc().Marshal(acceptanceMap)
 	must(err)
@@ -337,9 +466,11 @@ func main() {
 	fmt.Printf("ss_B                 = %s\n", h(fixedB))
 	fmt.Printf("full_transcript_cbor_len = %d bytes\n", len(fullTranscript))
 	fmt.Printf("full_transcript_hash = %s\n", h(fixedFull[:]))
+	var oldDirectionalSecrets [][]byte
 	for _, dir := range []string{"inviter->invitee", "invitee->inviter"} {
 		secret, err := hkdf.Key(sha256.New, ikm, fixedFull[:], "dud/v2/relationship|"+dir+"|0", 32)
 		must(err)
+		oldDirectionalSecrets = append(oldDirectionalSecrets, secret)
 		fmt.Printf("relationship_secret[%-16s] = %s\n", dir, h(secret))
 	}
 
@@ -353,5 +484,6 @@ func main() {
 		fmt.Printf("slot[data,epoch=%d] = %s\n", epoch, h(slot))
 	}
 	descriptorVectors()
+	relationshipResetVectors(inviterSeed, inviteeSeed, relationshipIDBytes, oldDirectionalSecrets[0], oldDirectionalSecrets[1])
 	fmt.Println("\nALL CHECKS PASSED")
 }

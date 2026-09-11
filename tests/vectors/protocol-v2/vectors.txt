@@ -15,15 +15,15 @@ PASS: derivation reproducible, and distinct per epoch and per relationship
 ### Vector 1A — pairing code and invitation (deterministic)
 pairing_code           = 0001-0203-0405-0607-0809-0a0b-0c0d-0e0f
 rendezvous_locator     = 5d2847ed1cdec16c884dd847d64262f4fb4ea177388cf16bc4e777d2408f0f58
-invitation_cbor_len   = 1434 bytes
-invitation_digest     = 75a90bfe89994d7b4b94db42f97132c0aa349b84472b9ad8f56652577e93e6a3
+invitation_cbor_len   = 1441 bytes
+invitation_digest     = 99a1b3ba36048be002712288eecc82c834a0acb5d1fa557c29b33177d4a2196d
 PASS: grouped pairing code normalizes to exactly 128 bits
 
 ### Vector 1B — signed acceptance map (deterministic)
 status_capability_hash = d7aabf0508c8fc88c26d9ef1abe15513a901ca944ad1e844ce2c411df4adaf4c
-acceptance_cbor_len     = 2632 bytes
-acceptance_map_digest   = ee1e5d0358f20844fa1396db9809d1adbaef93584d0a5019a8c01da306f3c820
-acceptance_signature    = 3c44b9799b1488df277538af4f9c2a17043c18abd70f208333db004d60f9982edd75dd04467812c4a6862b2e9d45393c147e4b958421492bb7b99b99b5619b00
+acceptance_cbor_len     = 2639 bytes
+acceptance_map_digest   = 232b1a1d160e482ee7c7770ae52dc2a69b99acbebea805bca7ddf178833ff43e
+acceptance_signature    = ceb8cd42cede40941b015e570fd739b492c69ca0938e7f3542048fcca2259718b4e72965a07c97320c5a2a12f9f2f6ff871d3211734ca14bad653cea1a143d0e
 PASS: acceptance signature verifies
 
 ### Vector 2 — pre-transcript to HPKE info (deterministic)
@@ -107,7 +107,26 @@ unknown optional extension   -> IGNORE
 unknown critical extension   -> REJECT (unsupported critical extension key 128)
 
 ### Vector 12 — capability discovery response (deterministic)
-capabilities_cbor   = a401820102028702030506090a0b03a9011a06400000021a00040000031a00278d0004184005190100060407183c081a0c8000000919100004a201020201
-capabilities_digest = c8f164f234ea97d92224484c7ba12963c681bb46d4579ef4ad7d6d6099e85700
+capabilities_cbor   = a40182010202890203050607090a0b0c03a9011a06400000021a00040000031a00278d0004184005190100060407183c081a0c8000000919100004a201020201
+capabilities_digest = 23ae49139af2e620be07f6e7a682e2bbc942aab943924f9be1dd628f390865d6
+
+### Vector 13 — peer relationship reset (deterministic)
+reset_id                  = a0a1a2a3a4a5a6a7a8a9aaabacadaeaf
+new_relationship_id       = c0c1c2c3c4c5c6c7c8c9cacbcccdcecf
+proposal_cbor_len          = 1619 bytes
+proposal_digest            = 5b3cb09c87f274dd5ef712af3123f47f2ff9562da2a3f3c5da99d8161be93256
+proposal_signature         = 0c02ddf6b15b9a237934bfd73571f5381613d4f06f8dd108423f3663550941df6c72ae0c557c0965492f32269592d5e9de4e0b2e003b1b1e3948793f214d0a02
+acceptance_cbor_len        = 1535 bytes
+acceptance_digest          = 4ebf788f1f8129c5e5644b6a564a2fe183acef7663bb1c5e242449d43fcfa58b
+acceptance_signature       = aa4cd231885f03c0f3f6c5622efa4bc539e78753c0110f730e1cf727633a1e22cfd9255ba92656c1e0cf0a36acb78eb8318ba8eba49fa12d1bd4d562eb9a8d0c
+transcript_digest          = 5fb85391fb7da45329348e3d84720f8953520a8af1dbc1cc2175e447bd00e8c1
+activation_receipt_digest  = 781c8ea8d60334c3c01d90d8b15d0594a4909cf884659cdc393a4861bfe2dd43
+relationship_secret[0]     = ab2eae87feabd6497dc7348922ea37500f3d4dd690b65c900d33672cbe4c609b
+relationship_secret[1]     = f1333fea95b9afed93d507bd6b5dc880e20348d7c65ab3992c7fa375236f9ef7
+chain_genesis[0,0]        = f802c54714a5a1221559877d1ab05864761e513bb1fd27eed452bbcfd27aa3d6
+chain_genesis[0,1]        = d4ad73faec39f9bf141632e29ba5b2bd727f1b2c2aa8c9080bc79a4e70ca9e76
+chain_genesis[1,0]        = db3a537d7255da3e5f5d2b6bd10beca1eeb5b7e666bb3ea2927e3670eefa6c1e
+chain_genesis[1,1]        = 43c3d0dc3aed3ef878e37acd1a57c70bfaff74afba09b9cb2f28e880b32333ba
+PASS: both signatures verify, receipt binds the transcript, and the fresh namespace is disjoint
 
 ALL CHECKS PASSED

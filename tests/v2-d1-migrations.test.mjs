@@ -25,6 +25,12 @@ test('D1 chunk upload migration creates the complete schema', async () => {
       'utf8',
     ),
   );
+  database.exec(
+    await readFile(
+      new URL('../migrations/d1/0003_relationship_resets.sql', import.meta.url),
+      'utf8',
+    ),
+  );
   database
     .prepare(
       "INSERT INTO chunk_uploads(id, delivery_id, capability_id, total_length, created_at, expires_at, operation_id, operation_digest) VALUES ('upload', 'delivery', 'writer', 7, 2, 90, X'00000000000000000000000000000000', X'0000000000000000000000000000000000000000000000000000000000000000')",
@@ -56,6 +62,14 @@ test('D1 chunk upload migration creates the complete schema', async () => {
       )
       .get().name,
     'delivery_chunks',
+  );
+  assert.equal(
+    database
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'relationship_resets'",
+      )
+      .get().name,
+    'relationship_resets',
   );
   assert.equal(
     database.prepare("SELECT scope FROM capabilities WHERE id = 'writer'").get()

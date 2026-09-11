@@ -254,6 +254,49 @@ func TestV2PairingMapValidatorsRejectCoreMismatches(t *testing.T) {
 	}
 }
 
+func TestV2PairingMapValidatorsAcceptOnlyCanonicalPeerFeatures(t *testing.T) {
+	invitation := v2TestInvitation()
+	invitation[kPeerFeatures] = []any{uint64(5), uint64(6), uint64(7), uint64(12)}
+	if err := validateV2InvitationMap(invitation); err != nil {
+		t.Fatalf("current peer features rejected: %v", err)
+	}
+	for _, features := range []any{
+		[]any{},
+		[]any{uint64(12), uint64(7)},
+		[]any{uint64(12), uint64(12)},
+		[]any{uint64(65536)},
+		[]any{"relationship-reset"},
+	} {
+		value := cloneV2Map(invitation)
+		value[kPeerFeatures] = features
+		if err := validateV2InvitationMap(value); err == nil {
+			t.Fatalf("invalid invitation peer features %#v accepted", features)
+		}
+	}
+
+	encoded, err := v2EncMode.Marshal(invitation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	acceptance := map[int]any{
+		1: uint64(2), 2: uint64(1), 3: uint64(1),
+		4: cloneV2Bytes(invitation[4]), 5: cloneV2Bytes(invitation[5]),
+		6: bytes.Repeat([]byte{1}, 16), 7: bytes.Repeat([]byte{2}, 1216),
+		8: bytes.Repeat([]byte{3}, 32), 9: bytes.Repeat([]byte{4}, 32),
+		10: digest[:], 11: bytes.Repeat([]byte{5}, 1120),
+		12: bytes.Repeat([]byte{6}, 32), 13: bytes.Repeat([]byte{7}, 32),
+		14: bytes.Repeat([]byte{8}, 32), kPeerFeatures: v2LocalPeerFeatureList(),
+	}
+	if err := validateV2AcceptanceMap(invitation, acceptance); err != nil {
+		t.Fatalf("current acceptance peer features rejected: %v", err)
+	}
+	acceptance[kPeerFeatures] = []any{uint64(12), uint64(7)}
+	if err := validateV2AcceptanceMap(invitation, acceptance); err == nil {
+		t.Fatal("noncanonical acceptance peer features accepted")
+	}
+}
+
 func TestV2ServerAgeGrantInteropFixture(t *testing.T) {
 	encoded := os.Getenv("DUD_TEST_AGE_CIPHERTEXT")
 	if encoded == "" {

@@ -22,6 +22,7 @@ export const V2_TIMED_OPERATIONS = [
   'capabilities',
   'capability-reissue',
   'pairing',
+  'relationship-reset',
   'delivery-publish',
   'delivery-inbox',
   'delivery-complete',
@@ -146,6 +147,9 @@ export function classifyV2Operation(
   }
   if (pathname.startsWith('/v2/pairing')) {
     return 'pairing';
+  }
+  if (method === 'POST' && pathname === '/v2/relationships/reset') {
+    return 'relationship-reset';
   }
   if (pathname.startsWith('/v2/admin/')) {
     return 'admin';

@@ -49,5 +49,8 @@
     "oxlint": "^1.60.0",
     "typescript": "^7.0.2",
     "wrangler": "^4.94.0"
+  },
+  "overrides": {
+    "sharp": "0.35.4"
   }
 }
