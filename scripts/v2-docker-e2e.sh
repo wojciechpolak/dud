@@ -32,6 +32,10 @@ ENROLLMENT_KEY=dud2-enroll-key:_3iJ1c59CVqmBr68qGBeriqPHt5kLWa5j19Ql0PO31E
 DROP_SECRET=v2-e2e-drop-secret
 E2E_SUBNET=${DUD_E2E_SUBNET:-11.254.0.0/24}
 
+e2e_section() {
+  printf '\n==> %s\n    %s\n' "$1" "$2" >&2
+}
+
 cleanup() {
   docker rm -f "$CHUNK_SENDER" "$INVITER" "$DOH" "$CADDY" "$SERVER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
@@ -53,6 +57,9 @@ command -v expect >/dev/null 2>&1 || {
   echo "expect is required to exercise the controlling-TTY prompt" >&2
   exit 1
 }
+
+e2e_section "Prepare test images" \
+  "Build the server and client images, or validate the supplied images."
 
 # Build before running, so the suite cannot report a pass for source it never
 # executed. This is not a slow path: an unchanged context is a BuildKit cache
@@ -96,6 +103,9 @@ else
   build_image server "$SERVER_IMAGE" "${DUD_E2E_SERVER_IMAGE:-}"
   build_image client "$CLIENT_IMAGE" "${DUD_E2E_CLIENT_IMAGE:-}"
 fi
+
+e2e_section "Start the test deployment" \
+  "Run the peer and dead drop server behind local TLS and DNS-over-HTTPS."
 
 mkdir -p "$DESKTOP_STATE" "$LAPTOP_STATE" "$CADDY_STATE"
 chmod 700 "$CADDY_STATE"
@@ -184,6 +194,9 @@ state_file_matches() {
     -v "$state:/state" "$CLIENT_IMAGE" -q "$pattern" "$path"
 }
 
+e2e_section "Initialize peer devices" \
+  "Create isolated desktop and laptop profiles with the test resolver."
+
 run_client "$DESKTOP_STATE" init --device desktop --doh-url "$DOH_URL" --ech-mode off
 run_client "$LAPTOP_STATE" init --device laptop --doh-url "$DOH_URL" --ech-mode off
 for state in "$DESKTOP_STATE" "$LAPTOP_STATE"; do
@@ -192,6 +205,9 @@ for state in "$DESKTOP_STATE" "$LAPTOP_STATE"; do
     -v "$state:/state" "$CLIENT_IMAGE" -c \
     'sed -i "/^doh_url =/a doh_bootstrap = [\"$CADDY_IP\"]" /state/dud/default/config/config.toml'
 done
+
+e2e_section "Pair the devices" \
+  "Authenticate both peers with the displayed pairing code and QR code."
 
 docker run -d -t --name "$INVITER" --network "$NETWORK" \
   --add-host "dud.local.test:$CADDY_IP" \
@@ -262,6 +278,9 @@ if [ "$INVITER_STATUS" -ne 0 ]; then
   exit "$INVITER_STATUS"
 fi
 
+e2e_section "Exchange peer messages" \
+  "Send a message in each direction and verify both plaintext payloads."
+
 run_client "$DESKTOP_STATE" send laptop -m desktop-to-laptop
 LAPTOP_RECEIVED=$(run_client "$LAPTOP_STATE" receive desktop --wait 30s)
 printf '%s\n' "$LAPTOP_RECEIVED" | grep -q '^desktop-to-laptop$'
@@ -269,6 +288,9 @@ printf '%s\n' "$LAPTOP_RECEIVED" | grep -q '^desktop-to-laptop$'
 run_client "$LAPTOP_STATE" send desktop -m laptop-to-desktop
 DESKTOP_RECEIVED=$(run_client "$DESKTOP_STATE" receive laptop --wait 30s)
 printf '%s\n' "$DESKTOP_RECEIVED" | grep -q '^laptop-to-desktop$'
+
+e2e_section "Transfer peer files" \
+  "Round-trip a file and accept the same bytes at an existing output path."
 
 # A file send takes the collection path, not the message path.
 docker run --rm --user 1000 --entrypoint /bin/sh \
@@ -286,6 +308,9 @@ state_file_matches "$DESKTOP_STATE" /state/received/send-file.txt '^file-payload
 # than refused once and accepted on the retry.
 run_client "$LAPTOP_STATE" send desktop --file /state/send-file.txt
 run_client "$DESKTOP_STATE" receive laptop --wait 30s --out-dir /state/received
+
+e2e_section "Resume an interrupted peer transfer" \
+  "Keep uploaded chunk checkpoints and complete one atomic 48 MiB file."
 
 # Kill a chunked send after its first durable part checkpoint. The next process
 # must retain that checkpoint, upload only the missing chunks, commit the
@@ -352,6 +377,9 @@ docker run --rm --user 1000 --entrypoint /usr/bin/cmp \
   exit 1
 }
 
+e2e_section "Preview and drain the peer inbox" \
+  "Inspect the oldest delivery without committing it, then receive the full queue."
+
 # Two sends, then one receive. Draining the whole queue in a single invocation
 # is the behaviour operators actually depend on, and it cannot be observed from
 # the one-delivery-at-a-time path the checks above take.
@@ -392,6 +420,9 @@ printf '%s\n' "$EMPTIED" | grep -q '^No pending delivery from laptop.$' || {
   echo "receive did not report an empty queue" >&2
   exit 1
 }
+
+e2e_section "Exchange peer Git checkpoints" \
+  "Apply a complete checkpoint, acknowledge it, then send an incremental pack."
 
 # Git synchronization starts with a complete checkpoint. Once the receiver's
 # signed acknowledgement reaches the sender, automatic mode uses that exact
@@ -466,6 +497,9 @@ docker run --rm --user 1000 --entrypoint /bin/sh \
   echo "incremental peer Git fetch did not update the isolated remote ref" >&2
   exit 1
 }
+
+e2e_section "Reset the peer relationship" \
+  "Require consent from both devices, rotate the relationship, and restart delivery chains."
 
 # A clean peer relationship reset needs independent consent on both devices.
 # The activated generation keeps the aliases, canonical origin, repository ID,
@@ -574,6 +608,9 @@ docker run --rm --user 1000 --entrypoint /bin/sh \
   exit 1
 }
 
+e2e_section "Reject shallow Git repositories" \
+  "Block peer push and fetch when missing history would make a bundle incomplete."
+
 # A Git bundle does not carry the repository's shallow-boundary file. Rejecting
 # the repository before creating DUD state prevents a bundle that looks complete
 # but still references parent commits the sender does not have.
@@ -606,6 +643,9 @@ run_git_client_at "$DESKTOP_STATE" /state/shallow-repo git status --json >/dev/n
   echo "peer Git status rejected a shallow repository" >&2
   exit 1
 }
+
+e2e_section "Exercise dead drop transport" \
+  "Verify TLS, upload and download encrypted bytes, then flush the drop."
 
 # Dead drops run on the same in-process transport. Exercising them against the
 # same stack is the only end-to-end proof that DoH resolution, address
@@ -663,6 +703,9 @@ state_file_matches "$DROP_STATE" /state/received.bin '^drop-payload$' || {
 
 run_drop flush >/dev/null
 
+e2e_section "Inspect the client image" \
+  "Confirm the runtime image does not include an extra HTTP client."
+
 # Nothing in the image speaks HTTP but the client itself.
 if docker run --rm --entrypoint /bin/sh "$CLIENT_IMAGE" -c \
   'command -v curl >/dev/null 2>&1'; then
@@ -670,4 +713,4 @@ if docker run --rm --entrypoint /bin/sh "$CLIENT_IMAGE" -c \
   exit 1
 fi
 
-echo "V2 Docker pairing, resumable delivery, peer relationship reset, incremental Git, shallow-repository rejection, and dead drop transport passed."
+printf '\nDocker peer and dead drop end-to-end checks passed.\n'
