@@ -537,7 +537,13 @@ func TestV2TTYPromptSeamReadsVisibleInputAndConfirmsOrigins(t *testing.T) {
 	if err := os.WriteFile(file, []byte("prompt:  yes \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	openV2TTY = func() (*os.File, error) { return os.OpenFile(file, os.O_RDWR, 0) }
+	openV2TTY = func() (*v2Terminal, error) {
+		tty, err := os.OpenFile(file, os.O_RDWR, 0)
+		if err != nil {
+			return nil, err
+		}
+		return &v2Terminal{in: tty, out: tty, close: tty.Close}, nil
+	}
 	value, err := readV2TTYLine("prompt: ", false)
 	if err != nil || value != " yes " {
 		t.Fatalf("TTY line = %q, %v", value, err)
@@ -549,18 +555,30 @@ func TestV2TTYPromptSeamReadsVisibleInputAndConfirmsOrigins(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("origin confirmation = %v, %v", ok, err)
 	}
-	openV2TTY = func() (*os.File, error) { return nil, errors.New("no tty") }
+	openV2TTY = func() (*v2Terminal, error) { return nil, errors.New("no tty") }
 	if _, err := readV2TTYLine("prompt: ", false); err == nil {
 		t.Fatal("TTY open failure was accepted")
 	}
 	if err := os.WriteFile(file, []byte("prompt: "), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	openV2TTY = func() (*os.File, error) { return os.Open(file) }
+	openV2TTY = func() (*v2Terminal, error) {
+		tty, err := os.Open(file)
+		if err != nil {
+			return nil, err
+		}
+		return &v2Terminal{in: tty, out: tty, close: tty.Close}, nil
+	}
 	if _, err := readV2TTYLine("prompt: ", false); err == nil {
 		t.Fatal("read-only TTY accepted a prompt write")
 	}
-	openV2TTY = func() (*os.File, error) { return os.OpenFile(file, os.O_RDWR, 0) }
+	openV2TTY = func() (*v2Terminal, error) {
+		tty, err := os.OpenFile(file, os.O_RDWR, 0)
+		if err != nil {
+			return nil, err
+		}
+		return &v2Terminal{in: tty, out: tty, close: tty.Close}, nil
+	}
 	if _, err := readV2TTYLine("prompt: ", true); err == nil {
 		t.Fatal("non-terminal hidden input was accepted")
 	}

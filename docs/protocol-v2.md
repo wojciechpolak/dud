@@ -102,8 +102,10 @@ side lacks the other side's private key and one HPKE sender's ephemeral
 randomness. The two directional relationship secrets are therefore durable
 per-relationship state. They receive the same storage protection as the seed:
 encrypted under a seed-derived local wrapping key when the seed is protected, or
-mode-`0600` beside a plaintext seed, where wrapping would add no protection.
-Loss of relationship state while retaining only the seed requires fresh pairing;
+with access limited to the current account beside a plaintext seed, where
+wrapping would add no protection. Unix clients use mode `0600`; Windows clients
+use a protected DACL that grants access only to the current user. Loss of
+relationship state while retaining only the seed requires fresh pairing;
 capability re-issuance in [§9.6](#96-capability-recovery) restores server
 authorization, not the end-to-end relationship secret.
 
@@ -768,6 +770,18 @@ For `collection` (3):
 | --: | ------------- | ----- | --------------------------------------------- |
 |   1 | `entry_count` | uint  | top-level entries, for pre-extraction display |
 |   2 | `names`       | array | top-level logical names, text                 |
+
+Every collection archive path is relative, slash-separated, and canonical. Empty
+components, `.` and `..`, backslashes, ASCII control characters, Windows
+reserved device names, trailing dots or spaces, and the Windows-invalid
+characters `< > : " | ? *` are rejected on every platform. A sender therefore
+cannot create a collection that one supported receiver accepts by name while
+another cannot store it. Receivers also reject paths that collide after Unicode
+NFC normalization and case folding.
+
+When a receiver derives a file output path from `display_name`, that name must
+pass the same single-component Windows portability rules. An explicit local
+`--out` path is user-controlled and does not change authenticated metadata.
 
 For `acknowledgement` (5):
 

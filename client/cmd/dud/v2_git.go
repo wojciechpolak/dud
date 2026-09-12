@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -431,7 +430,7 @@ func (a *app) openV2GitRepository(action string, requireCompleteHistory bool) (*
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return nil, err
 		}
-		if err := os.Chmod(directory, 0o700); err != nil {
+		if err := setPrivatePathPermissions(directory, true); err != nil {
 			return nil, err
 		}
 	}
@@ -547,12 +546,12 @@ func (repository *v2GitRepository) acquirePeerLock(peerID string) (func(), error
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := lockLocalFile(file); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("another Git operation for peer %s is in progress", peerID)
 	}
 	return func() {
-		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		_ = file.Close()
 	}, nil
 }
@@ -765,7 +764,7 @@ func (a *app) runV2GitWithEnv(ctx context.Context, repository *v2GitRepository, 
 // rather than by the smaller buffer that bounds diagnostic command output.
 func (a *app) runV2GitToWriter(ctx context.Context, repository *v2GitRepository, extraEnv []string, input []byte, stdout io.Writer, args ...string) error {
 	hardened := []string{
-		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "protocol.allow=never",
 		"-c", "protocol.file.allow=always",
 		"-c", "fetch.fsckObjects=true",
@@ -790,7 +789,7 @@ func (a *app) runV2GitToWriter(ctx context.Context, repository *v2GitRepository,
 	command.Env = append(os.Environ(),
 		"GIT_ALLOW_PROTOCOL=file",
 		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_PROTOCOL_FROM_USER=0",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
@@ -1086,7 +1085,10 @@ func (a *app) createCompleteV2GitBundle(repository *v2GitRepository, repositoryI
 	if err := bundle.Close(); err != nil {
 		return "", nil, err
 	}
-	_ = os.Chmod(bundlePath, 0o600)
+	if err := setPrivatePathPermissions(bundlePath, false); err != nil {
+		_ = os.Remove(bundlePath)
+		return "", nil, err
+	}
 	version := uint64(2)
 	if repository.ObjectFormat == 2 {
 		version = 3
@@ -1273,7 +1275,7 @@ func (a *app) createIncrementalV2GitBundle(repository *v2GitRepository, reposito
 		_ = os.Remove(bundlePath)
 		return "", nil, cause
 	}
-	if err := bundle.Chmod(0o600); err != nil {
+	if err := setPrivatePathPermissions(bundle.Name(), false); err != nil {
 		return discard(err)
 	}
 	if _, err := bundle.Write(header.Bytes()); err != nil {
@@ -1689,11 +1691,7 @@ func (a *app) validateV2GitIncrementalBase(repository *v2GitRepository, state *v
 }
 
 func v2AvailableBytes(path string) (uint64, error) {
-	var stats unix.Statfs_t
-	if err := unix.Statfs(path, &stats); err != nil {
-		return 0, err
-	}
-	return uint64(stats.Bavail) * uint64(stats.Bsize), nil
+	return availableLocalBytes(path)
 }
 
 func v2GitDirectoryBytes(root string) (uint64, error) {
@@ -1932,12 +1930,12 @@ func (a *app) v2GitRefOID(repository *v2GitRepository, ref string) (string, bool
 	command := exec.CommandContext(
 		ctx,
 		a.cfg.GitBin,
-		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.hooksPath="+os.DevNull,
 		"rev-parse", "--verify", "--quiet", ref+"^{object}",
 	)
 	command.Env = append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_OPTIONAL_LOCKS=0",
 	)
 	output, err := command.Output()

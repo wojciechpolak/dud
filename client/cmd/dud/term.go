@@ -8,64 +8,36 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
-	"unsafe"
 )
 
-var openV2TTY = func() (*os.File, error) {
-	return os.OpenFile("/dev/tty", os.O_RDWR, 0)
+type v2Terminal struct {
+	in    *os.File
+	out   *os.File
+	close func() error
 }
 
-// isTerminal reports whether fd refers to a terminal. A mode check such
-// as os.ModeCharDevice is not enough: /dev/null is also a character
-// device but must not count as an interactive terminal.
-func isTerminal(fd uintptr) bool {
-	var termios syscall.Termios
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, ioctlReadTermios, uintptr(unsafe.Pointer(&termios)))
-	return errno == 0
-}
+var openV2TTY = openControllingTerminal
 
 func readV2TTYLine(prompt string, hidden bool) (string, error) {
-	tty, err := openV2TTY()
+	terminal, err := openV2TTY()
 	if err != nil {
 		return "", errors.New("this operation requires an interactive TTY")
 	}
-	defer tty.Close()
-	if _, err := fmt.Fprint(tty, prompt); err != nil {
+	defer terminal.close()
+	if _, err := fmt.Fprint(terminal.out, prompt); err != nil {
 		return "", err
 	}
-	var original syscall.Termios
+	restore := func() error { return nil }
 	if hidden {
-		_, _, errno := syscall.Syscall(
-			syscall.SYS_IOCTL,
-			tty.Fd(),
-			ioctlReadTermios,
-			uintptr(unsafe.Pointer(&original)),
-		)
-		if errno != 0 {
-			return "", errno
+		restore, err = disableTerminalEcho(terminal.in.Fd())
+		if err != nil {
+			return "", err
 		}
-		updated := original
-		updated.Lflag &^= syscall.ECHO
-		_, _, errno = syscall.Syscall(
-			syscall.SYS_IOCTL,
-			tty.Fd(),
-			ioctlWriteTermios,
-			uintptr(unsafe.Pointer(&updated)),
-		)
-		if errno != 0 {
-			return "", errno
-		}
-		defer syscall.Syscall(
-			syscall.SYS_IOCTL,
-			tty.Fd(),
-			ioctlWriteTermios,
-			uintptr(unsafe.Pointer(&original)),
-		)
+		defer restore()
 	}
-	line, readErr := bufio.NewReader(tty).ReadString('\n')
+	line, readErr := bufio.NewReader(terminal.in).ReadString('\n')
 	if hidden {
-		_, _ = fmt.Fprintln(tty)
+		_, _ = fmt.Fprintln(terminal.out)
 	}
 	if readErr != nil {
 		return "", readErr

@@ -529,6 +529,9 @@ func TestDUDProfileRejectsNamesThatWouldLeaveTheDUDRoot(t *testing.T) {
 		".hidden",
 		"_leading",
 		"has space",
+		"CON",
+		"COM1.txt",
+		"trailing.",
 		strings.Repeat("p", 65),
 	} {
 		t.Run(profile, func(t *testing.T) {

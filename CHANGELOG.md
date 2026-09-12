@@ -8,6 +8,22 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add native Windows client support for AMD64 and ARM64, including Windows
+  console prompts, Ctrl+C cleanup, per-user DACLs, non-blocking file locks,
+  disk-space checks, atomic file replacement, and rooted collection extraction.
+  Publish reproducible `.exe` release assets and run Windows-specific tests on
+  `windows-latest`.
+
+### Changed
+
+- Reject collection paths, automatic output names, peer aliases, and profile
+  names that Windows cannot store safely, including reserved device names,
+  alternate data stream syntax, trailing dots or spaces, and invalid characters.
+  Apply the same checks on every platform so paired devices agree on valid local
+  names.
+
 ## [2.3.0] - 2026-09-11
 
 ### Added

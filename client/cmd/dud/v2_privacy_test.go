@@ -221,19 +221,30 @@ func TestV2TempFilesAreRemovedOnSignal(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("staged plaintext survived cleanup: %v", err)
 	}
-	// The handler the process installs must cover the signals a terminal and a
-	// supervisor actually send, and the umask must be tightened before it.
-	source, err := os.ReadFile(filepath.Join(testSourceDir(t), "main.go"))
+	// The handler must use the platform signal set, and Unix must tighten the
+	// process umask before creating any files.
+	mainSource, err := os.ReadFile(filepath.Join(testSourceDir(t), "main.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"syscall.SIGINT", "syscall.SIGTERM", "syscall.SIGHUP"} {
-		if !strings.Contains(string(source), expected) {
-			t.Errorf("the signal handler does not cover %s", expected)
-		}
+	if !strings.Contains(string(mainSource), "setProcessPrivateFileMask()") ||
+		!strings.Contains(string(mainSource), "processCleanupSignals()") {
+		t.Fatal("main does not install the platform process protections")
 	}
-	if !strings.Contains(string(source), "syscall.Umask(0o077)") {
-		t.Error("the process does not restrict its umask before creating files")
+	platformName := "process_unix.go"
+	expected := []string{"syscall.SIGINT", "syscall.SIGTERM", "syscall.SIGHUP", "syscall.Umask(0o077)"}
+	if runtime.GOOS == "windows" {
+		platformName = "process_windows.go"
+		expected = []string{"os.Interrupt"}
+	}
+	platformSource, err := os.ReadFile(filepath.Join(testSourceDir(t), platformName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range expected {
+		if !strings.Contains(string(platformSource), fragment) {
+			t.Errorf("%s does not contain %s", platformName, fragment)
+		}
 	}
 }
 

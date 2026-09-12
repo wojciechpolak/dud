@@ -562,10 +562,12 @@ func v2TransportPolicyMap(policy v2TransportPolicy) map[int]any {
 	}
 }
 
-// The separator set covers both conventions, because a name chosen by the peer
-// is not bound to the receiving host's.
+// A peer does not know the receiver's operating system. Automatic output names
+// therefore use the strict subset that is one safe component on every supported
+// filesystem.
 func v2SafeReceivedFileName(name string) error {
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) ||
+		!validPortableV2ArchiveComponent(name) {
 		return errors.New("peer display name must be a single path component")
 	}
 	return nil

@@ -44,7 +44,10 @@ func TestV2ReceivedFileNameIsOneSafePathComponent(t *testing.T) {
 			t.Fatalf("safe name %q: %v", name, err)
 		}
 	}
-	for _, name := range []string{"", ".", "..", "../escape", "/escape", `dir\\file`} {
+	for _, name := range []string{
+		"", ".", "..", "../escape", "/escape", `dir\\file`, "NUL", "COM1.txt",
+		"alternate:stream", "trailing. ", "wild*.txt", "control\x1f.txt",
+	} {
 		if err := v2SafeReceivedFileName(name); err == nil {
 			t.Fatalf("unsafe name %q was accepted", name)
 		}

@@ -120,11 +120,12 @@ resource-amplifying payloads; observe when their deliveries are collected.
 
 **Cannot:** escape the extraction sandbox (hard links, symlinks, special files,
 absolute paths, traversal, setuid/setgid, and case-folding or normalization
-collisions are all rejected, and extraction is staged with no-follow resolution
-and an atomic rename into a non-existing destination); contaminate the Git
-object database, because bundles are unbundled and validated in a scratch
-repository and promoted by an explicit refspec; move a local branch or the
-working tree; rewrite a peer remote-tracking ref without confirmation.
+collisions are all rejected, as are Windows device names and alternate data
+stream syntax. Extraction is staged through a rooted filesystem handle and an
+atomic rename into a non-existing destination); contaminate the Git object
+database, because bundles are unbundled and validated in a scratch repository
+and promoted by an explicit refspec; move a local branch or the working tree;
+rewrite a peer remote-tracking ref without confirmation.
 
 **Residual:** a peer can correlate nothing about the device's other
 relationships, because identities are per-relationship (`DUD-V2-DEC-005`), but a
@@ -161,17 +162,19 @@ slot design hides from the operator. Pairing state also contains the two
 directional relationship secrets, because the contributory HPKE result cannot be
 reconstructed from the seed and transcript alone.
 
-**Mitigated by:** mode-`0700` directories; retention bounded by maximum object
+**Mitigated by:** private state directories; retention bounded by maximum object
 TTL plus skew; and encryption at rest to a seed-derived key **when the master
-seed is itself passphrase-, keystore-, TPM-, or hardware-protected**.
+seed is itself passphrase-, keystore-, TPM-, or hardware-protected**. Unix uses
+mode `0700` directories and mode `0600` files. Windows uses protected DACLs that
+grant access only to the current user and inherit that rule into the state tree.
 
 Encryption at rest is deliberately _not_ offered when the seed is a plaintext
-mode-`0600` file. An attacker who can read the state can read the seed beside it
-and the mode-`0600` relationship state, so wrapping would protect nothing while
-presenting as protection. Full-disk encryption is the expected baseline in that
-mode. Private directories are mode `0700`, private files are mode `0600`, and
-the peer graph and directional secrets remain recoverable from an unencrypted
-powered-off disk.
+private file. An attacker who can read the state can read the seed beside it and
+the relationship state, so wrapping would protect nothing while presenting as
+protection. Full-disk encryption is the expected baseline in that mode. Unix
+permissions and Windows DACLs block other unprivileged accounts on a running
+host, but the peer graph and directional secrets remain recoverable from an
+unencrypted powered-off disk.
 
 ### 3.11 Traffic Analysis
 

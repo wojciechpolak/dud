@@ -13,8 +13,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 const v2ManagedRefsVersion = 1
@@ -294,17 +292,6 @@ func stageV2EraseMountedDirectory(path string) ([]v2StagedErasePath, error) {
 	return staged, nil
 }
 
-// A bind-mounted root cannot be renamed from inside the container, and the
-// kernel reports that in two different ways. Renaming the mount point itself
-// fails with EBUSY, but the tombstone would have to be created in the mount's
-// parent (`/state`, `/config`), which the container runtime creates as root
-// while DUD runs unprivileged, so the permission check rejects the rename with
-// EACCES or EPERM first. Both mean the same thing here: the root stays, its
-// contents are still ours to erase.
-func v2EraseRootIsImmovable(err error) bool {
-	return errors.Is(err, unix.EBUSY) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM)
-}
-
 func v2EraseDirectoryIsEmpty(path string) (bool, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -563,12 +550,12 @@ func acquireV2EraseLock(paths v2Paths) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := lockLocalFile(file); err != nil {
 		_ = file.Close()
 		return nil, errors.New("another DUD process is using local state")
 	}
 	return func() {
-		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		_ = file.Close()
 	}, nil
 }
@@ -731,7 +718,7 @@ func (repository *v2GitRepository) updateManagedRefs(updates map[string]string, 
 
 func (a *app) resolveV2GitRepositoryForErase() (*v2GitRepository, error) {
 	command := a.localV2GitCommand("rev-parse", "--git-common-dir")
-	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0")
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	if err != nil {
 		return nil, fatalError("dud erase repo requires a Git repository")
@@ -758,7 +745,7 @@ func (a *app) runV2EraseGit(input []byte, args ...string) ([]byte, error) {
 	command := a.localV2GitCommand(args...)
 	command.Env = append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_TERMINAL_PROMPT=0",
 	)
@@ -794,7 +781,7 @@ func (a *app) listV2EraseGitRefs(prefix string) (map[string]string, error) {
 
 func (a *app) currentV2EraseGitRef(name string) (string, bool, error) {
 	command := a.localV2GitCommand("show-ref", "--verify", "--hash", name)
-	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0")
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -830,7 +817,7 @@ func v2ManagedRefRemote(name string) string {
 
 func (a *app) v2EraseGitHasDUDConfig() (bool, error) {
 	command := a.localV2GitCommand("config", "--local", "--get-regexp", `^dud\.`)
-	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0")
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	if err := command.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -849,7 +836,7 @@ func acquireV2EraseRepositoryLocks(repository *v2GitRepository) (func(), error) 
 	files := []*os.File{}
 	unlock := func() {
 		for _, file := range files {
-			_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+			_ = unlockLocalFile(file)
 			_ = file.Close()
 		}
 	}
@@ -863,7 +850,7 @@ func acquireV2EraseRepositoryLocks(repository *v2GitRepository) (func(), error) 
 			unlock()
 			return nil, err
 		}
-		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if err := lockLocalFile(file); err != nil {
 			_ = file.Close()
 			unlock()
 			return nil, errors.New("another DUD Git operation is using repository state")
