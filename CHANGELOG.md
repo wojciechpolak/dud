@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-12
+
 ### Added
 
 - Add native Windows client support for AMD64 and ARM64, including Windows

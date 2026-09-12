@@ -5,7 +5,7 @@ import type { DudConfig } from './types.js';
 
 export const DEFAULT_CONFIG: DudConfig = {
   serviceName: 'dud',
-  version: '2.3.0',
+  version: '2.4.0',
   defaultTtlMs: 24 * 60 * 60 * 1000,
   maxTtlMs: 30 * 24 * 60 * 60 * 1000,
   maxUploadBytes: 100 * 1024 * 1024,
