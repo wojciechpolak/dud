@@ -308,7 +308,7 @@ func ensureV2PeerStateDirectories(paths v2Paths) error {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return err
 		}
-		if err := os.Chmod(directory, 0o700); err != nil {
+		if err := setPrivatePathPermissions(directory, true); err != nil {
 			return err
 		}
 	}

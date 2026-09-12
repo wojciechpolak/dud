@@ -93,7 +93,7 @@ func (a *app) runCommand(name string, args []string, stdin io.Reader, stdout io.
 
 func (a *app) runAge(args ...string) error {
 	stdin := a.in
-	if tty, err := os.Open("/dev/tty"); err == nil {
+	if tty, err := openInteractiveInput(); err == nil {
 		defer tty.Close()
 		stdin = tty
 	}
@@ -114,6 +114,11 @@ func tempFile(pattern string) (string, error) {
 		return "", err
 	}
 	name := f.Name()
+	if err := setPrivatePathPermissions(name, false); err != nil {
+		_ = f.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
 	if err := f.Close(); err != nil {
 		os.Remove(name)
 		return "", err

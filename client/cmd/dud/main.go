@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
-	"syscall"
 )
 
 // Injected at build time from package.json via
@@ -48,7 +47,7 @@ type fatalError string
 func (e fatalError) Error() string { return string(e) }
 
 func main() {
-	syscall.Umask(0o077)
+	setProcessPrivateFileMask()
 	cleanupTempFilesOnSignal()
 	a := newApp(os.Stdin, os.Stdout, os.Stderr)
 	if code := a.main(os.Args[1:]); code != 0 {
@@ -61,11 +60,11 @@ func main() {
 // temp directory.
 func cleanupTempFilesOnSignal() {
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(signals, processCleanupSignals()...)
 	go func() {
 		sig := <-signals
 		removeAllTempFiles()
-		os.Exit(128 + int(sig.(syscall.Signal)))
+		os.Exit(processSignalExitCode(sig))
 	}()
 }
 

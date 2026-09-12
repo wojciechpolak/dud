@@ -103,6 +103,11 @@ func writeV2DownloadedChunk(path string, stream *v2ChunkStream) error {
 	if err != nil {
 		return err
 	}
+	if err := setPrivatePathPermissions(temporary, false); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return err
+	}
 	removeTemporary := true
 	defer func() {
 		_ = file.Close()
@@ -133,6 +138,11 @@ func assembleV2ChunkedPlaintext(target string, parts []v2InboundChunkPart, chunk
 	temporary := target + ".tmp"
 	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := setPrivatePathPermissions(temporary, false); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
 		return err
 	}
 	removeTemporary := true
@@ -189,7 +199,7 @@ func atomicCopyV2File(target, source string) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
+	if err := setPrivatePathPermissions(temporary.Name(), false); err != nil {
 		_ = temporary.Close()
 		return err
 	}
@@ -211,7 +221,7 @@ func atomicCopyV2File(target, source string) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporaryPath, target)
+	return replaceLocalFile(temporaryPath, target)
 }
 
 func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, delivery *v2GranularInboxDelivery, envelope *validatedV2Envelope, sourceSlotEpoch uint64, policyDigest []byte, sequence, expiresAt uint64) (string, [32]byte, v2InboundTransfer, bool, error) {

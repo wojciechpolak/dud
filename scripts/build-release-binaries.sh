@@ -22,7 +22,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/dist/release"
 VERSION="${1:-$(node -p "require('$ROOT/package.json').version")}"
 
-PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
+PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then

@@ -132,9 +132,9 @@ the exported `DUD_*` variables into the container.
 `~/.profile` instead of a script in `/usr/local/bin`.
 
 A host that would rather not run Docker can use the native binary a release
-publishes for Linux and macOS on both architectures. It expects `age`,
-`age-keygen`, `git`, and `qrencode` on `PATH`, and keeps peer state in `~/.dud`
-directly:
+publishes for Linux, macOS, and Windows on AMD64 and ARM64. It expects `age`,
+`age-keygen`, and `git` on `PATH`; QR display also needs `qrencode`. It keeps
+peer state in the user's `.dud` directory directly:
 
 ```sh
 curl -fL -o dud https://github.com/wojciechpolak/dud/releases/latest/download/dud-linux-amd64
@@ -145,13 +145,26 @@ Release assets are plain HTTPS downloads, so no GitHub CLI is required.
 `/releases/latest/download/` resolves to the newest stable release and never to
 a pre-release tag, so name a version explicitly with
 `/releases/download/vX.Y.Z/` to pin one. The asset name selects the platform:
-`dud-linux-amd64`, `dud-linux-arm64`, `dud-darwin-amd64`, or `dud-darwin-arm64`.
-With the GitHub CLI installed, the same download is:
+`dud-linux-amd64`, `dud-linux-arm64`, `dud-darwin-amd64`, `dud-darwin-arm64`,
+`dud-windows-amd64.exe`, or `dud-windows-arm64.exe`. With the GitHub CLI
+installed, the same download is:
 
 ```sh
 gh release download vX.Y.Z --pattern 'dud-linux-amd64'
 sudo install -m 0755 dud-linux-amd64 /usr/local/bin/dud
 ```
+
+On Windows, use PowerShell and put `dud.exe` in a directory on `PATH`:
+
+```powershell
+Invoke-WebRequest `
+  https://github.com/wojciechpolak/dud/releases/latest/download/dud-windows-amd64.exe `
+  -OutFile dud.exe
+.\dud.exe --version
+```
+
+Use `dud-windows-arm64.exe` on Windows on ARM. Install the required helpers
+separately. `--no-qr` avoids the optional `qrencode.exe` dependency.
 
 Homebrew installs that same client on macOS and Linux, and installs `age`,
 `git`, and `qrencode` with it instead of leaving them to you:

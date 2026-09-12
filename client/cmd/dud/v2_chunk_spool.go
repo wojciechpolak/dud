@@ -80,7 +80,7 @@ func spoolV2ChunkedPayloadObserved(source io.Reader, spoolDir string, recipient 
 	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(spoolDir, 0o700); err != nil {
+	if err := setPrivatePathPermissions(spoolDir, true); err != nil {
 		return nil, err
 	}
 

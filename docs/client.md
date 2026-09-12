@@ -14,9 +14,9 @@ docker pull ghcr.io/wojciechpolak/dud/dud-client:latest
 §6 turns that image into a `dud` command on the host, so you settle the flags
 every run needs once instead of typing them each time.
 
-A release also publishes the same binary natively for Linux and macOS on both
-architectures. Those are ordinary release assets, downloadable with any HTTPS
-client:
+A release also publishes the same binary natively for Linux, macOS, and Windows
+on AMD64 and ARM64. Those are ordinary release assets, downloadable with any
+HTTPS client:
 
 ```sh
 curl -fL -o dud https://github.com/wojciechpolak/dud/releases/latest/download/dud-linux-amd64
@@ -27,8 +27,9 @@ sudo install -m 0755 dud /usr/local/bin/dud
 pre-release tag is published as one and is never what that path returns, so pin
 a version with `/releases/download/vX.Y.Z/` to hold a host on a known build. The
 asset name selects the platform: `dud-linux-amd64`, `dud-linux-arm64`,
-`dud-darwin-amd64`, or `dud-darwin-arm64`. The GitHub CLI fetches the same
-assets, and is what checks the release's provenance attestation:
+`dud-darwin-amd64`, `dud-darwin-arm64`, `dud-windows-amd64.exe`, or
+`dud-windows-arm64.exe`. The GitHub CLI fetches the same assets, and is what
+checks the release's provenance attestation:
 
 ```sh
 gh release download vX.Y.Z --pattern 'dud-linux-amd64' --pattern 'SHA256SUMS'
@@ -40,6 +41,21 @@ gh attestation verify dud-linux-amd64 --repo wojciechpolak/dud
 way and the `sha256sum -c` line above stands on its own. Every published binary
 is built twice from the same source and rebuilds to the same bytes; see
 [Verifying a release](../README.md#verifying-a-release).
+
+On Windows, PowerShell downloads the native binary without a Unix compatibility
+layer. Put the resulting `dud.exe` in a directory on `PATH`:
+
+```powershell
+Invoke-WebRequest `
+  https://github.com/wojciechpolak/dud/releases/latest/download/dud-windows-amd64.exe `
+  -OutFile dud.exe
+.\dud.exe --version
+```
+
+Choose `dud-windows-arm64.exe` on Windows on ARM. PowerShell's
+`Get-FileHash .\dud.exe -Algorithm SHA256` prints the digest to compare with the
+matching line in `SHA256SUMS`. With the GitHub CLI installed, run
+`gh attestation verify .\dud.exe --repo wojciechpolak/dud` as well.
 
 On macOS and Linux, Homebrew installs the same client and brings the helpers it
 calls out to along with it:
@@ -76,15 +92,21 @@ does until the function is removed from the profile and the shell restarted, and
 the installed binary stays reachable by its full path meanwhile. `type dud` says
 which of the two a shell will run.
 
-Running the binary directly requires `age`, `age-keygen`, `git`, and `qrencode`
-on `PATH`. Homebrew's formula provides them; an unpacked release asset does not.
-It also omits the generated wrappers' hardening (§6): the container boundary,
-the in-memory `/tmp`, and the pinned helper lookup. `DUD_AGE_BIN`,
-`DUD_AGE_KEYGEN_BIN`, `DUD_GIT_BIN`, and `DUD_QRENCODE_BIN` name each helper for
-a host that keeps them somewhere other than `PATH`. In exchange the paths are
-the host's own, so `/work` in every example below becomes an ordinary path and
-`~/.dud` is read in place. The two forms accept identical commands, options, and
-environment variables.
+Running the binary directly requires `age`, `age-keygen`, and `git` on `PATH`.
+QR display also requires `qrencode`; `--no-qr` keeps pairing and dead drop
+uploads usable without it. Dead drop archive extraction requires `tar`.
+Homebrew's formula provides the four helpers it packages; an unpacked release
+asset does not. On Windows, install the helpers separately and use `--no-qr` if
+no native `qrencode.exe` is installed. The native binary also omits the
+generated wrappers' hardening (§6): the container boundary, the in-memory
+`/tmp`, and the pinned helper lookup. `DUD_AGE_BIN`, `DUD_AGE_KEYGEN_BIN`,
+`DUD_GIT_BIN`, and `DUD_QRENCODE_BIN` name each helper for a host that keeps
+them somewhere other than `PATH`. In exchange the paths are the host's own, so
+`/work` in every example below becomes an ordinary path and `~/.dud` is read in
+place. The native binaries accept identical commands, options, and environment
+variables on all three operating systems. The generated Docker shell wrappers in
+§6 target POSIX shells; use `dud.exe` directly from PowerShell or Command Prompt
+on Windows.
 
 ## 1. Environment
 
@@ -97,7 +119,7 @@ environment variables.
 | `DUD_ECH_MODE`       | `hard`                                 | both modes                            |
 | `DUD_DROP_SECRET`    | unset                                  | `upload` and `flush`                  |
 | `DUD_PEER_SECRET`    | unset                                  | `peer invite` on a gated deployment   |
-| `DUD_HOME`           | `~/.dud`                               | peer commands; see §3                 |
+| `DUD_HOME`           | user home + `.dud`                     | peer commands; see §3                 |
 | `DUD_PROFILE`        | unset                                  | peer commands; see §3                 |
 | `DUD_IMAGE`          | the published image                    | the generated wrappers                |
 | `DUD_CA_BUNDLE`      | unset                                  | a CA bundle path inside the container |
@@ -182,10 +204,12 @@ DUD_PROFILE=test dud doctor
 ```
 
 The name must be 1 to 64 characters, start with a letter or digit, and continue
-with letters, digits, `.`, `_`, or `-`, because it becomes a directory name.
-Leaving `DUD_PROFILE` unset selects `~/.dud/default`, and the worlds never see
-each other: exactly one of them is mounted, so a container opened for one
-profile cannot read another's seed or peer graph. Dead drop commands read no
+with letters, digits, `.`, `_`, or `-`, because it becomes a directory name. It
+must not end in a dot or use a Windows reserved device name. Peer aliases follow
+the same rule because DUD uses each alias in local state filenames. Leaving
+`DUD_PROFILE` unset selects `~/.dud/default`, and the worlds never see each
+other: exactly one of them is mounted, so a container opened for one profile
+cannot read another's seed or peer graph. Dead drop commands read no
 configuration file, so a profile changes nothing for them; point those at a
 deployment with `DUD_DROP_BASE_URL`.
 

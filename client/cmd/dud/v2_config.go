@@ -16,8 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 type v2LocalConfig struct {
@@ -132,7 +130,7 @@ func ensureV2Directories(paths v2Paths) error {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return err
 		}
-		if err := os.Chmod(path, 0o700); err != nil {
+		if err := setPrivatePathPermissions(path, true); err != nil {
 			return err
 		}
 	}
@@ -147,10 +145,7 @@ func validatePrivateV2File(path string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%s is group- or world-accessible; expected mode 0600", path)
-	}
-	return nil
+	return validatePrivatePathPermissions(path, info)
 }
 
 func acquireV2ConfigLock(paths v2Paths) (func(), error) {
@@ -161,18 +156,18 @@ func acquireV2ConfigLock(paths v2Paths) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := lockLocalFile(file); err != nil {
 		_ = file.Close()
 		return nil, errors.New("another DUD process is updating local configuration")
 	}
 	if err := file.Truncate(0); err != nil {
-		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		_ = file.Close()
 		return nil, err
 	}
 	_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
 	return func() {
-		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+		_ = unlockLocalFile(file)
 		_ = file.Close()
 	}, nil
 }
@@ -385,6 +380,9 @@ func updateV2ConfigLocked(paths v2Paths, mutator func(*v2LocalConfig) error) (*v
 }
 
 func atomicWriteV2File(path string, body []byte, mode os.FileMode) error {
+	if mode.Perm() != 0o600 {
+		return fmt.Errorf("private atomic file mode must be 0600, got %04o", mode.Perm())
+	}
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
 	if err != nil {
@@ -392,7 +390,7 @@ func atomicWriteV2File(path string, body []byte, mode os.FileMode) error {
 	}
 	temp := file.Name()
 	defer os.Remove(temp)
-	if err := file.Chmod(mode); err != nil {
+	if err := setPrivatePathPermissions(temp, false); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -407,15 +405,10 @@ func atomicWriteV2File(path string, body []byte, mode os.FileMode) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temp, path); err != nil {
+	if err := replaceLocalFile(temp, path); err != nil {
 		return err
 	}
-	dirFile, err := os.Open(dir)
-	if err == nil {
-		defer dirFile.Close()
-		return dirFile.Sync()
-	}
-	return nil
+	return syncDirectory(dir)
 }
 
 func formatV2Config(cfg *v2LocalConfig) []byte {
@@ -670,6 +663,9 @@ func validateV2PeerAlias(alias string) error {
 		}
 		return fmt.Errorf("peer alias %q contains an unsupported character", alias)
 	}
+	if !validPortableV2ArchiveComponent(alias) {
+		return fmt.Errorf("peer alias %q is not a portable file name", alias)
+	}
 	return nil
 }
 
@@ -681,7 +677,7 @@ func validateV2ProfileName(profile string) error {
 	if err := validateV2PeerAlias(profile); err != nil {
 		return errors.New(
 			"DUD_PROFILE must contain 1 through 64 characters, starting with a letter " +
-				"or digit and continuing with letters, digits, '.', '_', or '-'",
+				"or digit and continuing with letters, digits, '.', '_', or '-', and must be a portable file name",
 		)
 	}
 	return nil

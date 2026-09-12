@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
@@ -155,6 +154,11 @@ func validateV2ArchivePath(name string) error {
 	if name == "" || strings.ContainsRune(name, 0) || strings.HasPrefix(name, "/") || strings.Contains(name, `\`) {
 		return errors.New("collection contains an unsafe path")
 	}
+	for _, component := range strings.Split(name, "/") {
+		if !validPortableV2ArchiveComponent(component) {
+			return fmt.Errorf("collection path %q is not portable to Windows", name)
+		}
+	}
 	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
 	if cleaned != name || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return fmt.Errorf("collection path %q is not canonical and relative", name)
@@ -163,6 +167,29 @@ func validateV2ArchivePath(name string) error {
 		return fmt.Errorf("collection path %q exceeds depth %d", name, v2MaximumCollectionDepth)
 	}
 	return nil
+}
+
+func validPortableV2ArchiveComponent(component string) bool {
+	if component == "" || strings.TrimRight(component, " .") != component ||
+		strings.ContainsAny(component, `<>:"|?*`) {
+		return false
+	}
+	for _, character := range component {
+		if character < 32 {
+			return false
+		}
+	}
+	base, _, _ := strings.Cut(component, ".")
+	switch strings.ToUpper(base) {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"COM¹", "COM²", "COM³",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+		"LPT¹", "LPT²", "LPT³":
+		return false
+	default:
+		return true
+	}
 }
 
 func inspectV2CollectionArchive(body []byte, signedPlaintextSize uint64) ([]v2CollectionEntry, error) {
@@ -267,59 +294,23 @@ func validateV2CollectionNames(entries []v2CollectionEntry, rawNames []any) erro
 	return nil
 }
 
-func openV2DirectoryAt(parent int, name string) (int, error) {
-	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return -1, err
-	}
-	return fd, nil
-}
-
-func ensureV2DirectoryAt(parent int, name string) (int, error) {
-	if err := unix.Mkdirat(parent, name, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
-		return -1, err
-	}
-	return openV2DirectoryAt(parent, name)
-}
-
-func extractV2ArchiveEntry(rootFD int, reader *tar.Reader, entry v2CollectionEntry) error {
+func extractV2ArchiveEntry(root *os.Root, reader *tar.Reader, entry v2CollectionEntry) error {
 	components := strings.Split(entry.name, "/")
-	parentFD := rootFD
-	opened := []int{}
-	defer func() {
-		for _, fd := range opened {
-			_ = unix.Close(fd)
+	parent := strings.Join(components[:len(components)-1], "/")
+	if parent != "" {
+		if err := root.MkdirAll(parent, 0o755); err != nil {
+			return fmt.Errorf("securely create collection directory %q: %w", parent, err)
 		}
-	}()
-	for _, component := range components[:len(components)-1] {
-		next, err := ensureV2DirectoryAt(parentFD, component)
-		if err != nil {
-			return fmt.Errorf("securely open collection directory %q: %w", component, err)
-		}
-		opened = append(opened, next)
-		parentFD = next
 	}
-	name := components[len(components)-1]
 	if entry.dir {
-		fd, err := ensureV2DirectoryAt(parentFD, name)
-		if err != nil {
+		if err := root.MkdirAll(entry.name, 0o755); err != nil {
 			return err
 		}
-		return unix.Close(fd)
+		return nil
 	}
-	fd, err := unix.Openat(
-		parentFD,
-		name,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		uint32(entry.mode),
-	)
+	file, err := root.OpenFile(entry.name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(entry.mode))
 	if err != nil {
 		return fmt.Errorf("securely create collection file %q: %w", entry.name, err)
-	}
-	file := os.NewFile(uintptr(fd), entry.name)
-	if file == nil {
-		_ = unix.Close(fd)
-		return errors.New("create collection file handle")
 	}
 	written, copyErr := io.CopyN(file, reader, entry.size)
 	if copyErr == nil && written != entry.size {
@@ -354,7 +345,7 @@ func extractV2CollectionArchive(body []byte, destination string, signedPlaintext
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(stage, 0o700); err != nil {
+	if err := setPrivatePathPermissions(stage, true); err != nil {
 		_ = os.RemoveAll(stage)
 		return nil, err
 	}
@@ -364,32 +355,28 @@ func extractV2CollectionArchive(body []byte, destination string, signedPlaintext
 			_ = os.RemoveAll(stage)
 		}
 	}()
-	rootFD, err := unix.Open(stage, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	root, err := os.OpenRoot(stage)
 	if err != nil {
 		return nil, err
 	}
+	defer root.Close()
 	reader := tar.NewReader(bytes.NewReader(body))
-	for index, entry := range entries {
+	for _, entry := range entries {
 		header, err := reader.Next()
 		if err != nil {
-			_ = unix.Close(rootFD)
 			return nil, err
 		}
 		if header.Name != entry.name {
-			_ = unix.Close(rootFD)
 			return nil, errors.New("collection changed between validation and extraction")
 		}
-		if err := extractV2ArchiveEntry(rootFD, reader, entry); err != nil {
-			_ = unix.Close(rootFD)
+		if err := extractV2ArchiveEntry(root, reader, entry); err != nil {
 			return nil, err
 		}
-		_ = index
 	}
-	if err := unix.Fsync(rootFD); err != nil {
-		_ = unix.Close(rootFD)
+	if err := syncDirectory(stage); err != nil {
 		return nil, err
 	}
-	if err := unix.Close(rootFD); err != nil {
+	if err := root.Close(); err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
@@ -399,11 +386,7 @@ func extractV2CollectionArchive(body []byte, destination string, signedPlaintext
 	if err := os.Rename(stage, destination); err != nil {
 		return nil, err
 	}
-	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err == nil {
-		_ = unix.Fsync(parentFD)
-		_ = unix.Close(parentFD)
-	}
+	_ = syncDirectory(parent)
 	committed = true
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {

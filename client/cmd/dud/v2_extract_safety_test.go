@@ -77,6 +77,27 @@ func TestV2CollectionRefusesArchiveBombs(t *testing.T) {
 	})
 }
 
+func TestWindowsUnsafeCollectionNamesAreRefusedOnEveryPlatform(t *testing.T) {
+	for _, name := range []string{
+		"C:/secret.txt",
+		"notes:alternate-stream",
+		"NUL",
+		"con.txt",
+		"COM1.log",
+		"LPT².log",
+		"trailing-dot.",
+		"trailing-space ",
+		"wild*.txt",
+		"control\x1f.txt",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateV2ArchivePath(name); err == nil {
+				t.Fatalf("Windows-unsafe collection path %q was accepted", name)
+			}
+		})
+	}
+}
+
 // TestV2CollectionNormalizesUnsafeModes proves the extractor derives a mode
 // rather than trusting one: setuid, setgid and sticky bits cannot survive a
 // transfer even when the sender sets them.
