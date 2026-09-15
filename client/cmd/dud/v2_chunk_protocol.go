@@ -185,39 +185,6 @@ func putV2ChunkUploadPartObserved(ctx context.Context, transport v2Transport, or
 	return nil
 }
 
-func headV2ChunkUploadPart(ctx context.Context, transport v2Transport, origin string, uploadID []byte, part v2ChunkManifestPart, proof v2GranularSlotProofInput) (bool, error) {
-	if len(uploadID) != 16 {
-		return false, errors.New("chunk upload is invalid")
-	}
-	if err := validateV2ChunkManifestPart(part); err != nil {
-		return false, err
-	}
-	path := "/v2/deliveries/uploads/" + hex.EncodeToString(uploadID) + "/chunks/" + hex.EncodeToString(part.ID)
-	headers, err := v2ChunkHeaders(proof, "HEAD", origin, path, make([]byte, 32))
-	if err != nil {
-		return false, err
-	}
-	response, err := transport.Do(ctx, v2Request{Method: "HEAD", Origin: origin, Path: path, Headers: headers, MaxResponseBytes: v2MaxDescriptorBytes})
-	if err != nil {
-		return false, err
-	}
-	if response.StatusCode >= 400 {
-		if protocolErr := decodeV2HTTPError(response); protocolErr != nil {
-			var unavailable *v2ProtocolError
-			if errors.As(protocolErr, &unavailable) && unavailable.Code == 4 {
-				return false, nil
-			}
-			return false, protocolErr
-		}
-	}
-	length, lengthErr := strconv.ParseUint(response.Headers.Get("Content-Length"), 10, 64)
-	digest, digestErr := hex.DecodeString(response.Headers.Get("DUD-Content-SHA256"))
-	if response.StatusCode != http.StatusOK || response.ContentType != "application/octet-stream" || lengthErr != nil || length != part.Length || digestErr != nil || !bytes.Equal(digest, part.Digest) {
-		return false, errors.New("chunk upload status does not match its manifest")
-	}
-	return true, nil
-}
-
 func renewV2ChunkUpload(ctx context.Context, transport v2Transport, origin string, uploadID, operationID []byte, proof v2GranularSlotProofInput) (uint64, bool, error) {
 	if len(uploadID) != 16 || len(operationID) != 16 {
 		return 0, false, errors.New("chunk upload renewal is invalid")

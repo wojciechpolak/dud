@@ -69,10 +69,10 @@ them.
 | ------------- | ----------------------------------------------------------- | ------ |
 | `analyze`     | the x/tools passes `go vet` leaves off, as one multichecker | yes    |
 | `govulncheck` | known vulnerabilities in the modules the client calls       | yes    |
+| `deadcode`    | functions unreachable from `main`                           | yes    |
 | `staticcheck` | correctness, simplification, and style checks               | no     |
 | `errcheck`    | unchecked errors and unchecked type assertions              | no     |
 | `gocyclo`     | functions above the cyclomatic complexity ceiling           | no     |
-| `deadcode`    | functions unreachable from `main`                           | no     |
 
 How the scripts invoke them decides whether their output means anything:
 

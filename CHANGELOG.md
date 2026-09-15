@@ -20,6 +20,11 @@ and this project follows
 - Add `npm run check:tidy`, which fails if `go mod tidy` would change any
   module, so the pinned analyzer set always matches what the build uses.
 
+### Removed
+
+- Remove `headV2ChunkUploadPart`, a chunk upload probe nothing called. Its
+  removal makes `deadcode` report nothing, so that analyzer now blocks.
+
 ### Changed
 
 - Build `govulncheck` from the pinned tools module instead of installing it at
