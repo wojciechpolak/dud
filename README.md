@@ -557,8 +557,9 @@ Credentials, feature flags, limits, administration, and health checks are in
 ## Verifying a release
 
 Every release publishes reproducible native binaries with checksums, an SPDX
-SBOM, and a Sigstore provenance attestation, alongside signed container images
-with their own SBOM attestation. Verify what you run.
+SBOM, and a Sigstore-backed provenance attestation. The container images have
+Sigstore-backed provenance attestations and downloadable SPDX SBOMs. Verify what
+you run.
 
 Native binaries:
 

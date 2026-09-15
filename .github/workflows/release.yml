@@ -258,7 +258,7 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ matrix.image_name }}
           subject-digest: ${{ steps.build-and-push.outputs.digest }}
 
-      - name: Publish image SBOM attestation
+      - name: Generate image SBOM
         if: ${{ github.event_name != 'pull_request' }}
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         env:
