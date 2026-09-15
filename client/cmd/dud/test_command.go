@@ -59,7 +59,9 @@ func (a *app) cmdTest(args []string) error {
 		return err
 	}
 	fmt.Fprintln(a.out, "\nResponse:")
-	a.out.Write(response.Body)
+	if _, err := a.out.Write(response.Body); err != nil {
+		return err
+	}
 	fmt.Fprintln(a.out)
 	return nil
 }

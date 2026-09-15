@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,3 +145,13 @@ func TestRunCommandReturnsSubprocessError(t *testing.T) {
 		t.Fatal("expected subprocess error")
 	}
 }
+
+// errWriteFailed is what failingWriter returns, so a test can tell the write
+// error apart from any other failure the command under test could report.
+var errWriteFailed = errors.New("write failed")
+
+// failingWriter rejects every write. A command that sends its own output to
+// one must report the failure rather than discarding it.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errWriteFailed }

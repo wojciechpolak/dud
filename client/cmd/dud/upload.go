@@ -331,7 +331,9 @@ func (a *app) cmdUpload(args []string, receivePrefix string) error {
 	}
 
 	if opts.outputJSON {
-		a.out.Write(data)
+		if _, err := a.out.Write(data); err != nil {
+			return err
+		}
 		fmt.Fprintln(a.out)
 		return nil
 	}

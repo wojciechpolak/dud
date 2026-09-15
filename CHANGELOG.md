@@ -42,6 +42,12 @@ and this project follows
   string it reported opens with the proper noun "Git", which the check reads as
   a sentence opening.
 
+### Fixed
+
+- Report a failed write of a command's own output. `dud flush`, `dud test`, and
+  `dud upload --json` pass a response body through to standard output, and a
+  short write there exited 0 as though the whole body had been written.
+
 ## [2.4.0] - 2026-09-12
 
 ### Added

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,31 @@ func TestFlushRendersJSONTextPartialAndInvalidResponses(t *testing.T) {
 	for _, args := range [][]string{{"--url"}, {"--doh-url"}, {"--json", "--json"}, {"--wat"}} {
 		if err := a.cmdFlush(args); err == nil {
 			t.Fatalf("flush options accepted: %v", args)
+		}
+	}
+}
+
+// A command that passes a response body through to standard output reports a
+// short write rather than exiting successfully with part of the body written.
+func TestFlushReportsAFailedWriteOfTheResponseBody(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		args []string
+	}{
+		{"json passthrough", `{"ok":true,"deletedCount":2,"partial":false}`, []string{"--json"}},
+		{"unparseable body", "not JSON", nil},
+	} {
+		a := newApp(strings.NewReader(""), failingWriter{}, &bytes.Buffer{})
+		a.cfg.DropBaseURL = "https://dud.example.com"
+		a.cfg.DOHURL = "https://dns.google/dns-query"
+		a.cfg.ECHMode = "off"
+		a.cfg.SecretToken = "secret"
+		a.newV2Transport = func(v2TransportOptions) (v2Transport, error) {
+			return &v2CoverageResponseTransport{response: &v2Response{StatusCode: 200, Body: []byte(test.body)}}, nil
+		}
+		if err := a.cmdFlush(test.args); !errors.Is(err, errWriteFailed) {
+			t.Fatalf("flush %s: error = %v, want the write error", test.name, err)
 		}
 	}
 }
