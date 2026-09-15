@@ -27,9 +27,8 @@ func readV2TTYLine(prompt string, hidden bool) (string, error) {
 	if _, err := fmt.Fprint(terminal.out, prompt); err != nil {
 		return "", err
 	}
-	restore := func() error { return nil }
 	if hidden {
-		restore, err = disableTerminalEcho(terminal.in.Fd())
+		restore, err := disableTerminalEcho(terminal.in.Fd())
 		if err != nil {
 			return "", err
 		}

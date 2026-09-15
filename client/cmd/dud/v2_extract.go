@@ -215,10 +215,12 @@ func inspectV2CollectionArchive(body []byte, signedPlaintextSize uint64) ([]v2Co
 			return nil, err
 		}
 		// GNU adds sparse maps and long-name members whose bodies do not match
-		// their declared size. PAX is accepted only for the one record a
-		// non-ASCII name needs. Xattrs, ownership, and sparse maps are extensions
-		// this format does not carry.
-		if header.Format == tar.FormatGNU || header.Xattrs != nil {
+		// their declared size. This accepts PAX only for the one record a
+		// non-ASCII name needs. Ownership, sparse maps, and extended attributes
+		// are extensions this format does not support. An extended attribute
+		// reaches the reader as a SCHILY.xattr.* record, so the loop below
+		// rejects it along with every other record but "path".
+		if header.Format == tar.FormatGNU {
 			return nil, fmt.Errorf("collection entry %q uses unsupported extensions", header.Name)
 		}
 		for key := range header.PAXRecords {
@@ -238,7 +240,7 @@ func inspectV2CollectionArchive(body []byte, signedPlaintextSize uint64) ([]v2Co
 			if header.Size != 0 {
 				return nil, fmt.Errorf("collection directory %q has a body", header.Name)
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if header.Size < 0 || header.Size > v2MaximumObjectBytes {
 				return nil, fmt.Errorf("collection file %q exceeds the single-file limit", header.Name)
 			}

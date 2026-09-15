@@ -68,9 +68,9 @@ them.
 | Analyzer      | What it reports                                             | Blocks |
 | ------------- | ----------------------------------------------------------- | ------ |
 | `analyze`     | the x/tools passes `go vet` leaves off, as one multichecker | yes    |
-| `govulncheck` | known vulnerabilities in the modules the client calls       | yes    |
 | `deadcode`    | functions unreachable from `main`                           | yes    |
-| `staticcheck` | correctness, simplification, and style checks               | no     |
+| `govulncheck` | known vulnerabilities in the modules the client calls       | yes    |
+| `staticcheck` | correctness, simplification, and style checks               | yes    |
 | `errcheck`    | unchecked errors and unchecked type assertions              | no     |
 | `gocyclo`     | functions above the cyclomatic complexity ceiling           | no     |
 

@@ -40,11 +40,11 @@ GOCYCLO_OVER="${GOCYCLO_OVER:-30}"
 
 # Analyzers that report nothing on this tree. They block, so a change that
 # introduces a finding fails instead of adding to a backlog.
-GATING_TOOLS="analyze deadcode govulncheck"
+GATING_TOOLS="analyze deadcode govulncheck staticcheck"
 
 # Analyzers with findings left to fix. Once one reports nothing, move it into
 # GATING_TOOLS.
-PENDING_TOOLS="staticcheck errcheck gocyclo"
+PENDING_TOOLS="errcheck gocyclo"
 
 ALL_TOOLS="$GATING_TOOLS $PENDING_TOOLS"
 

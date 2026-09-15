@@ -24,6 +24,11 @@ and this project follows
 
 - Remove `headV2ChunkUploadPart`, a chunk upload probe nothing called. Its
   removal makes `deadcode` report nothing, so that analyzer now blocks.
+- Stop reading the deprecated `tar.Header.Xattrs` and matching the deprecated
+  `tar.TypeRegA` when inspecting a collection archive. An extended attribute
+  arrives as a `SCHILY.xattr.*` record that the record check already rejects,
+  and the reader reports a pre-POSIX regular file as `tar.TypeReg`, so both
+  reads were redundant.
 
 ### Changed
 
@@ -31,6 +36,11 @@ and this project follows
   job time, so the scanner that runs is the version `tools/go.sum` hashes.
 - Verify the Go language version of every module against
   `.github/supported-versions.json`, not the client module alone.
+- Declare the terminal echo restore function inside the branch that uses it, so
+  a visible prompt no longer assigns a value nothing reads.
+- Promote `staticcheck` to a blocking analyzer. `ST1005` is off. Every error
+  string it reported opens with the proper noun "Git", which the check reads as
+  a sentence opening.
 
 ## [2.4.0] - 2026-09-12
 
