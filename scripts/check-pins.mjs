@@ -16,6 +16,13 @@ import path from 'node:path';
 const MANIFEST = '.github/supported-versions.json';
 const DOCKERFILES = ['client/Dockerfile', 'server/Dockerfile'];
 const WORKFLOW_DIR = '.github/workflows';
+// client/ ships, tests/vectors/protocol-v2/ generates the frozen protocol
+// vectors, and tools/ builds the static analyzers.
+const GO_MODULES = [
+  'client/go.mod',
+  'tests/vectors/protocol-v2/go.mod',
+  'tools/go.mod',
+];
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
@@ -171,14 +178,19 @@ function checkManifest() {
     );
   }
 
-  const goDirective = /^go\s+(\S+)$/m.exec(read('client/go.mod'));
-  if (!goDirective) {
-    fail('client/go.mod', 'has no go directive');
-  } else if (goDirective[1] !== manifest.go.minimum) {
-    fail(
-      MANIFEST,
-      `go minimum ${manifest.go.minimum} disagrees with client/go.mod ${goDirective[1]}`,
-    );
+  // Every module states the same language version. A module left behind
+  // compiles against an older set of rules than the one the manifest promises,
+  // and for tools/ that silently changes what the analyzers accept.
+  for (const module of GO_MODULES) {
+    const goDirective = /^go\s+(\S+)$/m.exec(read(module));
+    if (!goDirective) {
+      fail(module, 'has no go directive');
+    } else if (goDirective[1] !== manifest.go.minimum) {
+      fail(
+        MANIFEST,
+        `go minimum ${manifest.go.minimum} disagrees with ${module} ${goDirective[1]}`,
+      );
+    }
   }
 
   for (const [name, expected] of Object.entries(manifest.pinnedSources)) {

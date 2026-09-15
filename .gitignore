@@ -7,6 +7,7 @@
 .wrangler/
 .dud-dev/
 coverage/
+/bin/
 client/bin/
 dist/
 node_modules/
@@ -15,3 +16,4 @@ wrangler.toml
 *.key
 *.recipient
 client/dud
+client/dud.exe

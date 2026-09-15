@@ -8,6 +8,25 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add Go static analysis: `gocyclo`, `errcheck`, `deadcode`, `goimports`,
+  `govulncheck`, and `staticcheck`, plus a multichecker bundling the
+  `golang.org/x/tools` analyzers that `go vet` leaves off. They are declared in
+  `tools/`, a module separate from the two that ship, so nothing they depend on
+  reaches the client binary, and `tools/go.sum` fixes the version of each one.
+  `npm run analyze:go` runs them; the analyzers that report nothing block
+  through `npm run check`, and the rest report on pull requests.
+- Add `npm run check:tidy`, which fails if `go mod tidy` would change any
+  module, so the pinned analyzer set always matches what the build uses.
+
+### Changed
+
+- Build `govulncheck` from the pinned tools module instead of installing it at
+  job time, so the scanner that runs is the version `tools/go.sum` hashes.
+- Verify the Go language version of every module against
+  `.github/supported-versions.json`, not the client module alone.
+
 ## [2.4.0] - 2026-09-12
 
 ### Added

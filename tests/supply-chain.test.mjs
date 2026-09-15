@@ -53,6 +53,9 @@ function pinFixture(t, overrides = {}) {
     }),
     '.node-version': '24.15.0\n',
     'client/go.mod': 'module example.test/client\n\ngo 1.24.0\n',
+    'tests/vectors/protocol-v2/go.mod':
+      'module example.test/vectors\n\ngo 1.24.0\n',
+    'tools/go.mod': 'module example.test/tools\n\ngo 1.24.0\n',
     ...overrides,
   };
   for (const [relative, contents] of Object.entries(files)) {
@@ -160,6 +163,17 @@ test('the pin gate rejects a manifest that disagrees with the build', (t) => {
   ]) {
     assert.match(result.output, pattern);
   }
+});
+
+// The analyzers are built from tools/, so a module left on an older language
+// version quietly changes what they accept.
+test('the pin gate rejects a Go module left behind the manifest', (t) => {
+  const root = pinFixture(t, {
+    'tools/go.mod': 'module example.test/tools\n\ngo 1.23.0\n',
+  });
+  const result = run(CHECK_PINS, root);
+  assert.equal(result.ok, false);
+  assert.match(result.output, /disagrees with tools\/go\.mod 1\.23\.0/);
 });
 
 test('the pin gate rejects a :latest reference', (t) => {

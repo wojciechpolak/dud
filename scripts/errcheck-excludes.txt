@@ -1,0 +1,5 @@
+// Writes to stderr and to usage writers. The process is already reporting a
+// failure or printing help, so there is nowhere to report a failed write.
+fmt.Fprint
+fmt.Fprintf
+fmt.Fprintln
