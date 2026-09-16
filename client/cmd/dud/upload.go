@@ -226,6 +226,108 @@ func (a *app) createBundleArchive(archivePath string, sources []string) error {
 	return cmd.Run()
 }
 
+// writeUploadPlaintext assembles the bytes to upload into one file and reports
+// whether they were bundled into an archive. A directory, or more than one
+// path, becomes a bundle; a single file is copied as it is, so the download
+// side writes back the same file rather than an archive containing it.
+func (a *app) writeUploadPlaintext(plainFile string, opts uploadOptions) (bool, error) {
+	if len(opts.files) == 0 {
+		return false, a.writeUploadInput(plainFile, opts)
+	}
+	bundle := false
+	pathCount := 0
+	for _, source := range opts.files {
+		if source == "" {
+			continue
+		}
+		info, err := os.Stat(source)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return false, fatalError("Path not found: " + source)
+			}
+			return false, err
+		}
+		pathCount++
+		if info.IsDir() || pathCount > 1 {
+			bundle = true
+		}
+	}
+	if bundle {
+		return true, a.createBundleArchive(plainFile, opts.files)
+	}
+	return false, copyFile(plainFile, opts.files[0])
+}
+
+// writeUploadInput writes the plaintext of an upload that names no files: the
+// message given on the command line, or standard input.
+func (a *app) writeUploadInput(plainFile string, opts uploadOptions) error {
+	if opts.message != "" {
+		return os.WriteFile(plainFile, []byte(opts.message), 0o600)
+	}
+	if stdinIsTTY() {
+		fmt.Fprintln(a.errOut, "Enter plaintext, then press Ctrl-D when finished.")
+	}
+	out, err := os.Create(plainFile)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, a.in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+// encryptUploadPlaintext encrypts the assembled plaintext with age. Recipients
+// given on the command line are written to a file rather than passed as
+// arguments, so they do not appear in this host's process list.
+func (a *app) encryptUploadPlaintext(plainFile, encryptedFile string, opts uploadOptions) error {
+	if !opts.recipientMode() {
+		return a.runAge("--encrypt", "--passphrase", "-o", encryptedFile, plainFile)
+	}
+	ageArgs := []string{"--encrypt"}
+	if len(opts.inlineRecipients) > 0 {
+		inlineRecipientsFile, err := tempFile("dud-upload-recipients-txt-")
+		if err != nil {
+			return err
+		}
+		defer removeTempFile(inlineRecipientsFile)
+		if err := os.WriteFile(inlineRecipientsFile, []byte(strings.Join(opts.inlineRecipients, "\n")+"\n"), 0o600); err != nil {
+			return err
+		}
+		ageArgs = append(ageArgs, "-R", inlineRecipientsFile)
+	}
+	if opts.recipientsFile != "" {
+		ageArgs = append(ageArgs, "-R", opts.recipientsFile)
+	}
+	ageArgs = append(ageArgs, "-o", encryptedFile, plainFile)
+	return a.runAge(ageArgs...)
+}
+
+// reportUpload renders what the server returned for an upload, including the
+// command that downloads it again.
+func (a *app) reportUpload(data []byte, opts uploadOptions, receivePrefix string, bundle bool) error {
+	if opts.outputJSON {
+		if _, err := a.out.Write(data); err != nil {
+			return err
+		}
+		fmt.Fprintln(a.out)
+		return nil
+	}
+	response, err := parseUploadResponse(data)
+	if err != nil {
+		return err
+	}
+	if err := a.printUploadResponse(response, buildReceiveCommand(receivePrefix, response.ID, opts.baseURL, bundle)); err != nil {
+		return err
+	}
+	if opts.outputQR {
+		return a.printUploadQR(response.ID)
+	}
+	return nil
+}
+
 func (a *app) cmdUpload(args []string, receivePrefix string) error {
 	opts, err := parseUploadOptions(args, a.cfg.DropBaseURL, a.cfg.DOHURL)
 	if err != nil {
@@ -247,106 +349,18 @@ func (a *app) cmdUpload(args []string, receivePrefix string) error {
 	}
 	defer removeTempFile(encryptedFile)
 
-	bundle := false
-	if len(opts.files) > 0 {
-		pathCount := 0
-		for _, source := range opts.files {
-			if source == "" {
-				continue
-			}
-			info, err := os.Stat(source)
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					return fatalError("Path not found: " + source)
-				}
-				return err
-			}
-			pathCount++
-			if info.IsDir() || pathCount > 1 {
-				bundle = true
-			}
-		}
-		if bundle {
-			if err := a.createBundleArchive(plainFile, opts.files); err != nil {
-				return err
-			}
-		} else {
-			if err := copyFile(plainFile, opts.files[0]); err != nil {
-				return err
-			}
-		}
-	} else if opts.message != "" {
-		if err := os.WriteFile(plainFile, []byte(opts.message), 0o600); err != nil {
-			return err
-		}
-	} else {
-		if stdinIsTTY() {
-			fmt.Fprintln(a.errOut, "Enter plaintext, then press Ctrl-D when finished.")
-		}
-		out, err := os.Create(plainFile)
-		if err != nil {
-			return err
-		}
-		_, copyErr := io.Copy(out, a.in)
-		closeErr := out.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
+	bundle, err := a.writeUploadPlaintext(plainFile, opts)
+	if err != nil {
+		return err
 	}
-
-	var inlineRecipientsFile string
-	if opts.recipientMode() {
-		var ageArgs []string
-		ageArgs = append(ageArgs, "--encrypt")
-		if len(opts.inlineRecipients) > 0 {
-			inlineRecipientsFile, err = tempFile("dud-upload-recipients-txt-")
-			if err != nil {
-				return err
-			}
-			defer removeTempFile(inlineRecipientsFile)
-			if err := os.WriteFile(inlineRecipientsFile, []byte(strings.Join(opts.inlineRecipients, "\n")+"\n"), 0o600); err != nil {
-				return err
-			}
-			ageArgs = append(ageArgs, "-R", inlineRecipientsFile)
-		}
-		if opts.recipientsFile != "" {
-			ageArgs = append(ageArgs, "-R", opts.recipientsFile)
-		}
-		ageArgs = append(ageArgs, "-o", encryptedFile, plainFile)
-		if err := a.runAge(ageArgs...); err != nil {
-			return err
-		}
-	} else {
-		if err := a.runAge("--encrypt", "--passphrase", "-o", encryptedFile, plainFile); err != nil {
-			return err
-		}
+	if err := a.encryptUploadPlaintext(plainFile, encryptedFile, opts); err != nil {
+		return err
 	}
-
 	data, err := a.postUpload(encryptedFile, opts)
 	if err != nil {
 		return err
 	}
-
-	if opts.outputJSON {
-		a.out.Write(data)
-		fmt.Fprintln(a.out)
-		return nil
-	}
-
-	response, err := parseUploadResponse(data)
-	if err != nil {
-		return err
-	}
-	if err := a.printUploadResponse(response, buildReceiveCommand(receivePrefix, response.ID, opts.baseURL, bundle)); err != nil {
-		return err
-	}
-	if opts.outputQR {
-		return a.printUploadQR(response.ID)
-	}
-	return nil
+	return a.reportUpload(data, opts, receivePrefix, bundle)
 }
 
 // dropUploadResponseLimit bounds the JSON envelope the upload route returns.
@@ -363,7 +377,7 @@ func (a *app) postUpload(encryptedFile string, opts uploadOptions) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err

@@ -185,7 +185,7 @@ func (a *app) cmdDownload(args []string) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, err = io.Copy(a.out, f)
 		return err
 	}
@@ -226,7 +226,7 @@ func (a *app) getDownload(encryptedFile string, opts downloadOptions) error {
 	if err != nil {
 		return err
 	}
-	defer response.Stream.Close()
+	defer func() { _ = response.Stream.Close() }()
 
 	file, err := os.Create(encryptedFile)
 	if err != nil {

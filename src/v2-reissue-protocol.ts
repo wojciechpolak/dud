@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { concatBytes, toArrayBuffer } from './bytes.js';
 import { encodeCbor, requireCborMap, type CborValue } from './cbor.js';
 import { bytesToHex } from './v2-auth.js';
 import { encryptV2AgeGrant } from './v2-age.js';
@@ -37,22 +38,6 @@ interface V2ReissueGrantCapability {
   direction: V2Direction;
   scope: V2Scope;
   tokenSecret: Uint8Array;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(
-    parts.reduce((length, part) => length + part.byteLength, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-  return result;
-}
-
-function arrayBuffer(value: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(value).buffer;
 }
 
 function requiredBytes(
@@ -159,20 +144,20 @@ export async function verifyV2ReissueSignature(
   try {
     const key = await crypto.subtle.importKey(
       'raw',
-      arrayBuffer(publicKey),
+      toArrayBuffer(publicKey),
       { name: 'Ed25519' },
       false,
       ['verify'],
     );
-    const input = concat(
+    const input = concatBytes(
       textEncoder.encode('dud/v2/capability-reissue\0'),
       sha256(encodeCbor(signedMap)),
     );
     return crypto.subtle.verify(
       'Ed25519',
       key,
-      arrayBuffer(signature),
-      arrayBuffer(input),
+      toArrayBuffer(signature),
+      toArrayBuffer(input),
     );
   } catch {
     return false;

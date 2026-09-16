@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ func TestIsTerminalRejectsDevNull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if isTerminal(f.Fd()) {
 		t.Fatal("expected /dev/null to not be a terminal")
 	}
@@ -142,5 +143,38 @@ func TestRunCommandReturnsSubprocessError(t *testing.T) {
 	a := newApp(strings.NewReader(""), os.Stdout, os.Stderr)
 	if err := a.runCommand("__dud_missing_command__", nil, nil, nil, nil); err == nil {
 		t.Fatal("expected subprocess error")
+	}
+}
+
+// errWriteFailed is what failingWriter returns, so a test can tell the write
+// error apart from any other failure the command under test could report.
+var errWriteFailed = errors.New("write failed")
+
+// failingWriter rejects every write. A command that sends its own output to
+// one must report the failure rather than discarding it.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errWriteFailed }
+
+func TestLoadConfigAcceptsOnlyAnAbsoluteGitTrustedDirectory(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "absolute", value: "/work", want: "/work"},
+		{name: "cleaned", value: "/work/repo/..", want: "/work"},
+		{name: "unset", value: "", want: ""},
+		{name: "relative", value: "work", want: ""},
+		// A wildcard would trust every repository the caller ever runs dud in,
+		// which is the opposite of naming the one directory a wrapper mounted.
+		{name: "wildcard", value: "*", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("DUD_GIT_TRUSTED_DIR", test.value)
+			if got := loadConfig().GitTrustedDir; got != test.want {
+				t.Fatalf("GitTrustedDir = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

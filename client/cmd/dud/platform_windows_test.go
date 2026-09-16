@@ -66,12 +66,12 @@ func TestWindowsFileLockRejectsASecondWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	second, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	if err := lockLocalFile(first); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestWindowsDevNullIsNotATerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if isTerminal(file.Fd()) {
 		t.Fatal("NUL was detected as an interactive console")
 	}

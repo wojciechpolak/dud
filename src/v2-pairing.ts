@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { concatBytes } from './bytes.js';
+import { openV2AesGcm, sealV2AesGcm } from './v2-aes-gcm.js';
 import {
   bytesEqual,
   decodeCbor,
@@ -43,6 +45,7 @@ import type {
   V2PairingInvitationRecord,
   V2Scope,
   V2Store,
+  V2StoredState,
 } from './v2-types.js';
 import type {
   V2AdministrativeRepository,
@@ -82,10 +85,6 @@ interface V2PairingDependencies {
   randomBytes: (length: number) => Uint8Array;
 }
 
-function arrayBuffer(value: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(value).buffer;
-}
-
 async function encryptInvitationRecord(
   deploymentKey: Uint8Array,
   locator: string,
@@ -96,27 +95,12 @@ async function encryptInvitationRecord(
   if (deploymentKey.byteLength !== 32 || nonce.byteLength !== 12) {
     throw new Error('Pairing record encryption input is invalid.');
   }
-  const key = await crypto.subtle.importKey(
-    'raw',
-    arrayBuffer(deploymentKey),
-    'AES-GCM',
-    false,
-    ['encrypt'],
+  return sealV2AesGcm(
+    deploymentKey,
+    nonce,
+    textEncoder.encode(`dud/v2/pairing|${locator}`),
+    textEncoder.encode(JSON.stringify(invitation)),
   );
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: 'AES-GCM',
-        iv: arrayBuffer(nonce),
-        additionalData: arrayBuffer(
-          textEncoder.encode(`dud/v2/pairing|${locator}`),
-        ),
-      },
-      key,
-      arrayBuffer(textEncoder.encode(JSON.stringify(invitation))),
-    ),
-  );
-  return concat(nonce, ciphertext);
 }
 
 async function decryptInvitationRecord(
@@ -128,23 +112,10 @@ async function decryptInvitationRecord(
     throw new Error('Pairing record is invalid.');
   }
   try {
-    const key = await crypto.subtle.importKey(
-      'raw',
-      arrayBuffer(deploymentKey),
-      'AES-GCM',
-      false,
-      ['decrypt'],
-    );
-    const plaintext = await crypto.subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: arrayBuffer(value.subarray(0, 12)),
-        additionalData: arrayBuffer(
-          textEncoder.encode(`dud/v2/pairing|${locator}`),
-        ),
-      },
-      key,
-      arrayBuffer(value.subarray(12)),
+    const plaintext = await openV2AesGcm(
+      deploymentKey,
+      value,
+      textEncoder.encode(`dud/v2/pairing|${locator}`),
     );
     const invitation = JSON.parse(
       new TextDecoder().decode(plaintext),
@@ -241,18 +212,6 @@ async function activationCapabilityRegistrations(
     }
   }
   return registrations;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(
-    parts.reduce((length, part) => length + part.byteLength, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-  return result;
 }
 
 function requireBytes(
@@ -370,7 +329,7 @@ async function verifyPairingSignature(
       false,
       ['verify'],
     );
-    const input = concat(
+    const input = concatBytes(
       textEncoder.encode(`dud/v2/pairing/${messageName}\0`),
       sha256(encodeCbor(map)),
     );
@@ -556,13 +515,12 @@ function grantsForRole(
 ) {
   const outbound: V2Direction =
     role === 0 ? 'inviter->invitee' : 'invitee->inviter';
-  const inbound: V2Direction =
-    role === 0 ? 'invitee->inviter' : 'inviter->invitee';
-  return all.filter(
-    (grant) =>
-      (grant.direction === outbound && grant.scope === 'write') ||
-      (grant.direction === inbound &&
-        (grant.scope === 'read' || grant.scope === 'ack')),
+  // A peer writes in its outbound direction and reads and acknowledges in
+  // the other one.
+  return all.filter((grant) =>
+    grant.direction === outbound
+      ? grant.scope === 'write'
+      : grant.scope !== 'write',
   );
 }
 
@@ -904,7 +862,7 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
           throw new PairingError(10, 'Pairing rendezvous admission failed.');
         }
       } else {
-        await dependencies.store.transaction((state) => {
+        const storeRendezvous = (state: V2StoredState): void => {
           for (const [key, invitation] of Object.entries(state.invitations)) {
             if (invitation.expiresAt + PAIRING_CLOCK_SKEW < now) {
               delete state.invitations[key];
@@ -963,7 +921,9 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
             expiresAt,
             phase: 0,
           };
-        });
+        };
+
+        await dependencies.store.transaction(storeRendezvous);
       }
       return v2CborResponse(
         new Map<number, CborValue>([
@@ -1093,14 +1053,14 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
       };
       inviteeStatusVerifier.digest = encodeBase64Url(
         sha256(
-          concat(
+          concatBytes(
             textEncoder.encode('dud/v2/bearer\0'),
             decodeBase64Url(inviteeStatusVerifier.salt, 16),
             inviteeStatus,
           ),
         ),
       );
-      await updateInvitation(locator, (pending) => {
+      const recordAcceptance = (pending: V2PairingInvitationRecord): void => {
         if (pending.expiresAt <= now || pending.phase === 4) {
           throw new PairingError(7, 'Pairing code is invalid or expired.');
         }
@@ -1149,7 +1109,9 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
         );
         pending.inviteeStatusVerifier = inviteeStatusVerifier;
         pending.phase = 1;
-      });
+      };
+
+      await updateInvitation(locator, recordAcceptance);
       return v2EmptyResponse(202);
     } catch (error) {
       return pairingErrorResponse(
@@ -1231,7 +1193,9 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
       }
       const encoded = encodeBase64Url(encodeCbor(confirmation));
       const encodedSignature = encodeBase64Url(signature);
-      await updateInvitation(locator, (record) => {
+      const recordKeyConfirmation = (
+        record: V2PairingInvitationRecord,
+      ): void => {
         if (record.expiresAt <= seconds(dependencies.now())) {
           throw new PairingError(7, 'Pairing code is invalid or expired.');
         }
@@ -1246,7 +1210,9 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
         record.keyConfirmationSignature = encodedSignature;
         record.fullTranscriptHash = bytesToHex(expectedTranscript);
         record.phase = 2;
-      });
+      };
+
+      await updateInvitation(locator, recordKeyConfirmation);
       return v2EmptyResponse(202);
     } catch (error) {
       return pairingErrorResponse(error, 'Key confirmation failed.');
@@ -1267,54 +1233,16 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
       if (!invitation.fullTranscriptHash || invitation.phase < 2) {
         throw new PairingError(5, 'Pairing key confirmation is incomplete.');
       }
-      const wrapper = requireCborMap(
-        await readV2CborRequest(
-          request,
-          dependencies.limits.maxDescriptorBytes,
-        ),
-        [1, 2],
-        [1, 2],
+      const { completion, signature } = await readCompletion(
+        request,
+        invitation,
+        role,
+        now,
       );
-      const completion = requireCborMap(
-        wrapper.get(1)!,
-        [1, 2, 3, 4, 5, 6],
-        [1, 2, 3, 4, 5, 6],
-      );
-      const signature = requireBytes(wrapper, 2, 64, 'Completion signature');
-      const completedAt = requireUint(completion, 6, 'Completion timestamp');
-      if (
-        requireUint(completion, 1, 'Completion version') !== 2 ||
-        bytesToHex(requireBytes(completion, 2, 32, 'Invitation ID')) !==
-          invitation.invitationId ||
-        bytesToHex(requireBytes(completion, 3, 16, 'Relationship ID')) !==
-          invitation.relationshipId ||
-        bytesToHex(requireBytes(completion, 4, 32, 'Full transcript hash')) !==
-          invitation.fullTranscriptHash ||
-        requireUint(completion, 5, 'Completion role') !== role ||
-        completedAt < invitation.createdAt - PAIRING_CLOCK_SKEW ||
-        completedAt > invitation.expiresAt + PAIRING_CLOCK_SKEW ||
-        Math.abs(completedAt - now) > PAIRING_CLOCK_SKEW
-      ) {
-        throw new PairingError(1, 'Pairing completion is invalid.');
-      }
-      const publicKey =
-        role === 0
-          ? decodeBase64Url(invitation.inviterSigningPublicKey!, 32)
-          : decodeBase64Url(invitation.inviteeSigningPublicKey!, 32);
-      if (
-        !(await verifyPairingSignature(
-          publicKey,
-          'pairing-complete',
-          completion,
-          signature,
-        ))
-      ) {
-        throw new PairingError(3, 'Pairing completion signature is invalid.');
-      }
       const encodedMap = encodeBase64Url(encodeCbor(completion));
       const encodedSignature = encodeBase64Url(signature);
       const digest = bytesToHex(sha256(encodeCbor(completion)));
-      const mutated = await updateInvitation(locator, (record) => {
+      const recordCompletion = (record: V2PairingInvitationRecord): void => {
         if (record.expiresAt <= now || record.phase === 4) {
           throw new PairingError(7, 'Pairing code is invalid or expired.');
         }
@@ -1332,7 +1260,9 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
           signature: encodedSignature,
           digest,
         };
-      });
+      };
+
+      const mutated = await updateInvitation(locator, recordCompletion);
 
       const pending = mutated.invitation;
       if (
@@ -1340,120 +1270,215 @@ export function createV2PairingHandlers(dependencies: V2PairingDependencies) {
         pending.inviterCompletion &&
         pending.inviteeCompletion
       ) {
-        const activation = await prepareActivation(dependencies, pending);
-        let activated = false;
-        if (dependencies.pairingRepository) {
-          // Activation is conditional on the revision this request committed,
-          // so a concurrent activation loses the compare-and-swap instead of
-          // publishing a second relationship.
-          const record = mutated.record!;
-          if (pending.expiresAt <= seconds(dependencies.now())) {
-            return v2EmptyResponse(202);
-          }
-          const relationship = {
-            relationshipId: pending.relationshipId!,
-            canonicalOrigin: pending.canonicalOrigin!,
-            inviterSigningPublicKey: pending.inviterSigningPublicKey!,
-            inviterAgeRecipient: pending.inviterAgeRecipient!,
-            inviteeSigningPublicKey: pending.inviteeSigningPublicKey!,
-            inviteeAgeRecipient: pending.inviteeAgeRecipient!,
-            createdAt: seconds(dependencies.now()),
-          };
-          const published: V2PairingInvitationRecord = {
-            ...pending,
-            inviterGrant: activation.inviterGrant,
-            inviteeGrant: activation.inviteeGrant,
-            phase: 3,
-          };
-          activated = await dependencies.pairingRepository.activate({
-            record,
-            invitationValue: await encryptInvitationRecord(
-              dependencies.deploymentKey,
-              locator,
-              published,
-              dependencies.randomBytes,
-            ),
-            relationship: {
-              id: relationship.relationshipId,
-              canonicalOrigin: relationship.canonicalOrigin,
-              encryptedState: await encryptV2RelationshipState(
-                dependencies.deploymentKey,
-                relationship,
-                dependencies.randomBytes,
-              ),
-              createdAt: relationship.createdAt,
-            },
-            registrations: await activationCapabilityRegistrations(
-              dependencies,
-              activation.capabilities,
-            ),
-          });
-        } else {
-          await dependencies.store.transaction((current) => {
-            const record = current.invitations[locator];
-            if (
-              !record ||
-              record.phase === 3 ||
-              !record.inviterCompletion ||
-              !record.inviteeCompletion ||
-              record.expiresAt <= seconds(dependencies.now())
-            ) {
-              return;
-            }
-            const ids = new Set<string>();
-            for (const capability of activation.capabilities) {
-              if (
-                ids.has(capability.id) ||
-                current.capabilities[capability.id]
-              ) {
-                throw new Error('V2 random capability identifier collision.');
-              }
-              ids.add(capability.id);
-            }
-            for (const capability of activation.capabilities) {
-              current.capabilities[capability.id] = capability;
-            }
-            current.relationships[record.relationshipId!] = {
-              relationshipId: record.relationshipId!,
-              canonicalOrigin: record.canonicalOrigin!,
-              inviterSigningPublicKey: record.inviterSigningPublicKey!,
-              inviterAgeRecipient: record.inviterAgeRecipient!,
-              inviteeSigningPublicKey: record.inviteeSigningPublicKey!,
-              inviteeAgeRecipient: record.inviteeAgeRecipient!,
-              createdAt: seconds(dependencies.now()),
-            };
-            record.inviterGrant = activation.inviterGrant;
-            record.inviteeGrant = activation.inviteeGrant;
-            record.phase = 3;
-            activated = true;
-          });
-        }
-        if (activated && !dependencies.pairingRepository) {
-          await registerActivationCapabilities(
-            dependencies,
-            activation.capabilities,
-          );
-          const relationship = (await dependencies.store.readState())
-            .relationships[pending.relationshipId!];
-          const repository = relationshipRepository(dependencies.repository);
-          if (relationship && repository) {
-            await repository.createRelationship({
-              id: relationship.relationshipId,
-              canonicalOrigin: relationship.canonicalOrigin,
-              encryptedState: await encryptV2RelationshipState(
-                dependencies.deploymentKey,
-                relationship,
-                dependencies.randomBytes,
-              ),
-              createdAt: relationship.createdAt,
-            });
-          }
-        }
+        await activate(locator, pending, mutated.record);
       }
       return v2EmptyResponse(202);
     } catch (error) {
       return pairingErrorResponse(error, 'Pairing completion failed.');
     }
+  }
+
+  /**
+   * Reads a signed completion and checks that it names this invitation, its
+   * relationship and confirmed transcript, the bearer's role, and a timestamp
+   * inside both the invitation window and the clock-skew allowance.
+   */
+  async function readCompletion(
+    request: Request,
+    invitation: V2PairingInvitationRecord,
+    role: PairingRole,
+    now: number,
+  ): Promise<{ completion: Map<number, CborValue>; signature: Uint8Array }> {
+    const wrapper = requireCborMap(
+      await readV2CborRequest(request, dependencies.limits.maxDescriptorBytes),
+      [1, 2],
+      [1, 2],
+    );
+    const completion = requireCborMap(
+      wrapper.get(1)!,
+      [1, 2, 3, 4, 5, 6],
+      [1, 2, 3, 4, 5, 6],
+    );
+    const signature = requireBytes(wrapper, 2, 64, 'Completion signature');
+    const completedAt = requireUint(completion, 6, 'Completion timestamp');
+    if (
+      requireUint(completion, 1, 'Completion version') !== 2 ||
+      bytesToHex(requireBytes(completion, 2, 32, 'Invitation ID')) !==
+        invitation.invitationId ||
+      bytesToHex(requireBytes(completion, 3, 16, 'Relationship ID')) !==
+        invitation.relationshipId ||
+      bytesToHex(requireBytes(completion, 4, 32, 'Full transcript hash')) !==
+        invitation.fullTranscriptHash ||
+      requireUint(completion, 5, 'Completion role') !== role ||
+      completedAt < invitation.createdAt - PAIRING_CLOCK_SKEW ||
+      completedAt > invitation.expiresAt + PAIRING_CLOCK_SKEW ||
+      Math.abs(completedAt - now) > PAIRING_CLOCK_SKEW
+    ) {
+      throw new PairingError(1, 'Pairing completion is invalid.');
+    }
+    const publicKey = decodeBase64Url(
+      role === 0
+        ? invitation.inviterSigningPublicKey!
+        : invitation.inviteeSigningPublicKey!,
+      32,
+    );
+    if (
+      !(await verifyPairingSignature(
+        publicKey,
+        'pairing-complete',
+        completion,
+        signature,
+      ))
+    ) {
+      throw new PairingError(3, 'Pairing completion signature is invalid.');
+    }
+    return { completion, signature };
+  }
+
+  /** Publishes the relationship once both peers have completed pairing. */
+  async function activate(
+    locator: string,
+    pending: V2PairingInvitationRecord,
+    record: D1PairingRecord | undefined,
+  ): Promise<void> {
+    const activation = await prepareActivation(dependencies, pending);
+    if (dependencies.pairingRepository) {
+      await activateThroughRepository(
+        dependencies.pairingRepository,
+        locator,
+        pending,
+        record!,
+        activation,
+      );
+      return;
+    }
+    if (await activateInWholeState(locator, activation)) {
+      await registerActivationCapabilities(
+        dependencies,
+        activation.capabilities,
+      );
+      const relationship = (await dependencies.store.readState()).relationships[
+        pending.relationshipId!
+      ];
+      const repository = relationshipRepository(dependencies.repository);
+      if (relationship && repository) {
+        await repository.createRelationship({
+          id: relationship.relationshipId,
+          canonicalOrigin: relationship.canonicalOrigin,
+          encryptedState: await encryptV2RelationshipState(
+            dependencies.deploymentKey,
+            relationship,
+            dependencies.randomBytes,
+          ),
+          createdAt: relationship.createdAt,
+        });
+      }
+    }
+  }
+
+  /**
+   * Activation is conditional on the revision this request committed, so a
+   * concurrent activation loses the compare-and-swap instead of publishing a
+   * second relationship.
+   */
+  async function activateThroughRepository(
+    pairingRepository: V2PairingRepository,
+    locator: string,
+    pending: V2PairingInvitationRecord,
+    record: D1PairingRecord,
+    activation: Awaited<ReturnType<typeof prepareActivation>>,
+  ): Promise<void> {
+    if (pending.expiresAt <= seconds(dependencies.now())) {
+      return;
+    }
+    const relationship = {
+      relationshipId: pending.relationshipId!,
+      canonicalOrigin: pending.canonicalOrigin!,
+      inviterSigningPublicKey: pending.inviterSigningPublicKey!,
+      inviterAgeRecipient: pending.inviterAgeRecipient!,
+      inviteeSigningPublicKey: pending.inviteeSigningPublicKey!,
+      inviteeAgeRecipient: pending.inviteeAgeRecipient!,
+      createdAt: seconds(dependencies.now()),
+    };
+    const published: V2PairingInvitationRecord = {
+      ...pending,
+      inviterGrant: activation.inviterGrant,
+      inviteeGrant: activation.inviteeGrant,
+      phase: 3,
+    };
+    await pairingRepository.activate({
+      record,
+      invitationValue: await encryptInvitationRecord(
+        dependencies.deploymentKey,
+        locator,
+        published,
+        dependencies.randomBytes,
+      ),
+      relationship: {
+        id: relationship.relationshipId,
+        canonicalOrigin: relationship.canonicalOrigin,
+        encryptedState: await encryptV2RelationshipState(
+          dependencies.deploymentKey,
+          relationship,
+          dependencies.randomBytes,
+        ),
+        createdAt: relationship.createdAt,
+      },
+      registrations: await activationCapabilityRegistrations(
+        dependencies,
+        activation.capabilities,
+      ),
+    });
+  }
+
+  /**
+   * Stores the relationship and its capabilities in whole state, unless another
+   * request already activated the invitation or it expired meanwhile. Reports
+   * whether this request activated it.
+   */
+  async function activateInWholeState(
+    locator: string,
+    activation: Awaited<ReturnType<typeof prepareActivation>>,
+  ): Promise<boolean> {
+    let activated = false;
+    const publishRelationship = (current: V2StoredState): void => {
+      const record = current.invitations[locator];
+      if (
+        !record ||
+        record.phase === 3 ||
+        !record.inviterCompletion ||
+        !record.inviteeCompletion ||
+        record.expiresAt <= seconds(dependencies.now())
+      ) {
+        return;
+      }
+      const ids = new Set<string>();
+      for (const capability of activation.capabilities) {
+        if (ids.has(capability.id) || current.capabilities[capability.id]) {
+          throw new Error('V2 random capability identifier collision.');
+        }
+        ids.add(capability.id);
+      }
+      for (const capability of activation.capabilities) {
+        current.capabilities[capability.id] = capability;
+      }
+      current.relationships[record.relationshipId!] = {
+        relationshipId: record.relationshipId!,
+        canonicalOrigin: record.canonicalOrigin!,
+        inviterSigningPublicKey: record.inviterSigningPublicKey!,
+        inviterAgeRecipient: record.inviterAgeRecipient!,
+        inviteeSigningPublicKey: record.inviteeSigningPublicKey!,
+        inviteeAgeRecipient: record.inviteeAgeRecipient!,
+        createdAt: seconds(dependencies.now()),
+      };
+      record.inviterGrant = activation.inviterGrant;
+      record.inviteeGrant = activation.inviteeGrant;
+      record.phase = 3;
+      activated = true;
+    };
+
+    await dependencies.store.transaction(publishRelationship);
+    return activated;
   }
 
   async function status(request: Request, locator: string): Promise<Response> {

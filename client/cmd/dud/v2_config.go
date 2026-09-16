@@ -277,19 +277,42 @@ func loadV2MasterSeed(paths v2Paths) ([]byte, error) {
 	return seed, nil
 }
 
-func validateV2Config(cfg *v2LocalConfig) error {
-	if cfg.Version != v2ConfigSchemaVersion {
-		return fmt.Errorf("unsupported V2 config schema version %d; %s", cfg.Version, v2LocalStateResetInstruction)
-	}
-	if err := validateV2DeviceName(cfg.Device); err != nil {
+// validateV2PeerProfile checks one peer's entry in the local configuration.
+// A peer may pin its own deployment, so its origin and DoH URL are held to the
+// same canonical form as the defaults: an origin that only differs in spelling
+// would resolve to a different pin than the one pairing established.
+func validateV2PeerProfile(alias string, peer v2PeerProfile) error {
+	if err := validateV2PeerAlias(alias); err != nil {
 		return err
 	}
-	if len(cfg.Identity.DeviceID) != 32 {
-		return errors.New("config local device ID must be 128-bit lowercase hex")
+	if peer.Status != "unpaired" && peer.Status != "pending" && peer.Status != "active" && peer.Status != "revoked" {
+		return fmt.Errorf("peer %q has invalid status %q", alias, peer.Status)
 	}
-	if _, err := hex.DecodeString(cfg.Identity.DeviceID); err != nil || cfg.Identity.DeviceID != strings.ToLower(cfg.Identity.DeviceID) {
-		return errors.New("config local device ID must be 128-bit lowercase hex")
+	if peer.KeyEpoch != 0 {
+		return fmt.Errorf("peer %q uses unsupported key epoch %d", alias, peer.KeyEpoch)
 	}
+	if peer.BaseURL != "" {
+		peerOrigin, err := canonicalV2Origin(peer.BaseURL)
+		if err != nil || peerOrigin != peer.BaseURL {
+			return fmt.Errorf("peer %q has a non-canonical origin", alias)
+		}
+	}
+	if peer.DOHURL != "" {
+		peerDOH, err := canonicalV2DOHURL(peer.DOHURL)
+		if err != nil || peerDOH != peer.DOHURL {
+			return fmt.Errorf("peer %q has a non-canonical DoH URL", alias)
+		}
+	}
+	if peer.ECHMode != "" && peer.ECHMode != "hard" && peer.ECHMode != "off" {
+		return fmt.Errorf("peer %q has invalid ECH mode %q", alias, peer.ECHMode)
+	}
+	return nil
+}
+
+// validateV2NetworkConfig checks the deployment a peer operation reaches by
+// default. Each URL must already be in its canonical form rather than merely
+// parse to one, because transport pinning compares against the stored text.
+func validateV2NetworkConfig(cfg *v2LocalConfig) error {
 	origin, err := canonicalV2Origin(cfg.BaseURL)
 	if err != nil || origin != cfg.BaseURL {
 		return errors.New("config base URL is not a canonical HTTPS origin")
@@ -307,30 +330,32 @@ func validateV2Config(cfg *v2LocalConfig) error {
 			return fmt.Errorf("invalid DoH bootstrap address %q", raw)
 		}
 	}
+	return nil
+}
+
+// validateV2Config checks the local configuration, and is the only way it
+// enters or leaves disk. A configuration that fails any check is rejected
+// whole: the client cannot distinguish a hand-edited file from a corrupted one,
+// and either could otherwise send traffic somewhere the operator never chose.
+func validateV2Config(cfg *v2LocalConfig) error {
+	if cfg.Version != v2ConfigSchemaVersion {
+		return fmt.Errorf("unsupported V2 config schema version %d; %s", cfg.Version, v2LocalStateResetInstruction)
+	}
+	if err := validateV2DeviceName(cfg.Device); err != nil {
+		return err
+	}
+	if len(cfg.Identity.DeviceID) != 32 {
+		return errors.New("config local device ID must be 128-bit lowercase hex")
+	}
+	if _, err := hex.DecodeString(cfg.Identity.DeviceID); err != nil || cfg.Identity.DeviceID != strings.ToLower(cfg.Identity.DeviceID) {
+		return errors.New("config local device ID must be 128-bit lowercase hex")
+	}
+	if err := validateV2NetworkConfig(cfg); err != nil {
+		return err
+	}
 	for alias, peer := range cfg.Peers {
-		if err := validateV2PeerAlias(alias); err != nil {
+		if err := validateV2PeerProfile(alias, peer); err != nil {
 			return err
-		}
-		if peer.Status != "unpaired" && peer.Status != "pending" && peer.Status != "active" && peer.Status != "revoked" {
-			return fmt.Errorf("peer %q has invalid status %q", alias, peer.Status)
-		}
-		if peer.KeyEpoch != 0 {
-			return fmt.Errorf("peer %q uses unsupported key epoch %d", alias, peer.KeyEpoch)
-		}
-		if peer.BaseURL != "" {
-			peerOrigin, err := canonicalV2Origin(peer.BaseURL)
-			if err != nil || peerOrigin != peer.BaseURL {
-				return fmt.Errorf("peer %q has a non-canonical origin", alias)
-			}
-		}
-		if peer.DOHURL != "" {
-			peerDOH, err := canonicalV2DOHURL(peer.DOHURL)
-			if err != nil || peerDOH != peer.DOHURL {
-				return fmt.Errorf("peer %q has a non-canonical DoH URL", alias)
-			}
-		}
-		if peer.ECHMode != "" && peer.ECHMode != "hard" && peer.ECHMode != "off" {
-			return fmt.Errorf("peer %q has invalid ECH mode %q", alias, peer.ECHMode)
 		}
 	}
 	return nil
@@ -389,7 +414,7 @@ func atomicWriteV2File(path string, body []byte, mode os.FileMode) error {
 		return err
 	}
 	temp := file.Name()
-	defer os.Remove(temp)
+	defer func() { _ = os.Remove(temp) }()
 	if err := setPrivatePathPermissions(temp, false); err != nil {
 		_ = file.Close()
 		return err

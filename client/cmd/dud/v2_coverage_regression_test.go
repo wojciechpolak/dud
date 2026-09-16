@@ -638,7 +638,7 @@ func TestV2PeerRemoveCancelsAnActivePendingInvitation(t *testing.T) {
 	}
 }
 
-func TestV2ReportAndProtocolUtilityVariants(t *testing.T) {
+func TestV2UnsignedIntegerConversions(t *testing.T) {
 	for input, expected := range map[any]uint64{uint64(1): 1, uint32(2): 2, uint(3): 3, int(4): 4} {
 		value, ok := asV2Uint(input)
 		if !ok || value != expected {
@@ -648,6 +648,9 @@ func TestV2ReportAndProtocolUtilityVariants(t *testing.T) {
 	if _, ok := asV2Uint(-1); ok || v2UintEquals("bad", 1) {
 		t.Fatal("invalid V2 integer accepted")
 	}
+}
+
+func TestV2ConnectionInfoAndBootstrapAddresses(t *testing.T) {
 	if info := v2ConnectionInfoFrom(nil, nil); info != nil {
 		t.Fatal("nil connection state returned info")
 	}
@@ -661,6 +664,9 @@ func TestV2ReportAndProtocolUtilityVariants(t *testing.T) {
 	if addresses := v2BootstrapAddresses(&v2LocalConfig{DOHBootstrap: []string{"1.1.1.1", "not-an-address"}}); len(addresses) != 2 || !addresses[0].IsValid() || addresses[1].IsValid() {
 		t.Fatalf("bootstrap addresses = %v", addresses)
 	}
+}
+
+func TestV2ReceiveJSONVariants(t *testing.T) {
 	status := v2DeliveryStatus{PendingCompletions: 1}
 	result := v2ReceiveJSON("laptop", nil, &v2ReceiveStop{Reason: "git", Detail: "checkpoint", Sequence: 2, Next: "next"}, status)
 	if result["received"] != false || result["acknowledgement"] != false || result["stopped"] == nil {
@@ -670,27 +676,14 @@ func TestV2ReportAndProtocolUtilityVariants(t *testing.T) {
 	if result["sequence"] != uint64(1) || result["descriptor_digest"] != "digest" {
 		t.Fatalf("single receive JSON = %#v", result)
 	}
+}
+
+func TestV2ReceiveTextReportVariants(t *testing.T) {
 	var output bytes.Buffer
 	report := &textReport{}
 	report.section("Test").notef("value %d", 1)
 	if err := report.write(&output); err != nil || !strings.Contains(output.String(), "value 1") {
 		t.Fatalf("report = %q, %v", output.String(), err)
-	}
-	for source, want := range map[string]string{v2NetworkSourceCLI: "--url", v2NetworkSourceEnvironment: "DUD_BASE_URL", v2NetworkSourcePeer: "the peer profile", v2NetworkSourceConfig: "the local configuration", "default": "the compiled default"} {
-		if got := v2NetworkLayerName(source, "--url"); got != want {
-			t.Fatalf("network layer %q = %q", source, got)
-		}
-	}
-	if v2NetworkLayerName(v2NetworkSourceEnvironment, "--doh-url") != "DUD_DOH_URL" || v2NetworkLayerName(v2NetworkSourceEnvironment, "--ech-mode") != "DUD_ECH_MODE" {
-		t.Fatal("environment network layer names are incorrect")
-	}
-	for advertised, want := range map[string]string{"refs/heads/main": "refs/remotes/laptop/main", "refs/tags/v1": "refs/dud/tags/laptop/v1"} {
-		if got, err := v2GitRemoteRef("laptop", advertised); err != nil || got != want {
-			t.Fatalf("remote ref = %q, %v", got, err)
-		}
-	}
-	if _, err := v2GitRemoteRef("laptop", "refs/notes/x"); err == nil {
-		t.Fatal("unsupported ref accepted")
 	}
 	for _, test := range []struct {
 		opts    v2PeerReceiveOptions
@@ -708,6 +701,31 @@ func TestV2ReportAndProtocolUtilityVariants(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestV2NetworkLayerNames(t *testing.T) {
+	for source, want := range map[string]string{v2NetworkSourceCLI: "--url", v2NetworkSourceEnvironment: "DUD_BASE_URL", v2NetworkSourcePeer: "the peer profile", v2NetworkSourceConfig: "the local configuration", "default": "the compiled default"} {
+		if got := v2NetworkLayerName(source, "--url"); got != want {
+			t.Fatalf("network layer %q = %q", source, got)
+		}
+	}
+	if v2NetworkLayerName(v2NetworkSourceEnvironment, "--doh-url") != "DUD_DOH_URL" || v2NetworkLayerName(v2NetworkSourceEnvironment, "--ech-mode") != "DUD_ECH_MODE" {
+		t.Fatal("environment network layer names are incorrect")
+	}
+}
+
+func TestV2GitRemoteRefMapping(t *testing.T) {
+	for advertised, want := range map[string]string{"refs/heads/main": "refs/remotes/laptop/main", "refs/tags/v1": "refs/dud/tags/laptop/v1"} {
+		if got, err := v2GitRemoteRef("laptop", advertised); err != nil || got != want {
+			t.Fatalf("remote ref = %q, %v", got, err)
+		}
+	}
+	if _, err := v2GitRemoteRef("laptop", "refs/notes/x"); err == nil {
+		t.Fatal("unsupported ref accepted")
+	}
+}
+
+func TestV2TransportClientConstruction(t *testing.T) {
 	config, err := newV2TLSConfig("", "dud.example.com", nil)
 	if err != nil || config.MinVersion != tls.VersionTLS13 || config.MaxVersion != tls.VersionTLS13 {
 		t.Fatalf("TLS config = %#v, %v", config, err)

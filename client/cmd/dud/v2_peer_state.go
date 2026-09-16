@@ -401,7 +401,10 @@ func newV2PeerDeliveryState(pending *v2PendingPairing, capabilities map[string]s
 	}
 }
 
-func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID string) error {
+// validateV2PeerDeliveryIdentity checks the fields that name the relationship
+// this state belongs to and the key material it carries. Every later section
+// trusts that a state which reached it is addressed to this relationship.
+func validateV2PeerDeliveryIdentity(state *v2PeerDeliveryState, relationshipID string) error {
 	if state.Version != v2DeliveryStateVersion || state.RelationshipID != relationshipID || (state.Role != 0 && state.Role != 1) {
 		return fmt.Errorf("peer delivery state identity is invalid; %s", v2LocalStateResetInstruction)
 	}
@@ -427,6 +430,14 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 			return fmt.Errorf("peer delivery capability %q is invalid", name)
 		}
 	}
+	return nil
+}
+
+// normalizeV2PeerDeliveryQueues gives every queue an empty value in place of a
+// missing one, so the rest of the client appends to a queue rather than
+// distinguishing an absent queue from an empty one. JSON written by a state
+// version that predates a queue omits it.
+func normalizeV2PeerDeliveryQueues(state *v2PeerDeliveryState) {
 	if state.PendingControlPublications == nil {
 		state.PendingControlPublications = []v2PendingControlPublication{}
 	}
@@ -439,6 +450,15 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 	if state.PendingCompletions == nil {
 		state.PendingCompletions = []v2PendingCompletion{}
 	}
+	if state.InboundTransfers == nil {
+		state.InboundTransfers = map[string]v2InboundTransfer{}
+	}
+}
+
+// validateV2PendingCompletions checks the acknowledgements this peer owes for
+// deliveries it has already applied. Each one names the delivery, both slots,
+// and the descriptor it acknowledges, and carries the signed bytes to publish.
+func validateV2PendingCompletions(state *v2PeerDeliveryState) error {
 	for _, completion := range state.PendingCompletions {
 		values := []struct {
 			encoded string
@@ -462,6 +482,14 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 			return errors.New("pending completion is invalid")
 		}
 	}
+	return nil
+}
+
+// validateV2PendingGranularDeliveries checks the single-request deliveries this
+// peer has prepared but not yet published. The descriptor, payload, and policy
+// are bounded here so a resumed send cannot exceed a protocol limit that the
+// send path checked when it built the record.
+func validateV2PendingGranularDeliveries(state *v2PeerDeliveryState) error {
 	for _, delivery := range state.PendingGranularDeliveries {
 		operationID, operationErr := hex.DecodeString(delivery.OperationID)
 		slot, slotErr := hex.DecodeString(delivery.DataSlot)
@@ -473,51 +501,109 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 			return errors.New("pending granular delivery is invalid")
 		}
 	}
-	for _, delivery := range state.PendingChunkDeliveries {
-		createID, createErr := hex.DecodeString(delivery.CreateOperationID)
-		commitID, commitErr := hex.DecodeString(delivery.CommitOperationID)
-		slot, slotErr := hex.DecodeString(delivery.DataSlot)
-		descriptor, descriptorErr := decodeV2Base64URL(delivery.EncryptedDescriptor, -1)
-		policy, policyErr := decodeV2Base64URL(delivery.RequestedPolicy, -1)
-		digest, digestErr := hex.DecodeString(delivery.DescriptorDigest)
-		previousDigest, previousDigestErr := hex.DecodeString(delivery.PreviousDigest)
-		plaintextHash, plaintextHashErr := hex.DecodeString(delivery.PlaintextHash)
-		if createErr != nil || len(createID) != 16 || commitErr != nil || len(commitID) != 16 || slotErr != nil || len(slot) != 16 || descriptorErr != nil || len(descriptor) == 0 || len(descriptor) > v2MaxDescriptorBytes || policyErr != nil || len(policy) == 0 || digestErr != nil || len(digest) != 32 || previousDigestErr != nil || len(previousDigest) != 32 || plaintextHashErr != nil || len(plaintextHash) != 32 || delivery.SlotEpoch == 0 || delivery.Sequence == 0 || delivery.ChunkSize == 0 || delivery.ChunkSize > v2MaximumChunkedBytes || delivery.PlaintextLength == 0 || len(delivery.Parts) < 2 || len(delivery.Parts) > v2MaximumChunkCount || (delivery.CommitState != v2ChunkCommitUnattempted && delivery.CommitState != v2ChunkCommitAmbiguous) {
+	return nil
+}
+
+// validateV2PendingChunkDeliveryRecord checks the fields a chunked delivery
+// carries independently of its parts: the operation IDs that make each server
+// call idempotent, the slot it publishes to, the digests that bind the
+// descriptor chain, and the bounds the protocol places on a chunked transfer.
+func validateV2PendingChunkDeliveryRecord(delivery v2PendingChunkDelivery) error {
+	for _, value := range []struct {
+		encoded string
+		length  int
+	}{
+		{delivery.CreateOperationID, 16},
+		{delivery.CommitOperationID, 16},
+		{delivery.DataSlot, 16},
+		{delivery.DescriptorDigest, 32},
+		{delivery.PreviousDigest, 32},
+		{delivery.PlaintextHash, 32},
+	} {
+		decoded, err := hex.DecodeString(value.encoded)
+		if err != nil || len(decoded) != value.length {
 			return errors.New("pending chunk delivery is invalid")
 		}
-		if delivery.UploadID != "" {
-			uploadID, uploadErr := hex.DecodeString(delivery.UploadID)
-			if uploadErr != nil || len(uploadID) != 16 || delivery.LeaseExpiresAt == 0 {
-				return errors.New("pending chunk delivery upload lease is invalid")
-			}
-		}
-		if delivery.RenewOperationID != "" {
-			renewID, renewErr := hex.DecodeString(delivery.RenewOperationID)
-			if renewErr != nil || len(renewID) != 16 || delivery.UploadID == "" {
-				return errors.New("pending chunk delivery renewal is invalid")
-			}
-		}
-		seen := map[string]bool{}
-		var plaintextTotal uint64
-		for _, part := range delivery.Parts {
-			id, idErr := hex.DecodeString(part.ID)
-			ciphertextHash, hashErr := hex.DecodeString(part.CiphertextHash)
-			if idErr != nil || len(id) != 16 || hashErr != nil || len(ciphertextHash) != 32 || seen[part.ID] || part.PlaintextLength == 0 || part.PlaintextLength > delivery.ChunkSize || part.CiphertextLength == 0 || part.CiphertextLength > v2MaximumChunkCiphertextBytes || !filepath.IsAbs(part.Path) {
-				return errors.New("pending chunk delivery part is invalid")
-			}
-			if info, statErr := os.Lstat(part.Path); statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || uint64(info.Size()) != part.CiphertextLength {
-				return errors.New("pending chunk delivery part file is invalid")
-			}
-			seen[part.ID] = true
-			if plaintextTotal > v2MaximumChunkedBytes-part.PlaintextLength {
-				return errors.New("pending chunk delivery plaintext length is invalid")
-			}
-			plaintextTotal += part.PlaintextLength
-		}
-		if plaintextTotal != delivery.PlaintextLength {
-			return errors.New("pending chunk delivery plaintext length is invalid")
+	}
+	descriptor, descriptorErr := decodeV2Base64URL(delivery.EncryptedDescriptor, -1)
+	policy, policyErr := decodeV2Base64URL(delivery.RequestedPolicy, -1)
+	if descriptorErr != nil || len(descriptor) == 0 || len(descriptor) > v2MaxDescriptorBytes || policyErr != nil || len(policy) == 0 {
+		return errors.New("pending chunk delivery is invalid")
+	}
+	if delivery.SlotEpoch == 0 || delivery.Sequence == 0 || delivery.ChunkSize == 0 || delivery.ChunkSize > v2MaximumChunkedBytes || delivery.PlaintextLength == 0 || len(delivery.Parts) < 2 || len(delivery.Parts) > v2MaximumChunkCount || (delivery.CommitState != v2ChunkCommitUnattempted && delivery.CommitState != v2ChunkCommitAmbiguous) {
+		return errors.New("pending chunk delivery is invalid")
+	}
+	return nil
+}
+
+// validateV2PendingChunkDeliveryLease checks the upload the server holds for a
+// chunked delivery. A lease has both an upload ID and an expiry, and a renewal
+// only exists for a lease that was taken out.
+func validateV2PendingChunkDeliveryLease(delivery v2PendingChunkDelivery) error {
+	if delivery.UploadID != "" {
+		uploadID, uploadErr := hex.DecodeString(delivery.UploadID)
+		if uploadErr != nil || len(uploadID) != 16 || delivery.LeaseExpiresAt == 0 {
+			return errors.New("pending chunk delivery upload lease is invalid")
 		}
 	}
+	if delivery.RenewOperationID != "" {
+		renewID, renewErr := hex.DecodeString(delivery.RenewOperationID)
+		if renewErr != nil || len(renewID) != 16 || delivery.UploadID == "" {
+			return errors.New("pending chunk delivery renewal is invalid")
+		}
+	}
+	return nil
+}
+
+// validateV2PendingChunkDeliveryParts checks the ciphertext on disk that a
+// resumed chunked send uploads. Every part is distinct, within the chunk size
+// the delivery committed to, and still present as a private regular file of
+// exactly the recorded length, and the parts together account for the whole
+// plaintext. The running total is compared against the bound before it is
+// added to, so a crafted state cannot wrap it.
+func validateV2PendingChunkDeliveryParts(delivery v2PendingChunkDelivery) error {
+	seen := map[string]bool{}
+	var plaintextTotal uint64
+	for _, part := range delivery.Parts {
+		id, idErr := hex.DecodeString(part.ID)
+		ciphertextHash, hashErr := hex.DecodeString(part.CiphertextHash)
+		if idErr != nil || len(id) != 16 || hashErr != nil || len(ciphertextHash) != 32 || seen[part.ID] || part.PlaintextLength == 0 || part.PlaintextLength > delivery.ChunkSize || part.CiphertextLength == 0 || part.CiphertextLength > v2MaximumChunkCiphertextBytes || !filepath.IsAbs(part.Path) {
+			return errors.New("pending chunk delivery part is invalid")
+		}
+		if info, statErr := os.Lstat(part.Path); statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || uint64(info.Size()) != part.CiphertextLength {
+			return errors.New("pending chunk delivery part file is invalid")
+		}
+		seen[part.ID] = true
+		if plaintextTotal > v2MaximumChunkedBytes-part.PlaintextLength {
+			return errors.New("pending chunk delivery plaintext length is invalid")
+		}
+		plaintextTotal += part.PlaintextLength
+	}
+	if plaintextTotal != delivery.PlaintextLength {
+		return errors.New("pending chunk delivery plaintext length is invalid")
+	}
+	return nil
+}
+
+func validateV2PendingChunkDeliveries(state *v2PeerDeliveryState) error {
+	for _, delivery := range state.PendingChunkDeliveries {
+		if err := validateV2PendingChunkDeliveryRecord(delivery); err != nil {
+			return err
+		}
+		if err := validateV2PendingChunkDeliveryLease(delivery); err != nil {
+			return err
+		}
+		if err := validateV2PendingChunkDeliveryParts(delivery); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateV2PendingControlPublications checks the control events this peer has
+// prepared but not yet published, each addressed to one control slot and epoch
+// and carrying a bounded sealed envelope.
+func validateV2PendingControlPublications(state *v2PeerDeliveryState) error {
 	for _, publication := range state.PendingControlPublications {
 		operationID, operationErr := hex.DecodeString(publication.OperationID)
 		slot, slotErr := hex.DecodeString(publication.ControlSlot)
@@ -528,62 +614,120 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 			return errors.New("pending control publication envelope is invalid")
 		}
 	}
+	return nil
+}
+
+// validateV2ScanState checks the record of what this peer still has to read.
+// Both queues distinguish an empty scan from an absent one, so a missing queue
+// is a truncated state rather than a peer with nothing left to fetch.
+func validateV2ScanState(state *v2PeerDeliveryState) error {
 	if state.PendingDataEpochs == nil || state.PendingControlEventIDs == nil {
 		return errors.New("peer delivery scan state is incomplete")
 	}
-	if evidence := state.HaltEvidence; evidence != nil {
-		digest, digestErr := hex.DecodeString(evidence.DescriptorDigest)
-		if !state.Halted ||
-			(evidence.Field != "hwm_in_data" && evidence.Field != "hwm_in_control") ||
-			evidence.RelationshipID != state.RelationshipID ||
-			digestErr != nil || len(digest) != 32 {
-			return errors.New("peer delivery halt evidence is invalid")
+	for _, id := range state.PendingControlEventIDs {
+		decoded, err := hex.DecodeString(id)
+		if err != nil || len(decoded) != 16 {
+			return errors.New("peer delivery pending control event ID is invalid")
 		}
 	}
-	if len(state.ResetAudit) > 8 {
-		return errors.New("peer relationship reset audit exceeds its bound")
+	return nil
+}
+
+// validateV2HaltEvidence checks the record of the watermark regression that
+// stopped this relationship. Evidence exists only on a halted relationship,
+// names the chain whose watermark moved backwards, and belongs to this
+// relationship, so it can be shown as proof of what the server did.
+func validateV2HaltEvidence(state *v2PeerDeliveryState) error {
+	evidence := state.HaltEvidence
+	if evidence == nil {
+		return nil
 	}
-	validateResetIdentity := func(resetID, oldID, newID string, generation uint64) error {
-		for _, encoded := range []string{resetID, oldID, newID} {
-			decoded, err := hex.DecodeString(encoded)
-			if err != nil || len(decoded) != 16 {
-				return errors.New("peer relationship reset identity is invalid")
-			}
+	digest, digestErr := hex.DecodeString(evidence.DescriptorDigest)
+	if !state.Halted ||
+		(evidence.Field != "hwm_in_data" && evidence.Field != "hwm_in_control") ||
+		evidence.RelationshipID != state.RelationshipID ||
+		digestErr != nil || len(digest) != 32 {
+		return errors.New("peer delivery halt evidence is invalid")
+	}
+	return nil
+}
+
+// validateV2ResetIdentity checks the three relationship IDs a reset names and
+// the generation it moves the relationship to. Generation 0 is the pairing
+// itself, so no reset produces it.
+func validateV2ResetIdentity(resetID, oldID, newID string, generation uint64) error {
+	for _, encoded := range []string{resetID, oldID, newID} {
+		decoded, err := hex.DecodeString(encoded)
+		if err != nil || len(decoded) != 16 {
+			return errors.New("peer relationship reset identity is invalid")
 		}
-		if generation == 0 {
-			return errors.New("peer relationship reset generation is invalid")
+	}
+	if generation == 0 {
+		return errors.New("peer relationship reset generation is invalid")
+	}
+	return nil
+}
+
+// validateV2ResetGeneration ties the reset's phase to the relationship it is
+// stored on. An active reset has already moved the state to its new
+// relationship and generation; every earlier phase is still stored on the old
+// relationship and names the generation it would produce.
+func validateV2ResetGeneration(state *v2PeerDeliveryState, reset *v2RelationshipReset) error {
+	if reset.Phase != "proposed" && reset.Phase != "accepted" && reset.Phase != "activating" && reset.Phase != "active" && reset.Phase != "cancelled" {
+		return errors.New("peer relationship reset phase is invalid")
+	}
+	if reset.Phase == "active" {
+		if reset.NewRelationshipID != state.RelationshipID || reset.Generation != state.Generation {
+			return errors.New("active peer relationship reset generation is inconsistent")
 		}
 		return nil
 	}
+	if reset.OldRelationshipID != state.RelationshipID || reset.Generation != state.Generation+1 {
+		return errors.New("pending peer relationship reset generation is inconsistent")
+	}
+	return nil
+}
+
+// validateV2ResetTranscript checks that the signed record of a reset holds
+// every message its phase has already produced. The transcript is what proves
+// to either device that the other one agreed to abandon the old relationship,
+// so a phase that has outrun its evidence is not a reset that can be shown.
+func validateV2ResetTranscript(reset *v2RelationshipReset) error {
+	if reset.Proposal == "" || reset.ProposalSignature == "" {
+		return errors.New("peer relationship reset transcript is incomplete")
+	}
+	accepted := reset.ServerActivated && reset.Acceptance != "" && reset.AcceptanceSignature != "" && reset.ServerReceipt != ""
+	if reset.Phase == "active" && !accepted {
+		return errors.New("active peer relationship reset is incomplete")
+	}
+	if reset.Phase == "activating" && !accepted {
+		return errors.New("activating peer relationship reset is incomplete")
+	}
+	if reset.Phase == "cancelled" && (reset.Cancellation == "" || reset.CancellationSig == "") {
+		return errors.New("cancelled peer relationship reset is incomplete")
+	}
+	return nil
+}
+
+// validateV2ResetState checks the reset in flight, if any, and the bounded
+// history of resets this relationship has already completed.
+func validateV2ResetState(state *v2PeerDeliveryState) error {
+	if len(state.ResetAudit) > 8 {
+		return errors.New("peer relationship reset audit exceeds its bound")
+	}
 	if reset := state.Reset; reset != nil {
-		if err := validateResetIdentity(reset.ResetID, reset.OldRelationshipID, reset.NewRelationshipID, reset.Generation); err != nil {
+		if err := validateV2ResetIdentity(reset.ResetID, reset.OldRelationshipID, reset.NewRelationshipID, reset.Generation); err != nil {
 			return err
 		}
-		if reset.Phase != "proposed" && reset.Phase != "accepted" && reset.Phase != "activating" && reset.Phase != "active" && reset.Phase != "cancelled" {
-			return errors.New("peer relationship reset phase is invalid")
+		if err := validateV2ResetGeneration(state, reset); err != nil {
+			return err
 		}
-		if reset.Phase == "active" {
-			if reset.NewRelationshipID != state.RelationshipID || reset.Generation != state.Generation {
-				return errors.New("active peer relationship reset generation is inconsistent")
-			}
-		} else if reset.OldRelationshipID != state.RelationshipID || reset.Generation != state.Generation+1 {
-			return errors.New("pending peer relationship reset generation is inconsistent")
-		}
-		if reset.Proposal == "" || reset.ProposalSignature == "" {
-			return errors.New("peer relationship reset transcript is incomplete")
-		}
-		if reset.Phase == "active" && (!reset.ServerActivated || reset.Acceptance == "" || reset.AcceptanceSignature == "" || reset.ServerReceipt == "") {
-			return errors.New("active peer relationship reset is incomplete")
-		}
-		if reset.Phase == "activating" && (!reset.ServerActivated || reset.Acceptance == "" || reset.AcceptanceSignature == "" || reset.ServerReceipt == "") {
-			return errors.New("activating peer relationship reset is incomplete")
-		}
-		if reset.Phase == "cancelled" && (reset.Cancellation == "" || reset.CancellationSig == "") {
-			return errors.New("cancelled peer relationship reset is incomplete")
+		if err := validateV2ResetTranscript(reset); err != nil {
+			return err
 		}
 	}
 	for _, audit := range state.ResetAudit {
-		if err := validateResetIdentity(audit.ResetID, audit.OldRelationshipID, audit.NewRelationshipID, audit.Generation); err != nil {
+		if err := validateV2ResetIdentity(audit.ResetID, audit.OldRelationshipID, audit.NewRelationshipID, audit.Generation); err != nil {
 			return err
 		}
 		for _, encoded := range []string{audit.Proposal, audit.ProposalSignature, audit.Acceptance, audit.AcceptanceSignature, audit.ServerReceipt} {
@@ -596,15 +740,34 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 			return errors.New("peer relationship reset audit activation time is invalid")
 		}
 	}
-	for _, id := range state.PendingControlEventIDs {
-		decoded, err := hex.DecodeString(id)
-		if err != nil || len(decoded) != 16 {
-			return errors.New("peer delivery pending control event ID is invalid")
+	return nil
+}
+
+// validateV2InboundChunks checks the ciphertext parts of a received chunked
+// transfer that reassembly reads. Every part is distinct and still on disk at
+// an absolute path with the recorded length.
+func validateV2InboundChunks(transfer v2InboundTransfer) error {
+	if !validV2ChunkSize(transfer.ChunkSize) || transfer.PlaintextLength == 0 || transfer.PlaintextLength > v2MaximumChunkedBytes || len(transfer.Chunks) < 2 || len(transfer.Chunks) > v2MaximumChunkCount {
+		return errors.New("inbound chunk transfer is invalid")
+	}
+	seen := map[string]bool{}
+	for _, part := range transfer.Chunks {
+		id, idErr := hex.DecodeString(part.ID)
+		partDigest, partDigestErr := hex.DecodeString(part.CiphertextHash)
+		if idErr != nil || len(id) != 16 || partDigestErr != nil || len(partDigest) != 32 || seen[part.ID] || part.CiphertextLength == 0 || part.CiphertextLength > v2MaximumChunkCiphertextBytes || !filepath.IsAbs(part.Path) {
+			return errors.New("inbound chunk transfer part is invalid")
 		}
+		seen[part.ID] = true
 	}
-	if state.InboundTransfers == nil {
-		state.InboundTransfers = map[string]v2InboundTransfer{}
-	}
+	return nil
+}
+
+// validateV2InboundTransfers checks the received payloads this peer holds.
+// Each is keyed by the descriptor digest it also records, so a lookup by
+// digest cannot return a transfer that belongs to another descriptor. A
+// transfer with no chunks arrived in a single delivery and has nothing beyond
+// that identity to check.
+func validateV2InboundTransfers(state *v2PeerDeliveryState) error {
 	for digest, transfer := range state.InboundTransfers {
 		descriptorDigest, digestErr := hex.DecodeString(digest)
 		if digestErr != nil || len(descriptorDigest) != 32 || transfer.DescriptorDigest != digest {
@@ -613,19 +776,18 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 		if len(transfer.Chunks) == 0 {
 			continue
 		}
-		if !validV2ChunkSize(transfer.ChunkSize) || transfer.PlaintextLength == 0 || transfer.PlaintextLength > v2MaximumChunkedBytes || len(transfer.Chunks) < 2 || len(transfer.Chunks) > v2MaximumChunkCount {
-			return errors.New("inbound chunk transfer is invalid")
-		}
-		seen := map[string]bool{}
-		for _, part := range transfer.Chunks {
-			id, idErr := hex.DecodeString(part.ID)
-			partDigest, partDigestErr := hex.DecodeString(part.CiphertextHash)
-			if idErr != nil || len(id) != 16 || partDigestErr != nil || len(partDigest) != 32 || seen[part.ID] || part.CiphertextLength == 0 || part.CiphertextLength > v2MaximumChunkCiphertextBytes || !filepath.IsAbs(part.Path) {
-				return errors.New("inbound chunk transfer part is invalid")
-			}
-			seen[part.ID] = true
+		if err := validateV2InboundChunks(transfer); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// validateV2DeliveryChains checks the four hash chains that order this
+// relationship's traffic. All four exist for every relationship, in both
+// directions and on both the data and control planes, because a missing chain
+// would let a delivery be accepted outside any order.
+func validateV2DeliveryChains(state *v2PeerDeliveryState) error {
 	for _, name := range []string{"out:data", "out:control", "in:data", "in:control"} {
 		chain := state.Chains[name]
 		if chain == nil {
@@ -642,6 +804,36 @@ func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID stri
 			if err != nil || len(decoded) != 32 {
 				return fmt.Errorf("peer delivery %s %s digest is invalid", name, label)
 			}
+		}
+	}
+	return nil
+}
+
+// validateV2PeerDeliveryState checks a peer delivery state against everything
+// the protocol fixes about it, and is the only way this state enters or leaves
+// disk. Each section below owns one part of the state; a state that fails any
+// of them is rejected whole rather than repaired, because the client cannot
+// tell a truncated file from a tampered one. The missing-queue defaults are
+// the exception: they carry a state written by an earlier version forward
+// without changing what it says.
+func validateV2PeerDeliveryState(state *v2PeerDeliveryState, relationshipID string) error {
+	if err := validateV2PeerDeliveryIdentity(state, relationshipID); err != nil {
+		return err
+	}
+	normalizeV2PeerDeliveryQueues(state)
+	for _, validate := range []func(*v2PeerDeliveryState) error{
+		validateV2PendingCompletions,
+		validateV2PendingGranularDeliveries,
+		validateV2PendingChunkDeliveries,
+		validateV2PendingControlPublications,
+		validateV2ScanState,
+		validateV2HaltEvidence,
+		validateV2ResetState,
+		validateV2InboundTransfers,
+		validateV2DeliveryChains,
+	} {
+		if err := validate(state); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -155,38 +155,7 @@ export class FilesystemV2Store implements V2Store {
   }
 
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {
-    const deadline = Date.now() + LOCK_WAIT_MS;
-    let handle: any;
-    while (!handle) {
-      try {
-        handle = await open(this.lockPath, 'wx', 0o600);
-        await handle.writeFile(String(Date.now()), 'utf8');
-        await handle.sync();
-      } catch (error) {
-        if (errorCode(error) !== 'EEXIST') {
-          throw error;
-        }
-        try {
-          const lockStat = await stat(this.lockPath);
-          if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
-            await rm(this.lockPath, { force: true });
-            continue;
-          }
-        } catch (statError) {
-          if (errorCode(statError) === 'ENOENT') {
-            continue;
-          }
-          throw statError;
-        }
-        if (Date.now() >= deadline) {
-          throw new Error(
-            'Timed out waiting for the v2 filesystem state lock.',
-          );
-        }
-        await sleep(10);
-      }
-    }
-
+    const handle = await this.acquireLock();
     const heartbeat = setInterval(
       () => {
         void handle.utimes(new Date(), new Date()).catch(() => undefined);
@@ -199,6 +168,54 @@ export class FilesystemV2Store implements V2Store {
       clearInterval(heartbeat);
       await handle.close().catch(() => undefined);
       await rm(this.lockPath, { force: true });
+    }
+  }
+
+  /**
+   * Creates the lock file exclusively, waiting while another holder keeps it
+   * fresh. A lock whose heartbeat stopped for `LOCK_STALE_MS` belongs to a dead
+   * holder and is removed.
+   */
+  private async acquireLock(): Promise<any> {
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        const handle = await open(this.lockPath, 'wx', 0o600);
+        await handle.writeFile(String(Date.now()), 'utf8');
+        await handle.sync();
+        return handle;
+      } catch (error) {
+        if (errorCode(error) !== 'EEXIST') {
+          throw error;
+        }
+      }
+      if (await this.removeStaleLock()) {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error('Timed out waiting for the v2 filesystem state lock.');
+      }
+      await sleep(10);
+    }
+  }
+
+  /**
+   * Reports whether the lock is gone, either because its holder released it
+   * or because it was stale and has been removed here.
+   */
+  private async removeStaleLock(): Promise<boolean> {
+    try {
+      const lockStat = await stat(this.lockPath);
+      if (Date.now() - lockStat.mtimeMs <= LOCK_STALE_MS) {
+        return false;
+      }
+      await rm(this.lockPath, { force: true });
+      return true;
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') {
+        return true;
+      }
+      throw error;
     }
   }
 

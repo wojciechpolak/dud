@@ -6,18 +6,12 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 const root = process.cwd();
 const coverageRoot = path.join(root, 'coverage');
-const requestedTarget = process.argv[2];
-const targets = requestedTarget ? [requestedTarget] : ['server', 'client'];
 
-if (targets.some((target) => target !== 'server' && target !== 'client')) {
-  console.error('usage: npm run test:coverage [-- server|client]');
-  process.exit(2);
-}
-
-function summarizeGoTestFailure(stdoutText, stderrText, reportPath) {
+export function summarizeGoTestFailure(stdoutText, stderrText, reportPath) {
   const failedTests = new Set();
   const diagnosticOutput = [];
 
@@ -57,8 +51,28 @@ function summarizeGoTestFailure(stdoutText, stderrText, reportPath) {
   return summary.join('\n');
 }
 
-function run(command, args, options = {}) {
-  const { cwd = root, env, stdoutFile, failureSummary } = options;
+/**
+ * Names the command and how it ended, followed by the caller's summary of the
+ * failure, or by the output tail when there is no summary.
+ */
+function failedRunError(command, args, result, options) {
+  const { code, signal, stdoutText, stderrText } = result;
+  const { stdoutFile, failureSummary } = options;
+  const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+  const output = `${stdoutText}${stderrText}`.trim();
+  let detail = output;
+  if (failureSummary) {
+    detail = failureSummary(stdoutText, stderrText, stdoutFile);
+  } else if (output.length > 12_000) {
+    detail = `[diagnostics truncated; full stdout is in ${stdoutFile ?? 'the coverage test report'}]\n${output.slice(-12_000)}`;
+  }
+  return new Error(
+    `${command} ${args.join(' ')} failed with ${reason}${detail ? `\n${detail}` : ''}`,
+  );
+}
+
+export function run(command, args, options = {}) {
+  const { cwd = root, env, stdoutFile } = options;
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -76,27 +90,23 @@ function run(command, args, options = {}) {
       if (stdoutFile) {
         await fs.writeFile(stdoutFile, stdoutText);
       }
-      if (code !== 0) {
-        const reason = signal ? `signal ${signal}` : `exit code ${code}`;
-        const output = `${stdoutText}${stderrText}`.trim();
-        const outputTail = failureSummary
-          ? failureSummary(stdoutText, stderrText, stdoutFile)
-          : output.length > 12_000
-            ? `[diagnostics truncated; full stdout is in ${stdoutFile ?? 'the coverage test report'}]\n${output.slice(-12_000)}`
-            : output;
-        reject(
-          new Error(
-            `${command} ${args.join(' ')} failed with ${reason}${outputTail ? `\n${outputTail}` : ''}`,
-          ),
-        );
+      if (code === 0) {
+        resolve({ stdout: stdoutText, stderr: stderrText });
         return;
       }
-      resolve({ stdout: stdoutText, stderr: stderrText });
+      reject(
+        failedRunError(
+          command,
+          args,
+          { code, signal, stdoutText, stderrText },
+          options,
+        ),
+      );
     });
   });
 }
 
-function parseGoProfile(profile) {
+export function parseGoProfile(profile) {
   const files = new Map();
   let totalStatements = 0;
   let coveredStatements = 0;
@@ -183,6 +193,10 @@ async function runServerCoverage() {
     .sort()
     .map((file) => path.join('tests', file));
   await fs.rm(reportDir, { recursive: true, force: true });
+  await fs.rm(path.join(coverageRoot, 'fallow'), {
+    recursive: true,
+    force: true,
+  });
   await fs.mkdir(reportDir, { recursive: true });
 
   await run('npm', ['run', 'build:server']);
@@ -221,6 +235,23 @@ async function runServerCoverage() {
     '--reporter=text',
   ]);
   await fs.writeFile(path.join(reportDir, 'details.txt'), detailed.stdout);
+  // fallow scores change risk per function from an Istanbul map. The repository
+  // scripts gate releases and supply-chain pins, so they are scored too; they
+  // stay out of the server summary above, which carries the coverage minimum.
+  await run(path.join(root, 'node_modules', '.bin', 'c8'), [
+    'report',
+    `--temp-directory=${tempDir}`,
+    `--reports-dir=${path.join(coverageRoot, 'fallow')}`,
+    '--all',
+    '--src=src',
+    '--src=scripts',
+    '--include=src/**/*.ts',
+    '--include=scripts/**/*.mjs',
+    '--exclude=src/**/*.d.ts',
+    '--exclude=src/types.ts',
+    '--exclude-after-remap',
+    '--reporter=json',
+  ]);
   await fs.rm(tempDir, { recursive: true, force: true });
 
   const summary = JSON.parse(
@@ -273,40 +304,54 @@ async function runClientCoverage() {
   return summary.total;
 }
 
-try {
-  await fs.mkdir(coverageRoot, { recursive: true });
-  const summaries = {};
-  for (const target of targets) {
-    if (target === 'server') {
-      summaries.server = await runServerCoverage();
-    } else {
-      summaries.client = await runClientCoverage();
-    }
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  const requestedTarget = process.argv[2];
+  const targets = requestedTarget ? [requestedTarget] : ['server', 'client'];
+
+  if (targets.some((target) => target !== 'server' && target !== 'client')) {
+    console.error('usage: npm run test:coverage [-- server|client]');
+    process.exit(2);
   }
-  if (summaries.server && summaries.client) {
-    const covered =
-      summaries.server.statements.covered + summaries.client.statements.covered;
-    const total =
-      summaries.server.statements.total + summaries.client.statements.total;
-    const percent = Number(((covered / total) * 100).toFixed(1));
-    const summary = {
-      schemaVersion: 1,
-      statements: { covered, total, percent },
-      minimumStatements: 80,
-    };
-    await fs.writeFile(
-      path.join(coverageRoot, 'coverage-summary.json'),
-      `${JSON.stringify(summary, null, 2)}\n`,
-    );
-    console.log('Combined coverage');
-    console.log(`  Statements: ${percent}% (${covered}/${total})`);
-    if (percent < summary.minimumStatements) {
-      throw new Error(
-        `combined statement coverage ${percent}% is below the ${summary.minimumStatements}% minimum`,
+
+  try {
+    await fs.mkdir(coverageRoot, { recursive: true });
+    const summaries = {};
+    for (const target of targets) {
+      if (target === 'server') {
+        summaries.server = await runServerCoverage();
+      } else {
+        summaries.client = await runClientCoverage();
+      }
+    }
+    if (summaries.server && summaries.client) {
+      const covered =
+        summaries.server.statements.covered +
+        summaries.client.statements.covered;
+      const total =
+        summaries.server.statements.total + summaries.client.statements.total;
+      const percent = Number(((covered / total) * 100).toFixed(1));
+      const summary = {
+        schemaVersion: 1,
+        statements: { covered, total, percent },
+        minimumStatements: 80,
+      };
+      await fs.writeFile(
+        path.join(coverageRoot, 'coverage-summary.json'),
+        `${JSON.stringify(summary, null, 2)}\n`,
       );
+      console.log('Combined coverage');
+      console.log(`  Statements: ${percent}% (${covered}/${total})`);
+      if (percent < summary.minimumStatements) {
+        throw new Error(
+          `combined statement coverage ${percent}% is below the ${summary.minimumStatements}% minimum`,
+        );
+      }
     }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
   }
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
 }

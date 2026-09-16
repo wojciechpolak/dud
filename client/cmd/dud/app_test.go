@@ -26,7 +26,7 @@ func TestMain(m *testing.M) {
 		// vector regeneration while still reporting success.
 		if ok && strings.HasPrefix(name, "DUD_") &&
 			name != "DUD_UPDATE_VECTORS" && !strings.HasPrefix(name, "DUD_TEST_") {
-			os.Unsetenv(name)
+			_ = os.Unsetenv(name)
 		}
 	}
 	os.Exit(m.Run())

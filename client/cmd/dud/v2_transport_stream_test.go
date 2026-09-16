@@ -141,7 +141,7 @@ func TestV2TransportDoesNotApplyTheBoundedLimitToAStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Stream.Close()
+	defer func() { _ = response.Stream.Close() }()
 	count, err := io.Copy(io.Discard, response.Stream)
 	if err != nil {
 		t.Fatal(err)
@@ -209,14 +209,14 @@ func TestV2TransportRetiresTheTargetClientAfterAFailedStream(t *testing.T) {
 	if _, err := io.ReadAll(response.Stream); err == nil {
 		t.Fatal("the failing stream reported success")
 	}
-	response.Stream.Close()
+	_ = response.Stream.Close()
 
 	next, err := transport.Do(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(io.Discard, next.Stream)
-	next.Stream.Close()
+	_, _ = io.Copy(io.Discard, next.Stream)
+	_ = next.Stream.Close()
 	if len(mock.targets) != 2 {
 		t.Fatalf("target clients built = %d, want a fresh one after the failed stream", len(mock.targets))
 	}

@@ -20,51 +20,51 @@ function requireObject(value, message) {
 function addFinding(id, details = {}) {
   findings.set(id, { id, ...details });
 }
-function parseJsonObjectStream(text, message) {
-  const entries = [];
-  let start = -1;
+/** Index of the quote closing the JSON string that opens at `start`. */
+function stringEnd(text, start) {
+  for (let index = start + 1; index < text.length; index += 1) {
+    if (text[index] === '\\') {
+      index += 1;
+    } else if (text[index] === '"') {
+      return index;
+    }
+  }
+  return text.length;
+}
+/** Index of the brace closing the JSON object that opens at `start`, or -1. */
+function objectEnd(text, start) {
   let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < text.length; index += 1) {
+  for (let index = start; index < text.length; index += 1) {
     const character = text[index];
-    if (start === -1) {
-      if (/\s/.test(character)) {
-        continue;
-      }
-      if (character !== '{') {
-        throw new Error(message);
-      }
-      start = index;
-      depth = 1;
-      continue;
-    }
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (character === '\\') {
-        escaped = true;
-      } else if (character === '"') {
-        inString = false;
-      }
-      continue;
-    }
     if (character === '"') {
-      inString = true;
+      index = stringEnd(text, index);
     } else if (character === '{') {
       depth += 1;
     } else if (character === '}') {
       depth -= 1;
       if (depth === 0) {
-        entries.push(JSON.parse(text.slice(start, index + 1)));
-        start = -1;
+        return index;
       }
     }
   }
-
-  if (start !== -1 || entries.length === 0) {
+  return -1;
+}
+function parseJsonObjectStream(text, message) {
+  const entries = [];
+  let index = 0;
+  while (index < text.length) {
+    if (/\s/.test(text[index])) {
+      index += 1;
+      continue;
+    }
+    const end = text[index] === '{' ? objectEnd(text, index) : -1;
+    if (end === -1) {
+      throw new Error(message);
+    }
+    entries.push(JSON.parse(text.slice(index, end + 1)));
+    index = end + 1;
+  }
+  if (entries.length === 0) {
     throw new Error(message);
   }
   return entries;
@@ -142,19 +142,24 @@ if (scanner === 'npm') {
   throw new Error(`unsupported scanner: ${scanner}`);
 }
 const now = new Date();
-const rejected = [...findings.values()].filter((finding) => {
+/**
+ * A finding is waived only by an unexpired, justified waiver for the same
+ * scanner and ID, and for a package finding, the same package and range.
+ */
+function isWaived(finding) {
   const waiver = waivers.find(
     (item) => item.scanner === scanner && item.id === finding.id,
   );
   return (
-    !waiver ||
-    !waiver.reason?.trim() ||
-    Number.isNaN(Date.parse(waiver.expires)) ||
-    new Date(waiver.expires) <= now ||
-    (finding.package !== undefined &&
-      (waiver.package !== finding.package || waiver.range !== finding.range))
+    waiver !== undefined &&
+    Boolean(waiver.reason?.trim()) &&
+    !Number.isNaN(Date.parse(waiver.expires)) &&
+    new Date(waiver.expires) > now &&
+    (finding.package === undefined ||
+      (waiver.package === finding.package && waiver.range === finding.range))
   );
-});
+}
+const rejected = [...findings.values()].filter((finding) => !isWaived(finding));
 if (rejected.length) {
   throw new Error(
     `unwaived or expired security findings:\n${rejected

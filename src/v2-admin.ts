@@ -24,6 +24,7 @@ import type {
   V2RevocationRecord,
   V2Scope,
   V2Store,
+  V2StoredState,
 } from './v2-types.js';
 
 interface ParsedArguments {
@@ -117,7 +118,7 @@ export async function offlineRevokeV2Relationship(
     throw new Error('Relationship ID must be 16 bytes.');
   }
   const relationship = bytesToHex(relationshipId);
-  return store.transaction((state) => {
+  const revokeCoveredCapabilities = (state: V2StoredState): number => {
     const record: V2RevocationRecord = {
       relationshipId: relationship,
       ...(direction ? { direction } : {}),
@@ -139,7 +140,9 @@ export async function offlineRevokeV2Relationship(
       }
     }
     return count;
-  });
+  };
+
+  return store.transaction(revokeCoveredCapabilities);
 }
 
 const RECONCILE_DEFAULT_LIMIT = 200;

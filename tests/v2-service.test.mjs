@@ -469,6 +469,175 @@ test('capability discovery advertises only implemented features and atomic quota
   assert.equal(body.get(4).get(2), 0);
 });
 
+test('whole-state deployments rotate, revoke, and report relationship tuples', async () => {
+  const store = new MemoryV2Store();
+  const { service, randomBytes } = await createV2TestService(store);
+  const now = Math.floor(V2_NOW_MS / 1000);
+  const seed = async (direction, scope) => {
+    const record = await createV2CapabilityRecord(V2_DEPLOYMENT_KEY, {
+      relationshipId: V2_RELATIONSHIP_ID,
+      direction,
+      scope,
+      tokenSecret: V2_TOKEN_SECRET,
+      createdAt: now - 60,
+      expiresAt: now + 86_400,
+      randomBytes,
+    });
+    await store.transaction((state) => {
+      state.capabilities[record.id] = record;
+    });
+  };
+  await seed('inviter->invitee', 'write');
+  await seed('invitee->inviter', 'read');
+  await seed('invitee->inviter', 'ack');
+  const admin = (path, entries) =>
+    service.fetch(
+      new Request(`${V2_ORIGIN}${path}`, {
+        method: 'POST',
+        headers: {
+          authorization: `DUD2-Bearer ${encodeBase64Url(V2_ADMIN_SECRET)}`,
+          'content-type': 'application/dud+cbor; version=2',
+        },
+        body: encodeCbor(new Map([[1, V2_RELATIONSHIP_ID], ...entries])),
+      }),
+      makeContext(),
+    );
+  const status = async () => {
+    const response = await admin('/v2/admin/relationships/status', []);
+    assert.equal(response.status, 200);
+    const body = await decodeResponse(response);
+    return {
+      fullyRevoked: body.get(1),
+      tuples: body
+        .get(2)
+        .map((tuple) => [tuple.get(1), tuple.get(2), tuple.get(3)]),
+    };
+  };
+
+  assert.deepEqual(await status(), {
+    fullyRevoked: false,
+    tuples: [
+      [1, 'ack', false],
+      [1, 'read', false],
+      [0, 'write', false],
+    ],
+  });
+
+  // Rotation revokes the tuple's capabilities but leaves the tuple usable.
+  const rotated = await admin('/v2/admin/relationships/rotate-capabilities', [
+    [2, 0],
+    [3, 'write'],
+  ]);
+  assert.equal(rotated.status, 204);
+  assert.deepEqual((await status()).tuples[2], [0, 'write', false]);
+  const missing = await admin('/v2/admin/relationships/rotate-capabilities', [
+    [2, 0],
+    [3, 'ack'],
+  ]);
+  assert.equal(missing.status, 404);
+
+  const byDirection = await admin('/v2/admin/relationships/revoke', [[2, 1]]);
+  assert.equal(byDirection.status, 204);
+  // The refused rotation still records its tuple, unrevoked.
+  assert.deepEqual(await status(), {
+    fullyRevoked: false,
+    tuples: [
+      [1, 'ack', true],
+      [1, 'read', true],
+      [0, 'ack', false],
+      [0, 'write', false],
+    ],
+  });
+
+  // A capability that is not itself flagged is still revoked by a revocation
+  // that covers its scope.
+  await store.transaction((state) => {
+    for (const capability of Object.values(state.capabilities)) {
+      capability.revoked = false;
+    }
+    state.revocations = {};
+  });
+  assert.equal(
+    (await admin('/v2/admin/relationships/revoke', [[3, 'read']])).status,
+    204,
+  );
+  await store.transaction((state) => {
+    for (const capability of Object.values(state.capabilities)) {
+      capability.revoked = false;
+    }
+  });
+  assert.deepEqual((await status()).tuples, [
+    [1, 'ack', false],
+    [1, 'read', true],
+    [0, 'write', false],
+  ]);
+
+  assert.equal((await admin('/v2/admin/relationships/revoke', [])).status, 204);
+  assert.equal((await status()).fullyRevoked, true);
+  assert.ok((await status()).tuples.every(([, , revoked]) => revoked));
+});
+
+test('administrative requests reject malformed relationship targets', async () => {
+  const { service } = await createV2TestService(new MemoryV2Store());
+  const admin = (path, body) =>
+    service.fetch(
+      new Request(`${V2_ORIGIN}${path}`, {
+        method: 'POST',
+        headers: {
+          authorization: `DUD2-Bearer ${encodeBase64Url(V2_ADMIN_SECRET)}`,
+          'content-type': 'application/dud+cbor; version=2',
+        },
+        body: encodeCbor(body),
+      }),
+      makeContext(),
+    );
+  const shortId = new Uint8Array(8);
+  for (const path of [
+    '/v2/admin/relationships/revoke',
+    '/v2/admin/relationships/status',
+  ]) {
+    assert.equal((await admin(path, new Map([[1, shortId]]))).status, 400);
+  }
+  assert.equal(
+    (
+      await admin(
+        '/v2/admin/relationships/revoke',
+        new Map([
+          [1, V2_RELATIONSHIP_ID],
+          [3, 'delete'],
+        ]),
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await admin(
+        '/v2/admin/relationships/rotate-capabilities',
+        new Map([
+          [1, V2_RELATIONSHIP_ID],
+          [2, 7],
+          [3, 'write'],
+        ]),
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await admin(
+        '/v2/admin/relationships/rotate-capabilities',
+        new Map([
+          [1, shortId],
+          [2, 0],
+          [3, 'write'],
+        ]),
+      )
+    ).status,
+    400,
+  );
+});
+
 test('administrative authorization failures are rate limited', async () => {
   const store = new MemoryV2Store();
   const { service } = await createV2TestService(store, {

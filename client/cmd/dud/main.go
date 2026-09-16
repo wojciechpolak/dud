@@ -31,6 +31,16 @@ type config struct {
 	GitBin       string
 	QREncodeBin  string
 	Image        string
+	// GitTrustedDir is the single directory whose ownership dud tells Git to
+	// accept. Git refuses to operate on a repository owned by another user, and
+	// a container file-sharing layer can report an owner unrelated to the one
+	// the host records: Docker Desktop presents a bind mount's root as owned by
+	// root no matter who owns the host directory. The shell wrapper that mounts
+	// the caller's working directory sets DUD_GIT_TRUSTED_DIR to the path it
+	// mounted that directory at, because the wrapper is the only component that
+	// knows the mount is the caller's own. Left empty, Git's ownership check
+	// applies to dud exactly as it applies to any other program.
+	GitTrustedDir string
 }
 
 type app struct {

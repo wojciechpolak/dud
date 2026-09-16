@@ -629,13 +629,14 @@ async function assertEmbeddedProofVerifies(
   );
 }
 
-test('server redaction reproduces every proof the client embedded', async () => {
-  let verified = 0;
+/** Frozen vectors of one request kind that are valid, not negative cases. */
+function validVectors(vectors) {
+  return vectors.filter((vector) => vector.category === undefined);
+}
 
-  for (const vector of corpus.deliveryFrames) {
-    if (vector.category !== undefined) {
-      continue;
-    }
+async function verifyDeliveryFrameProofs() {
+  let verified = 0;
+  for (const vector of validVectors(corpus.deliveryFrames)) {
     const frame = bytes(vector.body);
     const { header } = decodeV2DeliveryRequestFrame(frame);
     const digest = v2DeliveryFrameAuthorizationDigest(frame);
@@ -661,36 +662,37 @@ test('server redaction reproduces every proof the client embedded', async () => 
       verified += 1;
     }
   }
+  return verified;
+}
 
-  for (const vector of corpus.inboxRequests) {
-    if (vector.category !== undefined) {
-      continue;
-    }
+async function verifyInboxProofs() {
+  let verified = 0;
+  for (const vector of validVectors(corpus.inboxRequests)) {
     const body = bytes(vector.body);
     const { header } = decodeV2InboxRequest(body);
     const digest = v2InboxRequestAuthorizationDigest(body);
-    for (const key of [
-      V2_INBOX_REQUEST_KEYS.dataSlotProofs,
-      V2_INBOX_REQUEST_KEYS.controlSlotProofs,
-    ]) {
-      for (const proof of header.get(key) ?? []) {
-        await assertEmbeddedProofVerifies(
-          vector,
-          proof,
-          'read',
-          '/v2/inbox',
-          digest,
-          'inbox',
-        );
-        verified += 1;
-      }
+    const proofs = [
+      ...(header.get(V2_INBOX_REQUEST_KEYS.dataSlotProofs) ?? []),
+      ...(header.get(V2_INBOX_REQUEST_KEYS.controlSlotProofs) ?? []),
+    ];
+    for (const proof of proofs) {
+      await assertEmbeddedProofVerifies(
+        vector,
+        proof,
+        'read',
+        '/v2/inbox',
+        digest,
+        'inbox',
+      );
+      verified += 1;
     }
   }
+  return verified;
+}
 
-  for (const vector of corpus.completionRequests) {
-    if (vector.category !== undefined) {
-      continue;
-    }
+async function verifyCompletionProofs() {
+  let verified = 0;
+  for (const vector of validVectors(corpus.completionRequests)) {
     const body = bytes(vector.body);
     const { header } = decodeV2CompletionRequest(body);
     const digest = v2CompletionRequestAuthorizationDigest(body);
@@ -715,11 +717,12 @@ test('server redaction reproduces every proof the client embedded', async () => 
     );
     verified += 2;
   }
+  return verified;
+}
 
-  for (const vector of corpus.controlEventRequests) {
-    if (vector.category !== undefined) {
-      continue;
-    }
+async function verifyControlEventProofs() {
+  let verified = 0;
+  for (const vector of validVectors(corpus.controlEventRequests)) {
     const body = bytes(vector.body);
     const { header } = decodeV2ControlEventRequest(body);
     await assertEmbeddedProofVerifies(
@@ -732,7 +735,15 @@ test('server redaction reproduces every proof the client embedded', async () => 
     );
     verified += 1;
   }
+  return verified;
+}
 
+test('server redaction reproduces every proof the client embedded', async () => {
+  const verified =
+    (await verifyDeliveryFrameProofs()) +
+    (await verifyInboxProofs()) +
+    (await verifyCompletionProofs()) +
+    (await verifyControlEventProofs());
   assert.ok(verified >= 40, `only ${verified} embedded proofs were verified`);
 });
 

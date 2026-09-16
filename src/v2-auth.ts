@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { concatBytes, toArrayBuffer } from './bytes.js';
+import { openV2AesGcm, sealV2AesGcm } from './v2-aes-gcm.js';
 import { bytesEqual, decodeCbor, encodeCbor, requireCborMap } from './cbor.js';
 import { sha256 } from './sha256.js';
 import { V2_WIRE_PROTOCOL } from './v2-contract.js';
@@ -70,21 +72,6 @@ export function decodeBase64Url(
   return result;
 }
 
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const length = parts.reduce((total, part) => total + part.byteLength, 0);
-  const result = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-  return result;
-}
-
-function arrayBuffer(value: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(value).buffer;
-}
-
 function uint64(value: number): Uint8Array {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error('Value is outside the supported uint64 range.');
@@ -102,13 +89,13 @@ async function hmacSha256(
 ): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     'raw',
-    arrayBuffer(secret),
+    toArrayBuffer(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign'],
   );
   return new Uint8Array(
-    await crypto.subtle.sign('HMAC', key, arrayBuffer(message)),
+    await crypto.subtle.sign('HMAC', key, toArrayBuffer(message)),
   );
 }
 
@@ -118,7 +105,7 @@ async function hkdfSha256(
 ): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     'raw',
-    arrayBuffer(secret),
+    toArrayBuffer(secret),
     'HKDF',
     false,
     ['deriveBits'],
@@ -129,7 +116,7 @@ async function hkdfSha256(
         name: 'HKDF',
         hash: 'SHA-256',
         salt: new ArrayBuffer(0),
-        info: arrayBuffer(info),
+        info: toArrayBuffer(info),
       },
       key,
       256,
@@ -137,14 +124,11 @@ async function hkdfSha256(
   );
 }
 
-/** Scope values permitted on the V2 delivery endpoints. */
-export type V2DeliveryScope = 'write' | 'read' | 'ack';
-
 export interface V2DeliveryAuthorizationInput {
   tokenSecret: Uint8Array;
   capabilityLookupId: Uint8Array;
   direction: V2Direction;
-  scope: V2DeliveryScope;
+  scope: V2Scope;
   chain: number;
   slot: Uint8Array;
   slotEpoch: number;
@@ -178,7 +162,10 @@ export async function deriveV2DailyCapabilityLookupId(
   return (
     await hmacSha256(
       tokenSecret,
-      concat(textEncoder.encode('dud/v2/capability-lookup|'), uint64(epoch)),
+      concatBytes(
+        textEncoder.encode('dud/v2/capability-lookup|'),
+        uint64(epoch),
+      ),
     )
   ).subarray(0, 16);
 }
@@ -196,7 +183,7 @@ function deliveryCapabilityContext(
   ) {
     throw new Error('Delivery authorization context is invalid.');
   }
-  return concat(
+  return concatBytes(
     textEncoder.encode(input.direction),
     Uint8Array.of(0x7c),
     textEncoder.encode(input.scope),
@@ -214,7 +201,7 @@ function deliveryCapabilityContext(
  * request digest and its index so batch entries cannot be spliced,
  * reordered, or replayed as a differently scoped operation.
  */
-export async function deriveV2DeliveryAuthorizationMac(
+async function deriveV2DeliveryAuthorizationMac(
   input: V2DeliveryAuthorizationInput,
 ): Promise<Uint8Array> {
   if (
@@ -230,11 +217,11 @@ export async function deriveV2DeliveryAuthorizationMac(
   const context = deliveryCapabilityContext(input);
   const authKey = await hkdfSha256(
     input.tokenSecret,
-    concat(textEncoder.encode('dud/v2/delivery-authkey|'), context),
+    concatBytes(textEncoder.encode('dud/v2/delivery-authkey|'), context),
   );
   return hmacSha256(
     authKey,
-    concat(
+    concatBytes(
       textEncoder.encode('dud/v2/delivery-auth'),
       Uint8Array.of(0),
       uint64(V2_WIRE_PROTOCOL),
@@ -378,25 +365,14 @@ export async function encryptV2TokenSecret(
   if (nonce.byteLength !== 12) {
     throw new Error('V2 random source returned an invalid nonce.');
   }
-  const key = await crypto.subtle.importKey(
-    'raw',
-    arrayBuffer(deploymentKey),
-    'AES-GCM',
-    false,
-    ['encrypt'],
-  );
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: 'AES-GCM',
-        iv: arrayBuffer(nonce),
-        additionalData: arrayBuffer(capabilityAad(record)),
-      },
-      key,
-      arrayBuffer(tokenSecret),
+  return encodeBase64Url(
+    await sealV2AesGcm(
+      deploymentKey,
+      nonce,
+      capabilityAad(record),
+      tokenSecret,
     ),
   );
-  return encodeBase64Url(concat(nonce, ciphertext));
 }
 
 export async function decryptV2TokenSecret(
@@ -410,25 +386,8 @@ export async function decryptV2TokenSecret(
   if (encoded.byteLength !== 60 || deploymentKey.byteLength !== 32) {
     throw new Error('Encrypted v2 verifier is invalid.');
   }
-  const key = await crypto.subtle.importKey(
-    'raw',
-    arrayBuffer(deploymentKey),
-    'AES-GCM',
-    false,
-    ['decrypt'],
-  );
   try {
-    return new Uint8Array(
-      await crypto.subtle.decrypt(
-        {
-          name: 'AES-GCM',
-          iv: arrayBuffer(encoded.subarray(0, 12)),
-          additionalData: arrayBuffer(capabilityAad(record)),
-        },
-        key,
-        arrayBuffer(encoded.subarray(12)),
-      ),
-    );
+    return await openV2AesGcm(deploymentKey, encoded, capabilityAad(record));
   } catch {
     throw new Error('Encrypted v2 verifier failed authentication.');
   }
@@ -535,7 +494,7 @@ export async function verifyV2Bearer(
     return false;
   }
   const actual = sha256(
-    concat(textEncoder.encode('dud/v2/bearer\0'), salt, bearer),
+    concatBytes(textEncoder.encode('dud/v2/bearer\0'), salt, bearer),
   );
   return bytesEqual(actual, expected);
 }
@@ -580,7 +539,7 @@ export function parseV2DeploymentKey(value: string | undefined): Uint8Array {
  * case an operator can choose; the work factor below is what makes even a
  * modest choice expensive to attack. See `threat-model-v2.md` §3.20.
  */
-export const V2_ENROLLMENT_SECRET_MIN_LENGTH = 24;
+const V2_ENROLLMENT_SECRET_MIN_LENGTH = 24;
 
 /**
  * Work factor for the enrollment passphrase, following the current OWASP
@@ -599,17 +558,17 @@ export const V2_ENROLLMENT_KDF_ITERATIONS = 600_000;
  * from becoming decorative, and the ceiling is a typo guard: a stray zero would
  * otherwise hang startup rather than report a bad value.
  */
-export const V2_ENROLLMENT_KDF_MIN_ITERATIONS = 10_000;
-export const V2_ENROLLMENT_KDF_MAX_ITERATIONS = 10_000_000;
+const V2_ENROLLMENT_KDF_MIN_ITERATIONS = 10_000;
+const V2_ENROLLMENT_KDF_MAX_ITERATIONS = 10_000_000;
 
 /** Domain separation for the enrollment key, used as the PBKDF2 salt. */
 const V2_ENROLLMENT_KDF_SALT = 'dud/v2/enrollment-key';
 
 /** Marks a `DUD_PEER_SECRET` that carries the derived key rather than a passphrase. */
-export const V2_ENROLLMENT_KEY_PREFIX = 'dud2-enroll-key:';
+const V2_ENROLLMENT_KEY_PREFIX = 'dud2-enroll-key:';
 
 /** Marks a `DUD_PEER_SECRET` that states its own work factor before the passphrase. */
-export const V2_ENROLLMENT_KDF_PREFIX = 'dud2-enroll-kdf:';
+const V2_ENROLLMENT_KDF_PREFIX = 'dud2-enroll-kdf:';
 
 /**
  * What an operator put in `DUD_PEER_SECRET`. Either the derived key itself, or a
@@ -706,7 +665,7 @@ export async function deriveV2EnrollmentKey(
   }
   const key = await crypto.subtle.importKey(
     'raw',
-    arrayBuffer(textEncoder.encode(credential.passphrase)),
+    toArrayBuffer(textEncoder.encode(credential.passphrase)),
     'PBKDF2',
     false,
     ['deriveBits'],
@@ -716,7 +675,7 @@ export async function deriveV2EnrollmentKey(
       {
         name: 'PBKDF2',
         hash: 'SHA-256',
-        salt: arrayBuffer(textEncoder.encode(V2_ENROLLMENT_KDF_SALT)),
+        salt: toArrayBuffer(textEncoder.encode(V2_ENROLLMENT_KDF_SALT)),
         iterations: credential.iterations,
       },
       key,
@@ -746,7 +705,7 @@ export async function deriveV2EnrollmentProof(
 ): Promise<Uint8Array> {
   return hmacSha256(
     secret,
-    concat(
+    concatBytes(
       textEncoder.encode('dud/v2/enrollment|'),
       locator,
       uint64(expiresAt),

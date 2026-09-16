@@ -4,12 +4,21 @@
 import { bytesEqual } from './cbor.js';
 import { d1Bytes } from './v2-d1-values.js';
 import {
+  v2RelationshipStatusFromRows,
+  type V2RelationshipStatus,
+} from './v2-relationship-status.js';
+import {
   v2DeliveryChunkKey,
+  v2ExpiredChunkPartBodyKeys,
   v2StagedChunkKey,
   validateV2BodyPartDeclarations,
 } from './v2-body-keys.js';
 import type { D1DatabaseLike, D1RunResultLike } from './types.js';
-import { V2OperationConflictError } from './v2-repository.js';
+import {
+  countV2AuthorizationClaims,
+  isV2ChunkUploadLeaseWellFormed,
+  V2OperationConflictError,
+} from './v2-repository.js';
 import type {
   V2CapabilityRegistration,
   V2CapabilityReissueInput,
@@ -57,6 +66,73 @@ function operationId(value: Uint8Array): void {
   if (value.byteLength !== 16) {
     throw new Error('Operation ID is invalid.');
   }
+}
+
+type D1Statement = ReturnType<D1DatabaseLike['prepare']>;
+type ReservationInput = Parameters<V2Repository['reserveDelivery']>[0];
+
+/**
+ * Batches abort through a NOT NULL violation on `maintenance_leases.expires_at`
+ * when an admission assertion finds that a conditional mutation was refused.
+ */
+function isAdmissionAssertion(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /maintenance_leases\.expires_at/i.test(error.message)
+  );
+}
+
+function reservationRefusal(input: ReservationInput): Error {
+  return new Error(
+    input.maximumTotalBytes === undefined
+      ? 'Delivery capability is not active.'
+      : 'Relationship delivery quota is exhausted.',
+  );
+}
+
+/**
+ * Published-but-uncollected deliveries plus in-flight reservations for the
+ * capability's own relationship and direction.
+ */
+function pendingDeliveryGuard(input: ReservationInput): {
+  sql: string;
+  values: unknown[];
+} {
+  if (input.maximumPendingDeliveries === undefined) {
+    return { sql: '', values: [] };
+  }
+  return {
+    sql: ` AND (SELECT COUNT(*) FROM deliveries d WHERE d.relationship_id = (SELECT relationship_id FROM capabilities WHERE id = ?) AND d.direction = (SELECT direction FROM capabilities WHERE id = ?) AND d.state = 'published' AND d.expires_at > ?) + (SELECT COUNT(*) FROM reservations r WHERE r.expires_at > ? AND r.capability_id IN (SELECT id FROM capabilities WHERE relationship_id = (SELECT relationship_id FROM capabilities WHERE id = ?) AND direction = (SELECT direction FROM capabilities WHERE id = ?))) < ?`,
+    values: [
+      input.capabilityId,
+      input.capabilityId,
+      input.now,
+      input.now,
+      input.capabilityId,
+      input.capabilityId,
+      input.maximumPendingDeliveries,
+    ],
+  };
+}
+
+/** Requires a chunked reservation's upload to be live and fully received. */
+function chunkReservationGuard(
+  input: ReservationInput,
+  deliveryId: string,
+): { sql: string; values: unknown[] } {
+  if (!input.chunkUploadId) {
+    return { sql: '', values: [] };
+  }
+  return {
+    sql: ' AND EXISTS (SELECT 1 FROM chunk_uploads u WHERE u.id = ? AND u.delivery_id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND u.total_length = ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts p WHERE p.upload_id = u.id AND p.body_key IS NULL))',
+    values: [
+      input.chunkUploadId,
+      deliveryId,
+      input.capabilityId,
+      input.now,
+      input.payloadLength,
+    ],
+  };
 }
 
 /**
@@ -709,18 +785,7 @@ export class D1V2Repository
   ): Promise<{ upload: V2ChunkUpload; idempotent: boolean }> {
     validateV2BodyPartDeclarations(input.parts, input.totalLength);
     this.validateChunkOperation(input.operationId, input.operationDigest);
-    if (
-      input.expiresAt <= input.now ||
-      !Number.isSafeInteger(input.chain) ||
-      input.chain < 0 ||
-      input.slot.byteLength !== 16 ||
-      !Number.isSafeInteger(input.epoch) ||
-      input.epoch < 0 ||
-      !Number.isSafeInteger(input.maximumConcurrentUploads) ||
-      input.maximumConcurrentUploads < 1 ||
-      !Number.isSafeInteger(input.maximumStagedBytes) ||
-      input.maximumStagedBytes < input.totalLength
-    ) {
+    if (!isV2ChunkUploadLeaseWellFormed(input)) {
       throw new Error('Chunk upload lease is invalid.');
     }
     const id = crypto.randomUUID().replaceAll('-', '');
@@ -797,10 +862,7 @@ export class D1V2Repository
       mutationChanges =
         results[authorization.statements.length]?.meta?.changes ?? 0;
     } catch (error) {
-      if (
-        error instanceof Error &&
-        /maintenance_leases\.expires_at/i.test(error.message)
-      ) {
+      if (isAdmissionAssertion(error)) {
         if (await this.hasLiveNonce(input.authorization.claims, input.now)) {
           throw new Error('Chunk upload authorization is unavailable.');
         }
@@ -887,10 +949,7 @@ export class D1V2Repository
           .bind(authorization.gate),
       ]);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        /maintenance_leases\.expires_at/i.test(error.message)
-      ) {
+      if (isAdmissionAssertion(error)) {
         throw new Error('Chunk upload is unavailable.');
       }
       throw error;
@@ -962,10 +1021,7 @@ export class D1V2Repository
     try {
       await this.database.batch<D1RunResultLike>(statements);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        /maintenance_leases\.expires_at/i.test(error.message)
-      ) {
+      if (isAdmissionAssertion(error)) {
         if (await this.hasLiveNonce(input.authorization.claims, input.now)) {
           throw new Error('Chunk upload authorization is unavailable.');
         }
@@ -1106,10 +1162,7 @@ export class D1V2Repository
       mutationChanges =
         results[authorization.statements.length]?.meta?.changes ?? 0;
     } catch (error) {
-      if (
-        error instanceof Error &&
-        /maintenance_leases\.expires_at/i.test(error.message)
-      ) {
+      if (isAdmissionAssertion(error)) {
         if (await this.hasLiveNonce(input.authorization.claims, input.now)) {
           throw new Error('Chunk upload authorization is unavailable.');
         }
@@ -1159,42 +1212,16 @@ export class D1V2Repository
           .bind(authorization.gate),
       ]);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        /maintenance_leases\.expires_at/i.test(error.message)
-      ) {
+      if (isAdmissionAssertion(error)) {
         throw new Error('Chunk upload is unavailable.');
       }
       throw error;
     }
   }
 
-  async reserveDelivery(input: {
-    capabilityId: string;
-    operationId: Uint8Array;
-    operationDigest: Uint8Array;
-    payloadLength: number;
-    chunkUploadId?: string;
-    maximumTotalBytes?: number;
-    maximumPendingDeliveries?: number;
-    maximumObjectsPerCapability?: number;
-    authorization?: {
-      claims: readonly {
-        capabilityId: string;
-        nonce: Uint8Array;
-        expiresAt: number;
-      }[];
-      maximumRequestsPerMinute: number;
-    };
-    consumeControlEvents?: {
-      ids: readonly string[];
-      relationshipId: string;
-      direction: V2RepositoryCapability['direction'];
-      now: number;
-    };
-    now: number;
-    expiresAt: number;
-  }): Promise<V2DeliveryReservation | { existing: V2RepositoryDelivery }> {
+  async reserveDelivery(
+    input: ReservationInput,
+  ): Promise<V2DeliveryReservation | { existing: V2RepositoryDelivery }> {
     operationId(input.operationId);
     const upload = input.chunkUploadId
       ? await this.requireChunkUpload(input.chunkUploadId)
@@ -1204,211 +1231,13 @@ export class D1V2Repository
     const payloadKey = upload
       ? v2DeliveryChunkKey(deliveryId, upload.parts[0]!.id)
       : `deliveries/${deliveryId}.bin`;
-    const chunkGuard = input.chunkUploadId
-      ? ' AND EXISTS (SELECT 1 FROM chunk_uploads u WHERE u.id = ? AND u.delivery_id = ? AND u.capability_id = ? AND u.committed_at IS NULL AND u.expires_at > ? AND u.total_length = ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts p WHERE p.upload_id = u.id AND p.body_key IS NULL))'
-      : '';
-    const chunkValues = input.chunkUploadId
-      ? [
-          input.chunkUploadId,
-          deliveryId,
-          input.capabilityId,
-          input.now,
-          input.payloadLength,
-        ]
-      : [];
-    // Published-but-uncollected deliveries plus in-flight reservations for the
-    // capability's own relationship and direction.
-    const pendingGuard =
-      input.maximumPendingDeliveries === undefined
-        ? ''
-        : ` AND (SELECT COUNT(*) FROM deliveries d WHERE d.relationship_id = (SELECT relationship_id FROM capabilities WHERE id = ?) AND d.direction = (SELECT direction FROM capabilities WHERE id = ?) AND d.state = 'published' AND d.expires_at > ?) + (SELECT COUNT(*) FROM reservations r WHERE r.expires_at > ? AND r.capability_id IN (SELECT id FROM capabilities WHERE relationship_id = (SELECT relationship_id FROM capabilities WHERE id = ?) AND direction = (SELECT direction FROM capabilities WHERE id = ?))) < ?`;
-    const pendingValues =
-      input.maximumPendingDeliveries === undefined
-        ? []
-        : [
-            input.capabilityId,
-            input.capabilityId,
-            input.now,
-            input.now,
-            input.capabilityId,
-            input.capabilityId,
-            input.maximumPendingDeliveries,
-          ];
-    const statements: ReturnType<D1DatabaseLike['prepare']>[] = [];
-    let gateChanges = 1;
-    let authorizationIndex: number | undefined;
-    const authorization = input.authorization;
-
-    if (authorization?.claims.length) {
-      const claims = authorization.claims;
-      const keys = new Set(
-        claims.map(
-          ({ capabilityId, nonce }) =>
-            `${capabilityId}:${Array.from(nonce).join(',')}`,
-        ),
-      );
-      if (keys.size !== claims.length) {
-        throw new Error('Request authorization nonce is duplicated.');
-      }
-      const counts = new Map<string, number>();
-      for (const claim of claims) {
-        counts.set(
-          claim.capabilityId,
-          (counts.get(claim.capabilityId) ?? 0) + 1,
-        );
-      }
-      const claimValues = claims.flatMap(
-        ({ capabilityId, nonce, expiresAt }) => [
-          capabilityId,
-          nonce,
-          expiresAt,
-        ],
-      );
-      const countValues = Array.from(counts, ([capabilityId, count]) => [
-        capabilityId,
-        count,
-      ]).flat();
-      const claimPlaceholders = claims.map(() => '(?, ?, ?)').join(', ');
-      const countPlaceholders = Array.from(counts)
-        .map(() => '(?, ?)')
-        .join(', ');
-      // A replayed proof nonce must fail the whole request even when the
-      // operation it names was already published, so this runs before the
-      // claim insert makes every claimed nonce present. `changes()` is not
-      // read by the claim insert, so an extra statement here is safe.
-      statements.push(
-        this.database
-          .prepare(
-            `WITH claims(capability_id, nonce) AS (VALUES ${claims
-              .map(() => '(?, ?)')
-              .join(
-                ', ',
-              )}) INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-request-nonce-assertion', NULL WHERE EXISTS (SELECT 1 FROM nonces n JOIN claims c ON c.capability_id = n.capability_id AND c.nonce = n.nonce WHERE n.expires_at >= ?)`,
-          )
-          .bind(
-            ...claims.flatMap(({ capabilityId, nonce }) => [
-              capabilityId,
-              nonce,
-            ]),
-            input.now,
-          ),
-      );
-      authorizationIndex = statements.length;
-      statements.push(
-        this.database
-          .prepare(
-            `WITH claims(capability_id, nonce, expires_at) AS (VALUES ${claimPlaceholders}), counts(capability_id, claim_count) AS (VALUES ${countPlaceholders}), conflict AS (SELECT 1 FROM nonces n JOIN claims c ON c.capability_id = n.capability_id AND c.nonce = n.nonce WHERE n.expires_at >= ? LIMIT 1), inactive AS (SELECT 1 FROM claims cl LEFT JOIN capabilities c ON c.id = cl.capability_id AND c.expires_at > ? AND c.revoked_at IS NULL WHERE c.id IS NULL LIMIT 1), rate_exceeded AS (SELECT 1 FROM counts cl LEFT JOIN rate_windows r ON r.capability_id = cl.capability_id AND r.minute = ? WHERE COALESCE(r.count, 0) + cl.claim_count > ? LIMIT 1) INSERT INTO nonces(capability_id, nonce, expires_at) SELECT capability_id, nonce, expires_at FROM claims WHERE NOT EXISTS (SELECT 1 FROM conflict) AND NOT EXISTS (SELECT 1 FROM inactive) AND NOT EXISTS (SELECT 1 FROM rate_exceeded) AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?`,
-          )
-          .bind(
-            ...claimValues,
-            ...countValues,
-            input.now,
-            input.now,
-            Math.floor(input.now / 60),
-            authorization.maximumRequestsPerMinute,
-            input.capabilityId,
-            input.now,
-            input.now,
-          ),
-      );
-      gateChanges = claims.length;
-      for (const [capabilityId, count] of counts) {
-        statements.push(
-          this.database
-            .prepare(
-              'INSERT INTO rate_windows(capability_id, minute, count) SELECT ?, ?, ? WHERE changes() = ? ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count WHERE count + excluded.count <= ?',
-            )
-            .bind(
-              capabilityId,
-              Math.floor(input.now / 60),
-              count,
-              gateChanges,
-              authorization.maximumRequestsPerMinute,
-            ),
-        );
-        gateChanges = 1;
-      }
-    } else {
-      // `changes()` carries the active-capability decision into the following
-      // reservation mutation without a preceding read or state rewrite.
-      statements.push(
-        this.database
-          .prepare(
-            'UPDATE capabilities SET created_at = created_at WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
-          )
-          .bind(input.capabilityId, input.now),
-      );
-    }
-
-    if (
-      input.maximumTotalBytes === undefined &&
-      input.maximumObjectsPerCapability === undefined
-    ) {
-      statements.push(
-        this.database
-          .prepare(
-            `INSERT OR IGNORE INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = ? AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL) AND NOT EXISTS (SELECT 1 FROM deliveries WHERE operation_id = ?)${pendingGuard}${chunkGuard}`,
-          )
-          .bind(
-            deliveryId,
-            input.capabilityId,
-            payloadKey,
-            input.payloadLength,
-            input.expiresAt,
-            input.operationId,
-            input.operationDigest,
-            gateChanges,
-            input.capabilityId,
-            input.now,
-            input.operationId,
-            ...pendingValues,
-            ...chunkValues,
-          ),
-      );
-    } else {
-      statements.push(
-        this.database
-          .prepare(
-            `INSERT INTO quota_accounts(relationship_id, committed_bytes, reserved_bytes, object_count, updated_at) SELECT relationship_id, 0, ?, 1, ? FROM capabilities WHERE changes() = ? AND id = ? AND expires_at > ? AND revoked_at IS NULL AND ? <= ? AND NOT EXISTS (SELECT 1 FROM reservations WHERE operation_id = ?) AND NOT EXISTS (SELECT 1 FROM deliveries WHERE operation_id = ?)${pendingGuard} ON CONFLICT(relationship_id) DO UPDATE SET reserved_bytes = reserved_bytes + excluded.reserved_bytes, object_count = object_count + 1, updated_at = excluded.updated_at WHERE committed_bytes + reserved_bytes + excluded.reserved_bytes <= ? AND object_count < ?`,
-          )
-          .bind(
-            input.payloadLength,
-            input.now,
-            gateChanges,
-            input.capabilityId,
-            input.now,
-            input.payloadLength,
-            input.maximumTotalBytes ?? Number.MAX_SAFE_INTEGER,
-            input.operationId,
-            input.operationId,
-            ...pendingValues,
-            input.maximumTotalBytes ?? Number.MAX_SAFE_INTEGER,
-            input.maximumObjectsPerCapability ?? Number.MAX_SAFE_INTEGER,
-          ),
-      );
-      statements.push(
-        this.database
-          .prepare(
-            `INSERT INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1${chunkGuard}`,
-          )
-          .bind(
-            deliveryId,
-            input.capabilityId,
-            payloadKey,
-            input.payloadLength,
-            input.expiresAt,
-            input.operationId,
-            input.operationDigest,
-            ...chunkValues,
-          ),
-      );
-    }
-
-    // A D1 batch commits only if every statement succeeds. This raises a
-    // bounded NOT NULL violation when the preceding conditional
-    // mutation did not admit either a new reservation or an exact retry, so
-    // failed authorization/rate/quota checks cannot leave nonce or rate rows.
-    statements.push(
+    const statements = [
+      ...this.reservationAuthorizationStatements(input),
+      ...this.reservationStatements(input, deliveryId, payloadKey),
+      // A D1 batch commits only if every statement succeeds. This raises a
+      // bounded NOT NULL violation when the preceding conditional
+      // mutation did not admit either a new reservation or an exact retry, so
+      // failed authorization/rate/quota checks cannot leave nonce or rate rows.
       this.database
         .prepare(
           "INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-request-admission-assertion', NULL WHERE changes() != 1 AND NOT EXISTS (SELECT 1 FROM reservations WHERE operation_id = ? AND operation_digest = ?) AND NOT EXISTS (SELECT 1 FROM deliveries WHERE operation_id = ? AND operation_digest = ?)",
@@ -1419,64 +1248,180 @@ export class D1V2Repository
           input.operationId,
           input.operationDigest,
         ),
-    );
-    if (input.consumeControlEvents?.ids.length) {
-      const placeholders = input.consumeControlEvents.ids
-        .map(() => '?')
-        .join(', ');
+    ];
+    const consumed = input.consumeControlEvents;
+    if (consumed?.ids.length) {
       statements.push(
         this.database
           .prepare(
-            `UPDATE control_events SET consumed_at = ? WHERE consumed_at IS NULL AND relationship_id = ? AND direction = ? AND id IN (${placeholders})`,
+            `UPDATE control_events SET consumed_at = ? WHERE consumed_at IS NULL AND relationship_id = ? AND direction = ? AND id IN (${consumed.ids.map(() => '?').join(', ')})`,
           )
           .bind(
-            input.consumeControlEvents.now,
-            input.consumeControlEvents.relationshipId,
-            directionNumber(input.consumeControlEvents.direction),
-            ...input.consumeControlEvents.ids,
+            consumed.now,
+            consumed.relationshipId,
+            directionNumber(consumed.direction),
+            ...consumed.ids,
           ),
       );
     }
     try {
       await this.database.batch<D1RunResultLike>(statements);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        /maintenance_leases\.expires_at/i.test(error.message)
-      ) {
-        // A spent proof nonce is a replay whatever else the request asks for,
-        // so it outranks the idempotency and conflict answers below. Without
-        // this an exact replay of a published operation would be admitted here
-        // and refused by the Memory and SQLite repositories.
-        if (
-          authorization?.claims.length &&
-          (await this.hasLiveNonce(authorization.claims, input.now))
-        ) {
-          throw new Error('Request authorization is unavailable.');
-        }
-        const prior = await this.database
-          .prepare(
-            'SELECT operation_digest FROM reservations WHERE operation_id = ? UNION ALL SELECT operation_digest FROM deliveries WHERE operation_id = ? LIMIT 1',
-          )
-          .bind(input.operationId, input.operationId)
-          .first<Row>();
-        if (prior) {
-          this.requireMatchingOperation(
-            d1Bytes(prior.operation_digest),
-            input.operationDigest,
-          );
-        }
-        if (authorizationIndex !== undefined) {
-          throw new Error('Request authorization is unavailable.');
-        }
-        if (input.maximumTotalBytes !== undefined) {
-          throw new Error('Relationship delivery quota is exhausted.');
-        }
-        throw new Error('Delivery capability is not active.');
+      if (isAdmissionAssertion(error)) {
+        return this.rejectReservation(input);
       }
       throw error;
     }
+    return this.readReservation(input);
+  }
 
+  /**
+   * Gates the reservation on the request's proofs, or on the capability alone
+   * when the request carries none. Either way the gate's last statement
+   * changes exactly one row on admission, which the reservation insert reads
+   * through `changes()`.
+   */
+  private reservationAuthorizationStatements(
+    input: ReservationInput,
+  ): D1Statement[] {
+    const authorization = input.authorization;
+    if (!authorization?.claims.length) {
+      // `changes()` carries the active-capability decision into the following
+      // reservation mutation without a preceding read or state rewrite.
+      return [
+        this.database
+          .prepare(
+            'UPDATE capabilities SET created_at = created_at WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
+          )
+          .bind(input.capabilityId, input.now),
+      ];
+    }
+    const claims = authorization.claims;
+    const counts = countV2AuthorizationClaims(claims);
+    if (!counts) {
+      throw new Error('Request authorization nonce is duplicated.');
+    }
+    return [
+      // A replayed proof nonce must fail the whole request even when the
+      // operation it names was already published, so this runs before the
+      // claim insert makes every claimed nonce present. `changes()` is not
+      // read by the claim insert, so an extra statement here is safe.
+      this.database
+        .prepare(
+          `WITH claims(capability_id, nonce) AS (VALUES ${claims.map(() => '(?, ?)').join(', ')}) INSERT INTO maintenance_leases(name, expires_at) SELECT 'v2-request-nonce-assertion', NULL WHERE EXISTS (SELECT 1 FROM nonces n JOIN claims c ON c.capability_id = n.capability_id AND c.nonce = n.nonce WHERE n.expires_at >= ?)`,
+        )
+        .bind(
+          ...claims.flatMap(({ capabilityId, nonce }) => [capabilityId, nonce]),
+          input.now,
+        ),
+      ...this.claimStatements(
+        authorization,
+        counts,
+        input.now,
+        input.capabilityId,
+      ),
+    ];
+  }
+
+  /**
+   * Inserts the reservation when the authorization gate admitted the request.
+   * A quota-bounded reservation first charges the relationship's quota account,
+   * and the reservation insert then depends on that charge.
+   */
+  private reservationStatements(
+    input: ReservationInput,
+    deliveryId: string,
+    payloadKey: string,
+  ): D1Statement[] {
+    const pending = pendingDeliveryGuard(input);
+    const chunk = chunkReservationGuard(input, deliveryId);
+    const reservation = [
+      deliveryId,
+      input.capabilityId,
+      payloadKey,
+      input.payloadLength,
+      input.expiresAt,
+      input.operationId,
+      input.operationDigest,
+    ];
+    if (
+      input.maximumTotalBytes === undefined &&
+      input.maximumObjectsPerCapability === undefined
+    ) {
+      return [
+        this.database
+          .prepare(
+            `INSERT OR IGNORE INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1 AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL) AND NOT EXISTS (SELECT 1 FROM deliveries WHERE operation_id = ?)${pending.sql}${chunk.sql}`,
+          )
+          .bind(
+            ...reservation,
+            input.capabilityId,
+            input.now,
+            input.operationId,
+            ...pending.values,
+            ...chunk.values,
+          ),
+      ];
+    }
+    const maximumTotalBytes =
+      input.maximumTotalBytes ?? Number.MAX_SAFE_INTEGER;
+    return [
+      this.database
+        .prepare(
+          `INSERT INTO quota_accounts(relationship_id, committed_bytes, reserved_bytes, object_count, updated_at) SELECT relationship_id, 0, ?, 1, ? FROM capabilities WHERE changes() = 1 AND id = ? AND expires_at > ? AND revoked_at IS NULL AND ? <= ? AND NOT EXISTS (SELECT 1 FROM reservations WHERE operation_id = ?) AND NOT EXISTS (SELECT 1 FROM deliveries WHERE operation_id = ?)${pending.sql} ON CONFLICT(relationship_id) DO UPDATE SET reserved_bytes = reserved_bytes + excluded.reserved_bytes, object_count = object_count + 1, updated_at = excluded.updated_at WHERE committed_bytes + reserved_bytes + excluded.reserved_bytes <= ? AND object_count < ?`,
+        )
+        .bind(
+          input.payloadLength,
+          input.now,
+          input.capabilityId,
+          input.now,
+          input.payloadLength,
+          maximumTotalBytes,
+          input.operationId,
+          input.operationId,
+          ...pending.values,
+          maximumTotalBytes,
+          input.maximumObjectsPerCapability ?? Number.MAX_SAFE_INTEGER,
+        ),
+      this.database
+        .prepare(
+          `INSERT INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1${chunk.sql}`,
+        )
+        .bind(...reservation, ...chunk.values),
+    ];
+  }
+
+  /** Names the reason a reservation batch was refused by its assertion. */
+  private async rejectReservation(input: ReservationInput): Promise<never> {
+    const claims = input.authorization?.claims ?? [];
+    // A spent proof nonce is a replay whatever else the request asks for,
+    // so it outranks the idempotency and conflict answers below. Without
+    // this an exact replay of a published operation would be admitted here
+    // and refused by the Memory and SQLite repositories.
+    if (claims.length && (await this.hasLiveNonce(claims, input.now))) {
+      throw new Error('Request authorization is unavailable.');
+    }
+    const prior = await this.database
+      .prepare(
+        'SELECT operation_digest FROM reservations WHERE operation_id = ? UNION ALL SELECT operation_digest FROM deliveries WHERE operation_id = ? LIMIT 1',
+      )
+      .bind(input.operationId, input.operationId)
+      .first<Row>();
+    if (prior) {
+      this.requireMatchingOperation(
+        d1Bytes(prior.operation_digest),
+        input.operationDigest,
+      );
+    }
+    if (claims.length) {
+      throw new Error('Request authorization is unavailable.');
+    }
+    throw reservationRefusal(input);
+  }
+
+  private async readReservation(
+    input: ReservationInput,
+  ): Promise<V2DeliveryReservation | { existing: V2RepositoryDelivery }> {
     const reservation = await this.database
       .prepare(
         'SELECT delivery_id, payload_key, expires_at, operation_digest FROM reservations WHERE operation_id = ?',
@@ -1499,10 +1444,7 @@ export class D1V2Repository
     // insert and read. The delivery row remains the durable idempotency record.
     const raced = await this.findDeliveryByOperation(input.operationId);
     if (!raced) {
-      if (input.maximumTotalBytes !== undefined) {
-        throw new Error('Relationship delivery quota is exhausted.');
-      }
-      throw new Error('Delivery capability is not active.');
+      throw reservationRefusal(input);
     }
     this.requireMatchingOperation(raced.operationDigest, input.operationDigest);
     return { existing: raced };
@@ -1662,85 +1604,11 @@ export class D1V2Repository
     pendingEpochs: Set<number>;
     authorizationAccepted: boolean;
   }> {
-    if (input.authorization?.claims.length) {
-      const claims = input.authorization.claims;
-      const keys = new Set(
-        claims.map(
-          ({ capabilityId, nonce }) =>
-            `${capabilityId}:${Array.from(nonce).join(',')}`,
-        ),
-      );
-      if (keys.size !== claims.length) {
-        return this.rejectedInbox();
-      }
-      const counts = new Map<string, number>();
-      for (const claim of claims) {
-        counts.set(
-          claim.capabilityId,
-          (counts.get(claim.capabilityId) ?? 0) + 1,
-        );
-      }
-      const claimPlaceholders = claims.map(() => '(?, ?, ?)').join(', ');
-      const countPlaceholders = Array.from(counts)
-        .map(() => '(?, ?)')
-        .join(', ');
-      const statements: ReturnType<D1DatabaseLike['prepare']>[] = [
-        this.database
-          .prepare(
-            `WITH claims(capability_id, nonce, expires_at) AS (VALUES ${claimPlaceholders}), counts(capability_id, claim_count) AS (VALUES ${countPlaceholders}), conflict AS (SELECT 1 FROM nonces n JOIN claims c ON c.capability_id = n.capability_id AND c.nonce = n.nonce WHERE n.expires_at >= ? LIMIT 1), inactive AS (SELECT 1 FROM claims cl LEFT JOIN capabilities c ON c.id = cl.capability_id AND c.expires_at > ? AND c.revoked_at IS NULL WHERE c.id IS NULL LIMIT 1), rate_exceeded AS (SELECT 1 FROM counts cl LEFT JOIN rate_windows r ON r.capability_id = cl.capability_id AND r.minute = ? WHERE COALESCE(r.count, 0) + cl.claim_count > ? LIMIT 1) INSERT INTO nonces(capability_id, nonce, expires_at) SELECT capability_id, nonce, expires_at FROM claims WHERE NOT EXISTS (SELECT 1 FROM conflict) AND NOT EXISTS (SELECT 1 FROM inactive) AND NOT EXISTS (SELECT 1 FROM rate_exceeded) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?`,
-          )
-          .bind(
-            ...claims.flatMap(({ capabilityId, nonce, expiresAt }) => [
-              capabilityId,
-              nonce,
-              expiresAt,
-            ]),
-            ...Array.from(counts)
-              .map(([capabilityId, count]) => [capabilityId, count])
-              .flat(),
-            input.now,
-            input.now,
-            Math.floor(input.now / 60),
-            input.authorization.maximumRequestsPerMinute,
-            input.now,
-          ),
-      ];
-      let expectedChanges = claims.length;
-      for (const [capabilityId, count] of counts) {
-        statements.push(
-          this.database
-            .prepare(
-              'INSERT INTO rate_windows(capability_id, minute, count) SELECT ?, ?, ? WHERE changes() = ? ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count WHERE count + excluded.count <= ?',
-            )
-            .bind(
-              capabilityId,
-              Math.floor(input.now / 60),
-              count,
-              expectedChanges,
-              input.authorization.maximumRequestsPerMinute,
-            ),
-        );
-        expectedChanges = 1;
-      }
-      const ids = input.authorization.consumeControlEventIds ?? [];
-      if (ids.length) {
-        statements.push(
-          this.database
-            .prepare(
-              `UPDATE control_events SET consumed_at = ? WHERE changes() = 1 AND consumed_at IS NULL AND relationship_id = ? AND direction = ? AND id IN (${ids.map(() => '?').join(', ')})`,
-            )
-            .bind(
-              input.now,
-              input.relationshipId,
-              directionNumber(input.direction),
-              ...ids,
-            ),
-        );
-      }
-      const results = await this.database.batch<D1RunResultLike>(statements);
-      if (results[0]?.meta?.changes !== claims.length) {
-        return this.rejectedInbox();
-      }
+    if (
+      input.authorization?.claims.length &&
+      !(await this.claimInboxAuthorization(input, input.authorization))
+    ) {
+      return this.rejectedInbox();
     }
     const [delivery, controlEvents, pendingEpochs] = await Promise.all([
       this.queryDelivery(
@@ -1770,6 +1638,42 @@ export class D1V2Repository
       pendingEpochs,
       authorizationAccepted: true,
     };
+  }
+
+  /**
+   * Spends the inbox request's proofs and acknowledges its control events in
+   * one batch. The acknowledgement runs only when the last rate-window charge
+   * was admitted, and a refused claim rolls nothing forward.
+   */
+  private async claimInboxAuthorization(
+    input: Parameters<V2Repository['queryInbox']>[0],
+    authorization: NonNullable<
+      Parameters<V2Repository['queryInbox']>[0]['authorization']
+    >,
+  ): Promise<boolean> {
+    const claims = authorization.claims;
+    const counts = countV2AuthorizationClaims(claims);
+    if (!counts) {
+      return false;
+    }
+    const statements = this.claimStatements(authorization, counts, input.now);
+    const ids = authorization.consumeControlEventIds ?? [];
+    if (ids.length) {
+      statements.push(
+        this.database
+          .prepare(
+            `UPDATE control_events SET consumed_at = ? WHERE changes() = 1 AND consumed_at IS NULL AND relationship_id = ? AND direction = ? AND id IN (${ids.map(() => '?').join(', ')})`,
+          )
+          .bind(
+            input.now,
+            input.relationshipId,
+            directionNumber(input.direction),
+            ...ids,
+          ),
+      );
+    }
+    const results = await this.database.batch<D1RunResultLike>(statements);
+    return results[0]?.meta?.changes === claims.length;
   }
 
   private rejectedInbox() {
@@ -1852,68 +1756,14 @@ export class D1V2Repository
     let eventIndex: number;
     let marker: string | undefined;
     if (authorization?.claims.length) {
-      const claims = authorization.claims;
-      const keys = new Set(
-        claims.map(
-          ({ capabilityId, nonce }) =>
-            `${capabilityId}:${Array.from(nonce).join(',')}`,
-        ),
-      );
-      if (keys.size !== claims.length) {
+      const counts = countV2AuthorizationClaims(authorization.claims);
+      if (!counts) {
         return { authorizationAccepted: false };
-      }
-      const counts = new Map<string, number>();
-      for (const claim of claims) {
-        counts.set(
-          claim.capabilityId,
-          (counts.get(claim.capabilityId) ?? 0) + 1,
-        );
       }
       authorizationIndex = statements.length;
       statements.push(
-        this.database
-          .prepare(
-            `WITH claims(capability_id, nonce, expires_at) AS (VALUES ${claims.map(() => '(?, ?, ?)').join(', ')}), counts(capability_id, claim_count) AS (VALUES ${Array.from(
-              counts,
-            )
-              .map(() => '(?, ?)')
-              .join(
-                ', ',
-              )}), conflict AS (SELECT 1 FROM nonces n JOIN claims c ON c.capability_id = n.capability_id AND c.nonce = n.nonce WHERE n.expires_at >= ? LIMIT 1), inactive AS (SELECT 1 FROM claims cl LEFT JOIN capabilities c ON c.id = cl.capability_id AND c.expires_at > ? AND c.revoked_at IS NULL WHERE c.id IS NULL LIMIT 1), rate_exceeded AS (SELECT 1 FROM counts cl LEFT JOIN rate_windows r ON r.capability_id = cl.capability_id AND r.minute = ? WHERE COALESCE(r.count, 0) + cl.claim_count > ? LIMIT 1) INSERT INTO nonces(capability_id, nonce, expires_at) SELECT capability_id, nonce, expires_at FROM claims WHERE NOT EXISTS (SELECT 1 FROM conflict) AND NOT EXISTS (SELECT 1 FROM inactive) AND NOT EXISTS (SELECT 1 FROM rate_exceeded) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?`,
-          )
-          .bind(
-            ...claims.flatMap(({ capabilityId, nonce, expiresAt }) => [
-              capabilityId,
-              nonce,
-              expiresAt,
-            ]),
-            ...Array.from(counts)
-              .map(([capabilityId, count]) => [capabilityId, count])
-              .flat(),
-            completion.now,
-            completion.now,
-            Math.floor(completion.now / 60),
-            authorization.maximumRequestsPerMinute,
-            completion.now,
-          ),
+        ...this.claimStatements(authorization, counts, completion.now),
       );
-      let expectedChanges = claims.length;
-      for (const [capabilityId, count] of counts) {
-        statements.push(
-          this.database
-            .prepare(
-              'INSERT INTO rate_windows(capability_id, minute, count) SELECT ?, ?, ? WHERE changes() = ? ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count WHERE count + excluded.count <= ?',
-            )
-            .bind(
-              capabilityId,
-              Math.floor(completion.now / 60),
-              count,
-              expectedChanges,
-              authorization.maximumRequestsPerMinute,
-            ),
-        );
-        expectedChanges = 1;
-      }
       marker = `v2-completion-admission:${Array.from(
         completion.operationId,
         (byte) => byte.toString(16).padStart(2, '0'),
@@ -2061,68 +1911,14 @@ export class D1V2Repository
     let authorizationIndex: number | undefined;
     let marker: string | undefined;
     if (authorization?.claims.length) {
-      const claims = authorization.claims;
-      const keys = new Set(
-        claims.map(
-          ({ capabilityId, nonce }) =>
-            `${capabilityId}:${Array.from(nonce).join(',')}`,
-        ),
-      );
-      if (keys.size !== claims.length) {
+      const counts = countV2AuthorizationClaims(authorization.claims);
+      if (!counts) {
         return { authorizationAccepted: false };
       }
-      const counts = new Map<string, number>();
-      for (const claim of claims) {
-        counts.set(
-          claim.capabilityId,
-          (counts.get(claim.capabilityId) ?? 0) + 1,
-        );
-      }
-      authorizationIndex = 0;
+      authorizationIndex = statements.length;
       statements.push(
-        this.database
-          .prepare(
-            `WITH claims(capability_id, nonce, expires_at) AS (VALUES ${claims.map(() => '(?, ?, ?)').join(', ')}), counts(capability_id, claim_count) AS (VALUES ${Array.from(
-              counts,
-            )
-              .map(() => '(?, ?)')
-              .join(
-                ', ',
-              )}), conflict AS (SELECT 1 FROM nonces n JOIN claims c ON c.capability_id = n.capability_id AND c.nonce = n.nonce WHERE n.expires_at >= ? LIMIT 1), inactive AS (SELECT 1 FROM claims cl LEFT JOIN capabilities c ON c.id = cl.capability_id AND c.expires_at > ? AND c.revoked_at IS NULL WHERE c.id IS NULL LIMIT 1), rate_exceeded AS (SELECT 1 FROM counts cl LEFT JOIN rate_windows r ON r.capability_id = cl.capability_id AND r.minute = ? WHERE COALESCE(r.count, 0) + cl.claim_count > ? LIMIT 1) INSERT INTO nonces(capability_id, nonce, expires_at) SELECT capability_id, nonce, expires_at FROM claims WHERE NOT EXISTS (SELECT 1 FROM conflict) AND NOT EXISTS (SELECT 1 FROM inactive) AND NOT EXISTS (SELECT 1 FROM rate_exceeded) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?`,
-          )
-          .bind(
-            ...claims.flatMap(({ capabilityId, nonce, expiresAt }) => [
-              capabilityId,
-              nonce,
-              expiresAt,
-            ]),
-            ...Array.from(counts)
-              .map(([capabilityId, count]) => [capabilityId, count])
-              .flat(),
-            event.createdAt,
-            event.createdAt,
-            Math.floor(event.createdAt / 60),
-            authorization.maximumRequestsPerMinute,
-            event.createdAt,
-          ),
+        ...this.claimStatements(authorization, counts, event.createdAt),
       );
-      let expectedChanges = claims.length;
-      for (const [capabilityId, count] of counts) {
-        statements.push(
-          this.database
-            .prepare(
-              'INSERT INTO rate_windows(capability_id, minute, count) SELECT ?, ?, ? WHERE changes() = ? ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count WHERE count + excluded.count <= ?',
-            )
-            .bind(
-              capabilityId,
-              Math.floor(event.createdAt / 60),
-              count,
-              expectedChanges,
-              authorization.maximumRequestsPerMinute,
-            ),
-        );
-        expectedChanges = 1;
-      }
       marker = `v2-control-admission:${Array.from(event.operationId, (byte) =>
         byte.toString(16).padStart(2, '0'),
       ).join('')}`;
@@ -2386,13 +2182,7 @@ export class D1V2Repository
           ...expiredReservations.map((row) => String(row.payload_key)),
           ...expiredStaging.map((row) => String(row.body_key)),
           ...expiredDeliveryParts.map((row) => String(row.body_key)),
-          ...expiredChunkParts.flatMap((row) =>
-            row.body_key === null || row.body_key === undefined
-              ? row.committed_at === null || row.committed_at === undefined
-                ? [v2StagedChunkKey(String(row.upload_id), String(row.part_id))]
-                : []
-              : [String(row.body_key)],
-          ),
+          ...expiredChunkParts.flatMap(v2ExpiredChunkPartBodyKeys),
         ]),
       ),
       deletedNonces,
@@ -2559,15 +2349,9 @@ export class D1V2Repository
     return (result.meta?.changes ?? 0) > 0;
   }
 
-  async relationshipStatus(relationshipId: string): Promise<{
-    fullyRevoked: boolean;
-    tuples: Array<{
-      direction: V2RepositoryCapability['direction'];
-      scope: V2RepositoryCapability['scope'];
-      revoked: boolean;
-      rotatedAt: number;
-    }>;
-  }> {
+  async relationshipStatus(
+    relationshipId: string,
+  ): Promise<V2RelationshipStatus> {
     const [capabilities, revocations] = await Promise.all([
       this.database
         .prepare(
@@ -2582,78 +2366,11 @@ export class D1V2Repository
         .bind(relationshipId)
         .all(),
     ]);
-    const revocationRows = rows(revocations);
-    const fullyRevoked = revocationRows.some(
-      (row) => row.direction === null && row.scope === null,
-    );
-    const tuples = new Map<
-      string,
-      {
-        direction: V2RepositoryCapability['direction'];
-        scope: V2RepositoryCapability['scope'];
-        revoked: boolean;
-        rotatedAt: number;
-      }
-    >();
-    const revokedByRecord = (
-      direction: V2RepositoryCapability['direction'],
-      scope: V2RepositoryCapability['scope'],
-    ): number | undefined => {
-      const records = revocationRows.filter(
-        (row) =>
-          (row.direction === null ||
-            directionFromRow(row.direction) === direction) &&
-          (row.scope === null || row.scope === scope),
-      );
-      return records.length === 0
-        ? undefined
-        : Math.max(...records.map((row) => Number(row.created_at)));
-    };
-    for (const row of rows(capabilities)) {
-      const direction = directionFromRow(row.direction);
-      const scope = row.scope as V2RepositoryCapability['scope'];
-      const key = `${direction}|${scope}`;
-      const revokedAt = optionalNumber(row.revoked_at);
-      const recordedRevocation = revokedByRecord(direction, scope);
-      const existing = tuples.get(key);
-      const rotatedAt = Math.max(
-        Number(row.created_at),
-        revokedAt ?? 0,
-        recordedRevocation ?? 0,
-        existing?.rotatedAt ?? 0,
-      );
-      tuples.set(key, {
-        direction,
-        scope,
-        revoked:
-          fullyRevoked ||
-          revokedAt !== undefined ||
-          recordedRevocation !== undefined ||
-          existing?.revoked === true,
-        rotatedAt,
-      });
-    }
-    for (const row of revocationRows) {
-      if (row.direction === null || row.scope === null) {
-        continue;
-      }
-      const direction = directionFromRow(row.direction);
-      const scope = row.scope as V2RepositoryCapability['scope'];
-      const key = `${direction}|${scope}`;
-      const existing = tuples.get(key);
-      tuples.set(key, {
-        direction,
-        scope,
-        revoked: true,
-        rotatedAt: Math.max(existing?.rotatedAt ?? 0, Number(row.created_at)),
-      });
-    }
-    return {
-      fullyRevoked,
-      tuples: Array.from(tuples.values()).sort((a, b) =>
-        `${a.direction}|${a.scope}`.localeCompare(`${b.direction}|${b.scope}`),
-      ),
-    };
+    return v2RelationshipStatusFromRows({
+      relationshipRevoked: false,
+      capabilities: rows(capabilities),
+      revocations: rows(revocations),
+    });
   }
 
   private insertCapability(
@@ -2788,6 +2505,68 @@ export class D1V2Repository
    * Only the rolled-back failure path reads this, to tell a replay apart from
    * a quota or rate rejection.
    */
+  /**
+   * Spends every proof nonce and charges each capability's rate window. The
+   * nonce insert admits all claims or none; each rate-window charge runs only
+   * when the statement before it changed the rows it expected, so a refused
+   * claim charges nothing. `activeCapabilityId` also requires the addressed
+   * capability to be live when the nonces are spent.
+   */
+  private claimStatements(
+    authorization: V2RepositoryAuthorization,
+    counts: ReadonlyMap<string, number>,
+    now: number,
+    activeCapabilityId?: string,
+  ): D1Statement[] {
+    const { claims, maximumRequestsPerMinute } = authorization;
+    const minute = Math.floor(now / 60);
+    const activeGuard =
+      activeCapabilityId === undefined
+        ? { sql: '', values: [] }
+        : {
+            sql: ' AND EXISTS (SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL)',
+            values: [activeCapabilityId, now],
+          };
+    const statements = [
+      this.database
+        .prepare(
+          `WITH claims(capability_id, nonce, expires_at) AS (VALUES ${claims.map(() => '(?, ?, ?)').join(', ')}), counts(capability_id, claim_count) AS (VALUES ${Array.from(counts, () => '(?, ?)').join(', ')}), conflict AS (SELECT 1 FROM nonces n JOIN claims c ON c.capability_id = n.capability_id AND c.nonce = n.nonce WHERE n.expires_at >= ? LIMIT 1), inactive AS (SELECT 1 FROM claims cl LEFT JOIN capabilities c ON c.id = cl.capability_id AND c.expires_at > ? AND c.revoked_at IS NULL WHERE c.id IS NULL LIMIT 1), rate_exceeded AS (SELECT 1 FROM counts cl LEFT JOIN rate_windows r ON r.capability_id = cl.capability_id AND r.minute = ? WHERE COALESCE(r.count, 0) + cl.claim_count > ? LIMIT 1) INSERT INTO nonces(capability_id, nonce, expires_at) SELECT capability_id, nonce, expires_at FROM claims WHERE NOT EXISTS (SELECT 1 FROM conflict) AND NOT EXISTS (SELECT 1 FROM inactive) AND NOT EXISTS (SELECT 1 FROM rate_exceeded)${activeGuard.sql} ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?`,
+        )
+        .bind(
+          ...claims.flatMap(({ capabilityId, nonce, expiresAt }) => [
+            capabilityId,
+            nonce,
+            expiresAt,
+          ]),
+          ...Array.from(counts).flat(),
+          now,
+          now,
+          minute,
+          maximumRequestsPerMinute,
+          ...activeGuard.values,
+          now,
+        ),
+    ];
+    let expectedChanges = claims.length;
+    for (const [capabilityId, count] of counts) {
+      statements.push(
+        this.database
+          .prepare(
+            'INSERT INTO rate_windows(capability_id, minute, count) SELECT ?, ?, ? WHERE changes() = ? ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count WHERE count + excluded.count <= ?',
+          )
+          .bind(
+            capabilityId,
+            minute,
+            count,
+            expectedChanges,
+            maximumRequestsPerMinute,
+          ),
+      );
+      expectedChanges = 1;
+    }
+    return statements;
+  }
+
   private async hasLiveNonce(
     claims: readonly { capabilityId: string; nonce: Uint8Array }[],
     now: number,
@@ -2926,24 +2705,7 @@ export class D1V2Repository
       ...(optionalNumber(row.committed_at) === undefined
         ? {}
         : { committedAt: optionalNumber(row.committed_at) }),
-      parts: parts.map((part) => ({
-        id: String(part.part_id),
-        ordinal: Number(part.ordinal),
-        length: Number(part.length),
-        digest: d1Bytes(part.digest),
-        ...(part.body_key === null || part.body_key === undefined
-          ? {}
-          : { bodyKey: String(part.body_key) }),
-        ...(optionalNumber(part.received_at) === undefined
-          ? {}
-          : { receivedAt: optionalNumber(part.received_at) }),
-        ...(part.operation_id === null || part.operation_id === undefined
-          ? {}
-          : {
-              operationId: d1Bytes(part.operation_id),
-              operationDigest: d1Bytes(part.operation_digest),
-            }),
-      })),
+      parts: parts.map(chunkUploadPartFromRow),
     };
   }
 
@@ -3000,6 +2762,27 @@ function slotClause(slots: readonly { slot: Uint8Array; epoch: number }[]): {
   return {
     clause: slots.map(() => '(slot = ? AND epoch = ?)').join(' OR '),
     values: slots.flatMap(({ slot, epoch }) => [slot, epoch]),
+  };
+}
+
+function chunkUploadPartFromRow(part: Row): V2ChunkUpload['parts'][number] {
+  return {
+    id: String(part.part_id),
+    ordinal: Number(part.ordinal),
+    length: Number(part.length),
+    digest: d1Bytes(part.digest),
+    ...(part.body_key === null || part.body_key === undefined
+      ? {}
+      : { bodyKey: String(part.body_key) }),
+    ...(optionalNumber(part.received_at) === undefined
+      ? {}
+      : { receivedAt: optionalNumber(part.received_at) }),
+    ...(part.operation_id === null || part.operation_id === undefined
+      ? {}
+      : {
+          operationId: d1Bytes(part.operation_id),
+          operationDigest: d1Bytes(part.operation_digest),
+        }),
   };
 }
 

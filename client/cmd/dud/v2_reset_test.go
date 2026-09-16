@@ -327,7 +327,7 @@ func TestV2RelationshipResetCleansOnlyTargetPeerGitState(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := newApp(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{})
-	probe := a.localV2GitCommand("rev-parse", "--git-common-dir")
+	probe := a.gitCommand("rev-parse", "--git-common-dir")
 	probe.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0")
 	if output, err := probe.Output(); err != nil || strings.TrimSpace(string(output)) != ".git" {
 		t.Fatalf("Git reset probe = %q, %v", output, err)

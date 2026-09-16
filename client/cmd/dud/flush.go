@@ -61,7 +61,9 @@ func (a *app) cmdFlush(args []string) error {
 	// The server already answers in JSON, so --json passes its body through
 	// unchanged rather than re-encoding fields this client does not own.
 	if jsonOutput {
-		a.out.Write(response.Body)
+		if _, err := a.out.Write(response.Body); err != nil {
+			return err
+		}
 		fmt.Fprintln(a.out)
 		return nil
 	}
@@ -69,7 +71,9 @@ func (a *app) cmdFlush(args []string) error {
 	if err := json.Unmarshal(response.Body, &summary); err != nil {
 		// An origin that answered with something else is still worth showing;
 		// the operator can read the body even when this client cannot parse it.
-		a.out.Write(response.Body)
+		if _, err := a.out.Write(response.Body); err != nil {
+			return err
+		}
 		fmt.Fprintln(a.out)
 		return nil
 	}

@@ -4,6 +4,7 @@
 import { decodeCbor, encodeCbor, type CborValue } from './cbor.js';
 import {
   bytesToHex,
+  hexToBytes,
   decryptV2TokenSecret,
   parseV2DeliveryProof,
   verifyV2DeliveryProof,
@@ -38,6 +39,7 @@ import type {
   V2BodyStore,
   V2Repository,
   V2RepositoryCapability,
+  V2RepositoryDelivery,
 } from './v2-repository.js';
 import { sha256 } from './sha256.js';
 import { createV2ChunkHandler } from './v2-chunk-service.js';
@@ -120,9 +122,7 @@ function idBytes(id: string): Uint8Array {
   if (!/^[a-f0-9]{32}$/.test(id)) {
     throw new Error('Repository returned an invalid delivery ID.');
   }
-  return Uint8Array.from(id.match(/.{2}/g)!, (value) =>
-    Number.parseInt(value, 16),
-  );
+  return hexToBytes(id);
 }
 
 function requireNumber(header: Map<number, CborValue>, key: number): number {
@@ -167,7 +167,9 @@ function boundedControlEvents<T extends { encryptedEnvelope: Uint8Array }>(
   return result;
 }
 
-function oppositeDirection(direction: V2RepositoryCapability['direction']) {
+function oppositeDirection(
+  direction: V2RepositoryCapability['direction'],
+): V2RepositoryCapability['direction'] {
   return direction === 'inviter->invitee'
     ? 'invitee->inviter'
     : 'inviter->invitee';
@@ -378,19 +380,144 @@ function requireDistinctNonceClaims(
   }
 }
 
+interface AuthorizedProof {
+  capability: V2RepositoryCapability;
+  nonce: Uint8Array;
+  expiresAt: number;
+}
+
+function proofClaims(proofs: readonly AuthorizedProof[]) {
+  return proofs.map(({ capability, nonce, expiresAt }) => ({
+    capabilityId: capability.id,
+    nonce,
+    expiresAt,
+  }));
+}
+
+/**
+ * Control proofs carried by a delivery must all address the delivering
+ * capability's relationship, in one direction.
+ */
+function controlProofRefusal(
+  capability: V2RepositoryCapability,
+  controls: readonly AuthorizedProof[],
+): Response | undefined {
+  if (
+    controls.some(
+      (control) =>
+        control.capability.relationshipId !== capability.relationshipId,
+    )
+  ) {
+    return v2ErrorResponse(
+      3,
+      'Delivery control proofs target another relationship.',
+    );
+  }
+  const direction = controls[0]?.capability.direction;
+  if (controls.some((control) => control.capability.direction !== direction)) {
+    return v2ErrorResponse(
+      3,
+      'Delivery control proofs use different directions.',
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Protocol §7.4: server-visible expiry may be earlier than the signed policy
+ * but never later, so the sender's own expiry is a ceiling alongside the
+ * capability lifetime and the deployment TTL cap.
+ */
+function deliveryExpiry(
+  header: Map<number, CborValue>,
+  capability: V2RepositoryCapability,
+  current: number,
+  maximumTtlSeconds = MAX_DELIVERY_TTL_SECONDS,
+): number {
+  const signedExpiresAt = (
+    header.get(V2_DELIVERY_REQUEST_KEYS.requestedPolicy) as Map<
+      number,
+      CborValue
+    >
+  ).get(V2_TRANSPORT_POLICY_KEYS.expiresAt) as number;
+  return Math.min(
+    capability.expiresAt,
+    current + Math.min(maximumTtlSeconds, MAX_DELIVERY_TTL_SECONDS),
+    signedExpiresAt,
+  );
+}
+
+function completionOperationDigest(
+  header: Map<number, CborValue>,
+  deliveryId: string,
+  operationId: Uint8Array,
+  acknowledgement: Uint8Array,
+): Uint8Array {
+  return sha256(
+    encodeCbor(
+      new Map<number, CborValue>([
+        [1, idBytes(deliveryId)],
+        [2, requireBytes(header, V2_COMPLETION_REQUEST_KEYS.sourceSlot)],
+        [3, requireBytes(header, V2_COMPLETION_REQUEST_KEYS.targetSlot)],
+        [4, requireBytes(header, V2_COMPLETION_REQUEST_KEYS.policyDigest)],
+        [5, requireBytes(header, V2_COMPLETION_REQUEST_KEYS.descriptorDigest)],
+        [6, header.get(V2_COMPLETION_REQUEST_KEYS.result)!],
+        [7, operationId],
+        [8, acknowledgement],
+      ]),
+    ),
+  );
+}
+
+/** The chunk manifest of a chunked delivery, or its inline payload fields. */
+function inboxDeliveryHeader(
+  header: Map<number, CborValue>,
+  delivery: V2RepositoryDelivery,
+): void {
+  header.set(V2_INBOX_RESPONSE_KEYS.deliveryId, idBytes(delivery.id));
+  header.set(V2_INBOX_RESPONSE_KEYS.slot, delivery.slot);
+  header.set(
+    V2_INBOX_RESPONSE_KEYS.encryptedDescriptor,
+    delivery.encryptedDescriptor,
+  );
+  const effectivePolicy = decodeCbor(delivery.effectivePolicy, {
+    maxBytes: 262_144,
+    maxMapPairs: 16,
+    maxDepth: 4,
+    requireDeterministic: true,
+  });
+  if (!(effectivePolicy instanceof Map)) {
+    throw new Error('Stored delivery policy is invalid.');
+  }
+  header.set(V2_INBOX_RESPONSE_KEYS.effectivePolicy, effectivePolicy);
+}
+
 /** Atomic delivery publication through the granular metadata repository. */
 export function createV2DeliveryHandler(
   dependencies: V2DeliveryHandlerDependencies,
 ) {
   const now = dependencies.now ?? (() => Date.now());
+  const limits = {
+    requestsPerMinute: dependencies.maximumRequestsPerMinute ?? 60,
+    concurrentUploads: dependencies.maximumConcurrentUploads ?? 4,
+    stagedBytes: dependencies.maximumStagedBytes ?? 200 * 1024 * 1024,
+    inboxControlEvents:
+      dependencies.maximumInboxControlEvents ?? MAX_INBOX_CONTROL_EVENTS,
+    inboxControlBytes:
+      dependencies.maximumInboxControlBytes ?? MAX_INBOX_CONTROL_BYTES,
+    pendingControlEvents:
+      dependencies.maximumPendingControlEvents ?? MAX_PENDING_CONTROL_EVENTS,
+    controlEventBytes:
+      dependencies.maximumControlEventBytes ?? MAX_CONTROL_EVENT_BYTES,
+  };
   const chunks = createV2ChunkHandler({
     repository: dependencies.repository,
     bodyStore: dependencies.bodyStore,
     deploymentKey: dependencies.deploymentKey,
     now,
-    maximumRequestsPerMinute: dependencies.maximumRequestsPerMinute ?? 60,
-    maximumConcurrentUploads: dependencies.maximumConcurrentUploads ?? 4,
-    maximumStagedBytes: dependencies.maximumStagedBytes ?? 200 * 1024 * 1024,
+    maximumRequestsPerMinute: limits.requestsPerMinute,
+    maximumConcurrentUploads: limits.concurrentUploads,
+    maximumStagedBytes: limits.stagedBytes,
     maximumDescriptorBytes: dependencies.maximumDescriptorBytes ?? 262_144,
     maximumTtlSeconds:
       dependencies.maximumTtlSeconds ?? MAX_DELIVERY_TTL_SECONDS,
@@ -457,9 +584,8 @@ export function createV2DeliveryHandler(
           expiresAt: current + MAX_PROOF_LIFETIME_SECONDS,
           now: current,
           reservedBytes: payloadLength,
-          maximumConcurrentUploads: dependencies.maximumConcurrentUploads ?? 4,
-          maximumStagedBytes:
-            dependencies.maximumStagedBytes ?? 200 * 1024 * 1024,
+          maximumConcurrentUploads: limits.concurrentUploads,
+          maximumStagedBytes: limits.stagedBytes,
         }),
       );
       await timing.measure('body', async () => {
@@ -472,34 +598,18 @@ export function createV2DeliveryHandler(
         await framed.verified;
       });
       const requestDigest = await framed.authorizationDigest;
-      const tokenSecret = await timing.measure('authorization', () =>
-        decryptV2TokenSecret(dependencies.deploymentKey, capability),
-      );
-      const verified = await timing.measure('authorization', () =>
-        verifyV2DeliveryProof({
-          tokenSecret,
-          capabilityLookupId: parsedProof.capabilityLookupId,
-          direction: capability.direction,
-          scope: 'write',
-          chain: slot.chain,
-          slot: slot.slot,
-          slotEpoch: slot.epoch,
-          method: request.method,
-          canonicalOrigin: origin,
-          normalizedPath: DELIVERY_PATH,
-          requestDigest,
-          proof: slot.proof,
-        }),
-      );
-      if (!verified || verified.operationIndex !== 0) {
-        return v2ErrorResponse(2, 'Delivery authorization proof is invalid.');
-      }
-      // Only a proven capability holder learns that its tuple is inactive.
-      if (
-        capability.expiresAt <= current ||
-        capability.revokedAt !== undefined
-      ) {
-        return v2ErrorResponse(3, 'Delivery capability is not active.');
+      const verified = await verifyWriteProof({
+        request,
+        origin,
+        capability,
+        capabilityLookupId: parsedProof.capabilityLookupId,
+        slot,
+        requestDigest,
+        current,
+        timing,
+      });
+      if (verified instanceof Response) {
+        return verified;
       }
       const controlQueries = (header.get(
         V2_DELIVERY_REQUEST_KEYS.controlQueries,
@@ -515,30 +625,11 @@ export function createV2DeliveryHandler(
           current,
         ),
       );
-      if (
-        controls.some(
-          ({ capability: controlCapability }) =>
-            controlCapability.relationshipId !== capability.relationshipId,
-        )
-      ) {
-        return v2ErrorResponse(
-          3,
-          'Delivery control proofs target another relationship.',
-        );
+      const controlRefusal = controlProofRefusal(capability, controls);
+      if (controlRefusal) {
+        return controlRefusal;
       }
       const controlDirection = controls[0]?.capability.direction;
-      if (
-        controlDirection !== undefined &&
-        controls.some(
-          ({ capability: controlCapability }) =>
-            controlCapability.direction !== controlDirection,
-        )
-      ) {
-        return v2ErrorResponse(
-          3,
-          'Delivery control proofs use different directions.',
-        );
-      }
       requireDistinctNonceClaims([
         { capability, nonce: verified.nonce },
         ...controls,
@@ -546,36 +637,22 @@ export function createV2DeliveryHandler(
       const processed = controlEventIds(
         header.get(V2_DELIVERY_REQUEST_KEYS.processedControlEventIds),
       );
-      if (processed.length > 0) {
-        if (controlDirection === undefined) {
-          return v2ErrorResponse(
-            1,
-            'Processed control events require control-slot proofs.',
-          );
-        }
+      if (processed.length > 0 && controlDirection === undefined) {
+        return v2ErrorResponse(
+          1,
+          'Processed control events require control-slot proofs.',
+        );
       }
       const operationId = requireBytes(
         header,
         V2_DELIVERY_REQUEST_KEYS.operationId,
       );
       const digest = publicationDigest(header, slot);
-      // Protocol §7.4: server-visible expiry may be earlier than the signed
-      // policy but never later, so the sender's own expiry is a ceiling here
-      // alongside the capability lifetime and the deployment TTL cap.
-      const signedExpiresAt = (
-        header.get(V2_DELIVERY_REQUEST_KEYS.requestedPolicy) as Map<
-          number,
-          CborValue
-        >
-      ).get(V2_TRANSPORT_POLICY_KEYS.expiresAt) as number;
-      const expiresAt = Math.min(
-        capability.expiresAt,
-        current +
-          Math.min(
-            dependencies.maximumTtlSeconds ?? MAX_DELIVERY_TTL_SECONDS,
-            MAX_DELIVERY_TTL_SECONDS,
-          ),
-        signedExpiresAt,
+      const expiresAt = deliveryExpiry(
+        header,
+        capability,
+        current,
+        dependencies.maximumTtlSeconds,
       );
       const reservation = await timing.measure('metadata', () =>
         dependencies.repository.reserveDelivery({
@@ -587,22 +664,15 @@ export function createV2DeliveryHandler(
           maximumPendingDeliveries: dependencies.maximumPendingDeliveries,
           maximumObjectsPerCapability: dependencies.maximumObjectsPerCapability,
           authorization: {
-            claims: [
+            claims: proofClaims([
               {
-                capabilityId: capability.id,
+                capability,
                 nonce: verified.nonce,
                 expiresAt: verified.expiresAt,
               },
-              ...controls.map(
-                ({ capability: controlCapability, nonce, expiresAt }) => ({
-                  capabilityId: controlCapability.id,
-                  nonce,
-                  expiresAt,
-                }),
-              ),
-            ],
-            maximumRequestsPerMinute:
-              dependencies.maximumRequestsPerMinute ?? 60,
+              ...controls,
+            ]),
+            maximumRequestsPerMinute: limits.requestsPerMinute,
           },
           consumeControlEvents:
             processed.length > 0 && controlDirection !== undefined
@@ -617,77 +687,44 @@ export function createV2DeliveryHandler(
           expiresAt,
         }),
       );
-      let deliveryId: string;
-      let idempotent: boolean;
-      if ('existing' in reservation) {
-        await timing.measure('body', () =>
-          dependencies.bodyStore.delete(stagedKey!),
-        );
-        await timing.measure('metadata', () =>
-          dependencies.repository.releaseStagedBody(stagingId!),
-        );
-        stagedKey = undefined;
-        stagingId = undefined;
-        deliveryId = reservation.existing.id;
-        idempotent = true;
-      } else {
-        await timing.measure('body', () =>
-          dependencies.bodyStore.promote(stagedKey!, reservation.payloadKey),
-        );
-        await timing.measure('metadata', () =>
-          dependencies.repository.releaseStagedBody(stagingId!),
-        );
-        stagedKey = undefined;
-        stagingId = undefined;
-        const requestedPolicy = encodeCbor(
-          header.get(V2_DELIVERY_REQUEST_KEYS.requestedPolicy)!,
-        );
-        const published = await timing.measure('metadata', () =>
-          dependencies.repository.publishDelivery({
-            id: reservation.deliveryId,
-            relationshipId: capability.relationshipId,
-            direction: capability.direction,
-            slot: slot.slot,
-            epoch: slot.epoch,
-            encryptedDescriptor: requireBytes(
+      // A retried operation keeps the delivery it already published, so its
+      // staged copy is discarded instead of promoted.
+      await timing.measure('body', () =>
+        'existing' in reservation
+          ? dependencies.bodyStore.delete(stagedKey!)
+          : dependencies.bodyStore.promote(stagedKey!, reservation.payloadKey),
+      );
+      await timing.measure('metadata', () =>
+        dependencies.repository.releaseStagedBody(stagingId!),
+      );
+      stagedKey = undefined;
+      stagingId = undefined;
+      const { deliveryId, idempotent } =
+        'existing' in reservation
+          ? { deliveryId: reservation.existing.id, idempotent: true }
+          : await publishReserved({
+              reservation,
               header,
-              V2_DELIVERY_REQUEST_KEYS.encryptedDescriptor,
-            ),
-            requestedPolicy,
-            effectivePolicy: requestedPolicy,
-            policyDigest: sha256(requestedPolicy),
-            payloadKey: reservation.payloadKey,
-            payloadLength,
-            payloadDigest,
-            operationId,
-            operationDigest: digest,
-            createdAt: current,
-            expiresAt,
-          }),
-        );
-        deliveryId = published.delivery.id;
-        idempotent = published.idempotent;
-      }
-      const controlsResult = controlDirection
-        ? await timing.measure('metadata', () =>
-            dependencies.repository.queryInbox({
-              relationshipId: capability.relationshipId,
-              direction: controlDirection,
-              dataSlots: [],
-              controlSlots: controls.map(({ slot: controlSlot }) => ({
-                slot: controlSlot.slot,
-                epoch: controlSlot.epoch,
-              })),
-              maximumControlEvents:
-                dependencies.maximumInboxControlEvents ??
-                MAX_INBOX_CONTROL_EVENTS,
-              maximumControlBytes:
-                dependencies.maximumInboxControlBytes ??
-                MAX_INBOX_CONTROL_BYTES,
-              now: current,
-            }),
-          )
-        : undefined;
+              capability,
+              slot,
+              payloadLength,
+              payloadDigest,
+              operationId,
+              operationDigest: digest,
+              current,
+              expiresAt,
+              timing,
+            });
+      const controlsResult =
+        controlDirection === undefined
+          ? undefined
+          : await pendingControls(
+              capability.relationshipId,
+              controlDirection,
+              controls,
+              current,
+              timing,
+            );
       return deliveryResponse(
         deliveryId,
         header.get(V2_DELIVERY_REQUEST_KEYS.requestedPolicy)!,
@@ -717,6 +754,122 @@ export function createV2DeliveryHandler(
           .catch(() => undefined);
       }
     }
+  }
+
+  /**
+   * Verifies the delivery's write proof once its body has been read, since the
+   * proof binds the whole request digest. Only a proven capability holder
+   * learns that its tuple is inactive.
+   */
+  async function verifyWriteProof(input: {
+    request: Request;
+    origin: string;
+    capability: V2RepositoryCapability;
+    capabilityLookupId: Uint8Array;
+    slot: { chain: number; slot: Uint8Array; epoch: number; proof: Uint8Array };
+    requestDigest: Uint8Array;
+    current: number;
+    timing: V2TimingRecorder;
+  }): Promise<{ nonce: Uint8Array; expiresAt: number } | Response> {
+    const { capability, slot } = input;
+    const tokenSecret = await input.timing.measure('authorization', () =>
+      decryptV2TokenSecret(dependencies.deploymentKey, capability),
+    );
+    const verified = await input.timing.measure('authorization', () =>
+      verifyV2DeliveryProof({
+        tokenSecret,
+        capabilityLookupId: input.capabilityLookupId,
+        direction: capability.direction,
+        scope: 'write',
+        chain: slot.chain,
+        slot: slot.slot,
+        slotEpoch: slot.epoch,
+        method: input.request.method,
+        canonicalOrigin: input.origin,
+        normalizedPath: DELIVERY_PATH,
+        requestDigest: input.requestDigest,
+        proof: slot.proof,
+      }),
+    );
+    if (!verified || verified.operationIndex !== 0) {
+      return v2ErrorResponse(2, 'Delivery authorization proof is invalid.');
+    }
+    if (
+      capability.expiresAt <= input.current ||
+      capability.revokedAt !== undefined
+    ) {
+      return v2ErrorResponse(3, 'Delivery capability is not active.');
+    }
+    return verified;
+  }
+
+  async function publishReserved(input: {
+    reservation: { deliveryId: string; payloadKey: string };
+    header: Map<number, CborValue>;
+    capability: V2RepositoryCapability;
+    slot: { slot: Uint8Array; epoch: number };
+    payloadLength: number;
+    payloadDigest: Uint8Array;
+    operationId: Uint8Array;
+    operationDigest: Uint8Array;
+    current: number;
+    expiresAt: number;
+    timing: V2TimingRecorder;
+  }): Promise<{ deliveryId: string; idempotent: boolean }> {
+    const requestedPolicy = encodeCbor(
+      input.header.get(V2_DELIVERY_REQUEST_KEYS.requestedPolicy)!,
+    );
+    const published = await input.timing.measure('metadata', () =>
+      dependencies.repository.publishDelivery({
+        id: input.reservation.deliveryId,
+        relationshipId: input.capability.relationshipId,
+        direction: input.capability.direction,
+        slot: input.slot.slot,
+        epoch: input.slot.epoch,
+        encryptedDescriptor: requireBytes(
+          input.header,
+          V2_DELIVERY_REQUEST_KEYS.encryptedDescriptor,
+        ),
+        requestedPolicy,
+        effectivePolicy: requestedPolicy,
+        policyDigest: sha256(requestedPolicy),
+        payloadKey: input.reservation.payloadKey,
+        payloadLength: input.payloadLength,
+        payloadDigest: input.payloadDigest,
+        operationId: input.operationId,
+        operationDigest: input.operationDigest,
+        createdAt: input.current,
+        expiresAt: input.expiresAt,
+      }),
+    );
+    return {
+      deliveryId: published.delivery.id,
+      idempotent: published.idempotent,
+    };
+  }
+
+  /** Reads the control events pending on the slots a delivery proved. */
+  async function pendingControls(
+    relationshipId: string,
+    direction: V2RepositoryCapability['direction'],
+    controls: readonly { slot: { slot: Uint8Array; epoch: number } }[],
+    current: number,
+    timing: V2TimingRecorder,
+  ) {
+    return timing.measure('metadata', () =>
+      dependencies.repository.queryInbox({
+        relationshipId,
+        direction,
+        dataSlots: [],
+        controlSlots: controls.map(({ slot }) => ({
+          slot: slot.slot,
+          epoch: slot.epoch,
+        })),
+        maximumControlEvents: limits.inboxControlEvents,
+        maximumControlBytes: limits.inboxControlBytes,
+        now: current,
+      }),
+    );
   }
 
   async function inbox(
@@ -790,18 +943,11 @@ export function createV2DeliveryHandler(
             slot: slot.slot,
             epoch: slot.epoch,
           })),
-          maximumControlEvents:
-            dependencies.maximumInboxControlEvents ?? MAX_INBOX_CONTROL_EVENTS,
-          maximumControlBytes:
-            dependencies.maximumInboxControlBytes ?? MAX_INBOX_CONTROL_BYTES,
+          maximumControlEvents: limits.inboxControlEvents,
+          maximumControlBytes: limits.inboxControlBytes,
           authorization: {
-            claims: all.map(({ capability, nonce, expiresAt }) => ({
-              capabilityId: capability.id,
-              nonce,
-              expiresAt,
-            })),
-            maximumRequestsPerMinute:
-              dependencies.maximumRequestsPerMinute ?? 60,
+            claims: proofClaims(all),
+            maximumRequestsPerMinute: limits.requestsPerMinute,
             consumeControlEventIds: processed,
           },
           now: current,
@@ -824,74 +970,19 @@ export function createV2DeliveryHandler(
           V2_INBOX_RESPONSE_KEYS.controlEvents,
           boundedControlEvents(
             result.controlEvents,
-            dependencies.maximumInboxControlEvents ?? MAX_INBOX_CONTROL_EVENTS,
-            dependencies.maximumInboxControlBytes ?? MAX_INBOX_CONTROL_BYTES,
+            limits.inboxControlEvents,
+            limits.inboxControlBytes,
           ).map(eventResponse),
         ],
       ]);
-      let payload = emptyPayload();
-      if (result.delivery) {
-        header.set(
-          V2_INBOX_RESPONSE_KEYS.deliveryId,
-          idBytes(result.delivery.id),
-        );
-        header.set(V2_INBOX_RESPONSE_KEYS.slot, result.delivery.slot);
-        header.set(
-          V2_INBOX_RESPONSE_KEYS.encryptedDescriptor,
-          result.delivery.encryptedDescriptor,
-        );
-        const effectivePolicy = decodeCbor(result.delivery.effectivePolicy, {
-          maxBytes: 262_144,
-          maxMapPairs: 16,
-          maxDepth: 4,
-          requireDeterministic: true,
-        });
-        if (!(effectivePolicy instanceof Map)) {
-          throw new Error('Stored delivery policy is invalid.');
-        }
-        header.set(V2_INBOX_RESPONSE_KEYS.effectivePolicy, effectivePolicy);
-        if (result.delivery.parts) {
-          header.set(
-            V2_INBOX_RESPONSE_KEYS.chunkManifest,
-            result.delivery.parts.map(
-              (part) =>
-                new Map<number, CborValue>([
-                  [1, idBytes(part.id)],
-                  [2, part.length],
-                  [3, part.digest],
-                ]),
-            ),
-          );
-          header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, 0);
-          header.set(
-            V2_INBOX_RESPONSE_KEYS.payloadDigest,
-            sha256(new Uint8Array()),
-          );
-        } else {
-          const body = await timing.measure('body', () =>
-            dependencies.bodyStore.get(result.delivery!.payloadKey),
-          );
-          if (!body || body.size !== result.delivery.payloadLength) {
-            return v2ErrorResponse(13, 'Inbox payload is unavailable.');
-          }
-          header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, body.size);
-          header.set(
-            V2_INBOX_RESPONSE_KEYS.payloadDigest,
-            result.delivery.payloadDigest,
-          );
-          payload = body.body;
-        }
-        header.set(
-          V2_INBOX_RESPONSE_KEYS.moreDeliveries,
-          Array.from(result.pendingEpochs, (epoch) => epoch),
-        );
-      } else {
-        header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, 0);
-        header.set(
-          V2_INBOX_RESPONSE_KEYS.payloadDigest,
-          sha256(new Uint8Array()),
-        );
-        header.set(V2_INBOX_RESPONSE_KEYS.moreDeliveries, []);
+      const payload = await inboxPayload(
+        header,
+        result.delivery,
+        result.pendingEpochs,
+        timing,
+      );
+      if (payload instanceof Response) {
+        return payload;
       }
       const framed = frameStream(header, payload);
       return v2FramedResponse(framed.body, framed.contentLength);
@@ -903,6 +994,63 @@ export function createV2DeliveryHandler(
         INBOX_PATH,
       );
     }
+  }
+
+  /**
+   * Completes the inbox header for the delivery at the head of the slots, and
+   * returns the payload to frame after it: the stored body of an inline
+   * delivery, or nothing for a chunked delivery or an empty inbox.
+   */
+  async function inboxPayload(
+    header: Map<number, CborValue>,
+    delivery: V2RepositoryDelivery | null,
+    pendingEpochs: ReadonlySet<number>,
+    timing: V2TimingRecorder,
+  ): Promise<ReadableStream<Uint8Array> | Response> {
+    if (!delivery) {
+      header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, 0);
+      header.set(
+        V2_INBOX_RESPONSE_KEYS.payloadDigest,
+        sha256(new Uint8Array()),
+      );
+      header.set(V2_INBOX_RESPONSE_KEYS.moreDeliveries, []);
+      return emptyPayload();
+    }
+    inboxDeliveryHeader(header, delivery);
+    let payload = emptyPayload();
+    if (delivery.parts) {
+      header.set(
+        V2_INBOX_RESPONSE_KEYS.chunkManifest,
+        delivery.parts.map(
+          (part) =>
+            new Map<number, CborValue>([
+              [1, idBytes(part.id)],
+              [2, part.length],
+              [3, part.digest],
+            ]),
+        ),
+      );
+      header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, 0);
+      header.set(
+        V2_INBOX_RESPONSE_KEYS.payloadDigest,
+        sha256(new Uint8Array()),
+      );
+    } else {
+      const body = await timing.measure('body', () =>
+        dependencies.bodyStore.get(delivery.payloadKey),
+      );
+      if (!body || body.size !== delivery.payloadLength) {
+        return v2ErrorResponse(13, 'Inbox payload is unavailable.');
+      }
+      header.set(V2_INBOX_RESPONSE_KEYS.payloadLength, body.size);
+      header.set(V2_INBOX_RESPONSE_KEYS.payloadDigest, delivery.payloadDigest);
+      payload = body.body;
+    }
+    header.set(
+      V2_INBOX_RESPONSE_KEYS.moreDeliveries,
+      Array.from(pendingEpochs, (epoch) => epoch),
+    );
+    return payload;
   }
 
   async function complete(
@@ -973,78 +1121,21 @@ export function createV2DeliveryHandler(
           index: 1,
         },
       ];
-      const verifiedProofs: Array<{
-        capability: V2RepositoryCapability;
-        nonce: Uint8Array;
-        expiresAt: number;
-      }> = [];
+      const verifiedProofs: AuthorizedProof[] = [];
       for (const entry of slots) {
-        const slot = decodeV2SlotProof(entry.raw);
-        const parsed = parseV2DeliveryProof(slot.proof);
-        if (
-          !bytesEqual(slot.slot, entry.expectedSlot) ||
-          parsed.expiresAt < current ||
-          parsed.expiresAt > current + MAX_PROOF_LIFETIME_SECONDS ||
-          parsed.operationIndex !== entry.index
-        ) {
-          return v2ErrorResponse(
-            2,
-            'Completion authorization proof is invalid.',
-          );
-        }
-        const capability = await timing.measure('authorization', () =>
-          dependencies.repository.findCapabilityLookup(
-            parsed.capabilityLookupId,
-            slot.epoch,
-          ),
-        );
-        if (
-          !capability ||
-          capability.relationshipId !== delivery.relationshipId ||
-          capability.direction !== entry.direction ||
-          capability.scope !== entry.scope
-        ) {
-          return v2ErrorResponse(
-            2,
-            'Completion authorization proof is invalid.',
-          );
-        }
-        const verified = await timing.measure('authorization', async () =>
-          verifyV2DeliveryProof({
-            tokenSecret: await decryptV2TokenSecret(
-              dependencies.deploymentKey,
-              capability,
-            ),
-            capabilityLookupId: parsed.capabilityLookupId,
-            direction: capability.direction,
-            scope: capability.scope,
-            chain: slot.chain,
-            slot: slot.slot,
-            slotEpoch: slot.epoch,
-            method: 'POST',
-            canonicalOrigin: origin,
-            normalizedPath: `/v2/deliveries/${deliveryId}/complete`,
-            requestDigest,
-            proof: slot.proof,
-          }),
-        );
-        if (!verified) {
-          return v2ErrorResponse(
-            2,
-            'Completion authorization proof is invalid.',
-          );
-        }
-        if (
-          capability.expiresAt <= current ||
-          capability.revokedAt !== undefined
-        ) {
-          return v2ErrorResponse(3, 'Completion capability is not active.');
-        }
-        verifiedProofs.push({
-          capability,
-          nonce: verified.nonce,
-          expiresAt: verified.expiresAt,
+        const verified = await verifyCompletionProof({
+          ...entry,
+          delivery,
+          deliveryId,
+          origin,
+          requestDigest,
+          current,
+          timing,
         });
+        if (verified instanceof Response) {
+          return verified;
+        }
+        verifiedProofs.push(verified);
       }
       requireDistinctNonceClaims(verifiedProofs);
       const operationId = requireBytes(
@@ -1055,22 +1146,11 @@ export function createV2DeliveryHandler(
         header,
         V2_COMPLETION_REQUEST_KEYS.encryptedAcknowledgement,
       );
-      const operationDigest = sha256(
-        encodeCbor(
-          new Map<number, CborValue>([
-            [1, idBytes(deliveryId)],
-            [2, source],
-            [3, target],
-            [4, requireBytes(header, V2_COMPLETION_REQUEST_KEYS.policyDigest)],
-            [
-              5,
-              requireBytes(header, V2_COMPLETION_REQUEST_KEYS.descriptorDigest),
-            ],
-            [6, header.get(V2_COMPLETION_REQUEST_KEYS.result)!],
-            [7, operationId],
-            [8, acknowledgement],
-          ]),
-        ),
+      const operationDigest = completionOperationDigest(
+        header,
+        deliveryId,
+        operationId,
+        acknowledgement,
       );
       const result = header.get(V2_COMPLETION_REQUEST_KEYS.result) as 0 | 1;
       const completed = await timing.measure('metadata', () =>
@@ -1102,20 +1182,11 @@ export function createV2DeliveryHandler(
             ),
           },
           authorization: {
-            claims: verifiedProofs.map(({ capability, nonce, expiresAt }) => ({
-              capabilityId: capability.id,
-              nonce,
-              expiresAt,
-            })),
-            maximumRequestsPerMinute:
-              dependencies.maximumRequestsPerMinute ?? 60,
+            claims: proofClaims(verifiedProofs),
+            maximumRequestsPerMinute: limits.requestsPerMinute,
             controlQuota: {
-              maximumEvents:
-                dependencies.maximumPendingControlEvents ??
-                MAX_PENDING_CONTROL_EVENTS,
-              maximumBytes:
-                dependencies.maximumControlEventBytes ??
-                MAX_CONTROL_EVENT_BYTES,
+              maximumEvents: limits.pendingControlEvents,
+              maximumBytes: limits.controlEventBytes,
             },
           },
         }),
@@ -1141,6 +1212,81 @@ export function createV2DeliveryHandler(
         '/v2/deliveries/:id/complete',
       );
     }
+  }
+
+  /**
+   * Verifies one completion proof against the slot, scope, and direction its
+   * position requires. A proof that fails any check is refused uniformly, and
+   * only a verified holder learns that its capability is inactive.
+   */
+  async function verifyCompletionProof(input: {
+    raw: CborValue;
+    scope: 'ack' | 'write';
+    direction: V2RepositoryCapability['direction'];
+    expectedSlot: Uint8Array;
+    index: number;
+    delivery: V2RepositoryDelivery;
+    deliveryId: string;
+    origin: string;
+    requestDigest: Uint8Array;
+    current: number;
+    timing: V2TimingRecorder;
+  }): Promise<AuthorizedProof | Response> {
+    const invalid = () =>
+      v2ErrorResponse(2, 'Completion authorization proof is invalid.');
+    const slot = decodeV2SlotProof(input.raw);
+    const parsed = parseV2DeliveryProof(slot.proof);
+    if (
+      !bytesEqual(slot.slot, input.expectedSlot) ||
+      parsed.expiresAt < input.current ||
+      parsed.expiresAt > input.current + MAX_PROOF_LIFETIME_SECONDS ||
+      parsed.operationIndex !== input.index
+    ) {
+      return invalid();
+    }
+    const capability = await input.timing.measure('authorization', () =>
+      dependencies.repository.findCapabilityLookup(
+        parsed.capabilityLookupId,
+        slot.epoch,
+      ),
+    );
+    if (
+      !capability ||
+      capability.relationshipId !== input.delivery.relationshipId ||
+      capability.direction !== input.direction ||
+      capability.scope !== input.scope
+    ) {
+      return invalid();
+    }
+    const verified = await input.timing.measure('authorization', async () =>
+      verifyV2DeliveryProof({
+        tokenSecret: await decryptV2TokenSecret(
+          dependencies.deploymentKey,
+          capability,
+        ),
+        capabilityLookupId: parsed.capabilityLookupId,
+        direction: capability.direction,
+        scope: capability.scope,
+        chain: slot.chain,
+        slot: slot.slot,
+        slotEpoch: slot.epoch,
+        method: 'POST',
+        canonicalOrigin: input.origin,
+        normalizedPath: `/v2/deliveries/${input.deliveryId}/complete`,
+        requestDigest: input.requestDigest,
+        proof: slot.proof,
+      }),
+    );
+    if (!verified) {
+      return invalid();
+    }
+    if (
+      capability.expiresAt <= input.current ||
+      capability.revokedAt !== undefined
+    ) {
+      return v2ErrorResponse(3, 'Completion capability is not active.');
+    }
+    return { capability, nonce: verified.nonce, expiresAt: verified.expiresAt };
   }
 
   async function publishControlEvent(
@@ -1240,15 +1386,10 @@ export function createV2DeliveryHandler(
                 expiresAt: verified.expiresAt,
               },
             ],
-            maximumRequestsPerMinute:
-              dependencies.maximumRequestsPerMinute ?? 60,
+            maximumRequestsPerMinute: limits.requestsPerMinute,
             controlQuota: {
-              maximumEvents:
-                dependencies.maximumPendingControlEvents ??
-                MAX_PENDING_CONTROL_EVENTS,
-              maximumBytes:
-                dependencies.maximumControlEventBytes ??
-                MAX_CONTROL_EVENT_BYTES,
+              maximumEvents: limits.pendingControlEvents,
+              maximumBytes: limits.controlEventBytes,
             },
           },
         ),

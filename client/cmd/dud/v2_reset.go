@@ -220,9 +220,33 @@ func decodeV2ResetMap(encoded string) (map[int]any, error) {
 	return value, nil
 }
 
-func (runtime *v2PeerRuntime) validateV2ResetProposal(proposal map[int]any, signature []byte) (v2ResetDisposition, error) {
+// v2ResetProposalFields is a reset proposal's decoded content: the identifiers
+// of the relationship being abandoned and of the one that replaces it, the role
+// of the device that proposed the reset, and the identity that device will hold
+// in the new generation.
+type v2ResetProposalFields struct {
+	resetID    []byte
+	oldID      []byte
+	newID      []byte
+	role       uint64
+	generation uint64
+	expires    uint64
+	oldLocal   []byte
+	oldPeer    []byte
+	newDevice  []byte
+	newSigning []byte
+	newAge     []byte
+}
+
+// decodeV2ResetProposalFields reads a reset proposal and checks that every
+// field is present with the width the protocol gives it. A proposal carries
+// exactly sixteen keys, so one with any other count is a message this version
+// cannot read in full rather than one it may interpret in part.
+func decodeV2ResetProposalFields(proposal map[int]any) (v2ResetProposalFields, error) {
+	var fields v2ResetProposalFields
+	invalid := errors.New("peer relationship reset proposal is invalid")
 	if len(proposal) != 16 || !v2UintEquals(proposal[1], 1) || !v2UintEquals(proposal[16], 0) {
-		return v2ResetDisposition{}, errors.New("peer relationship reset proposal is invalid")
+		return fields, invalid
 	}
 	oldID, oldOK := proposal[2].([]byte)
 	resetID, resetOK := proposal[3].([]byte)
@@ -235,33 +259,80 @@ func (runtime *v2PeerRuntime) validateV2ResetProposal(proposal map[int]any, sign
 	newSigning, newSigningOK := proposal[12].([]byte)
 	newAge, newAgeOK := proposal[13].([]byte)
 	expires, expiresOK := asV2Uint(proposal[15])
-	if !oldOK || !bytes.Equal(oldID, runtime.relationshipID) || !resetOK || len(resetID) != 16 ||
-		!newOK || len(newID) != 16 || !roleOK || role > 1 || !generationOK || generation != runtime.state.Generation+1 ||
-		proposal[7] != runtime.origin || !oldLocalOK || len(oldLocal) != 16 || !oldPeerOK || len(oldPeer) != 16 ||
-		!newDeviceOK || len(newDevice) != 16 || !newSigningOK || len(newSigning) != 32 || !newAgeOK || len(newAge) != 1216 ||
-		!expiresOK || expires <= uint64(time.Now().Unix()) || expires > uint64(time.Now().Add(v2ResetLifetime+5*time.Minute).Unix()) ||
-		validateV2ResetChainSnapshot(proposal[8]) != nil {
-		return v2ResetDisposition{}, errors.New("peer relationship reset proposal is invalid")
+	if !oldOK || !resetOK || len(resetID) != 16 || !newOK || len(newID) != 16 ||
+		!roleOK || !generationOK || !expiresOK ||
+		!oldLocalOK || len(oldLocal) != 16 || !oldPeerOK || len(oldPeer) != 16 ||
+		!newDeviceOK || len(newDevice) != 16 || !newSigningOK || len(newSigning) != 32 ||
+		!newAgeOK || len(newAge) != 1216 {
+		return fields, invalid
 	}
-	var signer ed25519.PublicKey
-	if role == runtime.state.Role {
-		if !bytes.Equal(oldLocal, runtime.localID) || !bytes.Equal(oldPeer, runtime.peerID) {
-			return v2ResetDisposition{}, errors.New("peer relationship reset proposal identity is invalid")
+	return v2ResetProposalFields{
+		resetID: resetID, oldID: oldID, newID: newID,
+		role: role, generation: generation, expires: expires,
+		oldLocal: oldLocal, oldPeer: oldPeer,
+		newDevice: newDevice, newSigning: newSigning, newAge: newAge,
+	}, nil
+}
+
+// validateV2ResetProposalTerms checks what a proposal asks for against the
+// relationship it would replace. A proposal binds to one relationship, one
+// origin, and the single generation after the current one, so a proposal for
+// any other target cannot be signed into this relationship's history. The
+// expiry bound keeps a proposal from being held back and activated later.
+func (runtime *v2PeerRuntime) validateV2ResetProposalTerms(proposal map[int]any, fields v2ResetProposalFields) error {
+	now := time.Now()
+	if !bytes.Equal(fields.oldID, runtime.relationshipID) || fields.role > 1 ||
+		fields.generation != runtime.state.Generation+1 || proposal[7] != runtime.origin ||
+		fields.expires <= uint64(now.Unix()) ||
+		fields.expires > uint64(now.Add(v2ResetLifetime+5*time.Minute).Unix()) ||
+		validateV2ResetChainSnapshot(proposal[8]) != nil {
+		return errors.New("peer relationship reset proposal is invalid")
+	}
+	return nil
+}
+
+// v2ResetProposalSigner reports which key must have signed a proposal. Either
+// device may propose, and the proposal names the two device IDs of the
+// relationship from the proposer's side, so the roles it states have to match
+// this device's own view before its signature means anything.
+func (runtime *v2PeerRuntime) v2ResetProposalSigner(fields v2ResetProposalFields) (ed25519.PublicKey, error) {
+	invalid := errors.New("peer relationship reset proposal identity is invalid")
+	if fields.role == runtime.state.Role {
+		if !bytes.Equal(fields.oldLocal, runtime.localID) || !bytes.Equal(fields.oldPeer, runtime.peerID) {
+			return nil, invalid
 		}
-		signer = runtime.signingKey.Public().(ed25519.PublicKey)
-	} else {
-		peerSigning, err := decodeV2Base64URL(runtime.peer.PeerSigningPublicKey, 32)
-		if err != nil || !bytes.Equal(oldLocal, runtime.peerID) || !bytes.Equal(oldPeer, runtime.localID) {
-			return v2ResetDisposition{}, errors.New("peer relationship reset proposal identity is invalid")
-		}
-		signer = ed25519.PublicKey(peerSigning)
+		return runtime.signingKey.Public().(ed25519.PublicKey), nil
+	}
+	peerSigning, err := decodeV2Base64URL(runtime.peer.PeerSigningPublicKey, 32)
+	if err != nil || !bytes.Equal(fields.oldLocal, runtime.peerID) || !bytes.Equal(fields.oldPeer, runtime.localID) {
+		return nil, invalid
+	}
+	return ed25519.PublicKey(peerSigning), nil
+}
+
+// validateV2ResetProposal checks a reset proposal and reports the work the
+// proposer says it is abandoning. A proposal this device made itself is checked
+// against the identity it would derive for the new relationship, so a proposal
+// that came back altered cannot make this device pair with a key it does not
+// hold the seed for.
+func (runtime *v2PeerRuntime) validateV2ResetProposal(proposal map[int]any, signature []byte) (v2ResetDisposition, error) {
+	fields, err := decodeV2ResetProposalFields(proposal)
+	if err != nil {
+		return v2ResetDisposition{}, err
+	}
+	if err := runtime.validateV2ResetProposalTerms(proposal, fields); err != nil {
+		return v2ResetDisposition{}, err
+	}
+	signer, err := runtime.v2ResetProposalSigner(fields)
+	if err != nil {
+		return v2ResetDisposition{}, err
 	}
 	if !v2ResetVerify("proposal", proposal, signature, signer) {
 		return v2ResetDisposition{}, errors.New("peer relationship reset proposal signature is invalid")
 	}
-	if role == runtime.state.Role {
-		expectedDevice, expectedSigning, expectedAge, err := v2ResetIdentity(runtime.seed, newID)
-		if err != nil || !bytes.Equal(newDevice, expectedDevice) || !bytes.Equal(newSigning, expectedSigning) || !bytes.Equal(newAge, expectedAge) {
+	if fields.role == runtime.state.Role {
+		expectedDevice, expectedSigning, expectedAge, identityErr := v2ResetIdentity(runtime.seed, fields.newID)
+		if identityErr != nil || !bytes.Equal(fields.newDevice, expectedDevice) || !bytes.Equal(fields.newSigning, expectedSigning) || !bytes.Equal(fields.newAge, expectedAge) {
 			return v2ResetDisposition{}, errors.New("local peer relationship reset proposal identity is invalid")
 		}
 	}
@@ -554,7 +625,7 @@ func (runtime *v2PeerRuntime) resetCancellationBody(reset *v2RelationshipReset) 
 }
 
 func cleanupV2ResetGitState(a *app, oldPeerID string) error {
-	command := a.localV2GitCommand("rev-parse", "--git-common-dir")
+	command := a.gitCommand("rev-parse", "--git-common-dir")
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	if err != nil {
@@ -742,27 +813,180 @@ func (runtime *v2PeerRuntime) activateV2ResetLocally(ctx context.Context, a *app
 	return err
 }
 
-func (a *app) cmdPeerReset(args []string) error {
+// v2PeerResetOptions is one invocation of 'dud peer reset'.
+type v2PeerResetOptions struct {
+	alias     string
+	confirmed bool
+	json      bool
+	cancel    bool
+}
+
+func parseV2PeerResetOptions(args []string) (v2PeerResetOptions, error) {
+	var opts v2PeerResetOptions
 	if len(args) == 0 {
-		return fatalError("dud peer reset requires NAME")
+		return opts, fatalError("dud peer reset requires NAME")
 	}
-	alias := args[0]
-	confirmed, jsonOutput, cancel := false, false, false
+	opts.alias = args[0]
 	for _, option := range args[1:] {
 		switch option {
 		case "--yes":
-			confirmed = true
+			opts.confirmed = true
 		case "--json":
-			if err := markJSONOption(&jsonOutput); err != nil {
-				return err
+			if err := markJSONOption(&opts.json); err != nil {
+				return opts, err
 			}
 		case "--cancel":
-			cancel = true
+			opts.cancel = true
 		default:
-			return fatalError("Unknown peer reset option: " + option)
+			return opts, fatalError("Unknown peer reset option: " + option)
 		}
 	}
-	return a.withV2PeerForRecovery(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
+	return opts, nil
+}
+
+// cancelV2PeerReset withdraws a reset that has not been activated. The server
+// records the cancellation, so both devices learn the relationship was kept
+// rather than one of them continuing to expect a new generation.
+func (a *app) cancelV2PeerReset(runtime *v2PeerRuntime, opts v2PeerResetOptions) error {
+	if runtime.state.Reset == nil || runtime.state.Reset.Phase == "active" || runtime.state.Reset.Phase == "cancelled" {
+		return errors.New("there is no pending peer relationship reset to cancel")
+	}
+	if !opts.confirmed {
+		return fatalError("cancelling a peer relationship reset requires --yes")
+	}
+	body, err := runtime.resetCancellationBody(runtime.state.Reset)
+	if err != nil {
+		return err
+	}
+	result, err := runtime.v2ResetRequest(context.Background(), body)
+	if err != nil {
+		return err
+	}
+	reset, _, err := runtime.applyV2ResetResponse(result)
+	if err != nil {
+		return err
+	}
+	reset.RecoveryCommand = ""
+	runtime.state.Reset = reset
+	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+		return err
+	}
+	if opts.json {
+		return writeJSON(a.out, map[string]any{"peer": opts.alias, "reset_id": reset.ResetID, "phase": reset.Phase})
+	}
+	fmt.Fprintf(a.out, "Cancelled peer relationship reset %s for %q.\n", reset.ResetID, opts.alias)
+	return nil
+}
+
+// reportV2ResetDisposition lists the work a reset would abandon and stops. A
+// reset discards everything in flight on both devices, so the operator sees the
+// count of each kind before the command that performs it is accepted.
+func (a *app) reportV2ResetDisposition(opts v2PeerResetOptions, disposition v2ResetDisposition) error {
+	if opts.json {
+		return writeJSON(a.out, map[string]any{"peer": opts.alias, "confirmed": false, "abandons": disposition, "next": "dud peer reset " + opts.alias + " --yes"})
+	}
+	fmt.Fprintf(a.out, "Peer relationship reset for %q abandons:\n", opts.alias)
+	report := &textReport{}
+	section := report.section("")
+	section.addf("queued deliveries", "%d", disposition.QueuedDeliveries)
+	section.addf("queued completions", "%d", disposition.QueuedCompletions)
+	section.addf("queued control events", "%d", disposition.QueuedControlEvents)
+	section.addf("unacknowledged deliveries", "%d", disposition.Unacknowledged)
+	section.addf("inbound transfers", "%d", disposition.InboundTransfers)
+	section.addf("quarantined chains", "%d", disposition.QuarantinedChains)
+	section.addf("resumable transfers", "%d", disposition.ResumableTransfers)
+	section.addf("refused Git checkpoints", "%d", disposition.RefusedGitCheckpoints)
+	if err := report.write(a.out); err != nil {
+		return err
+	}
+	return fatalError("review the abandoned work, then rerun with --yes")
+}
+
+// proposeV2PeerReset finds the reset the server already holds for this
+// relationship, or proposes one. Both devices run the same command, so the one
+// that arrives second adopts the proposal already on the server instead of
+// racing a second proposal against it.
+func (runtime *v2PeerRuntime) proposeV2PeerReset(ctx context.Context) (*v2RelationshipReset, map[int]any, error) {
+	result, found, err := runtime.findV2Reset(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	canPropose := runtime.state.Reset == nil || runtime.state.Reset.Phase == "active" || runtime.state.Reset.Phase == "cancelled"
+	if !found && !canPropose {
+		return nil, nil, errors.New("pending peer relationship reset is unavailable on the server")
+	}
+	if !found {
+		local, localErr := runtime.newV2ResetProposal()
+		if localErr != nil {
+			return nil, nil, localErr
+		}
+		proposal, _ := decodeV2ResetMap(local.Proposal)
+		signature, _ := decodeV2Base64URL(local.ProposalSignature, 64)
+		result, err = runtime.v2ResetRequest(ctx, map[int]any{1: uint64(1), 2: proposal, 3: signature})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return runtime.applyV2ResetResponse(result)
+}
+
+// acceptV2PeerResetProposal signs the peer's proposal and sends the full
+// transcript back. The device that did not propose is the one that consents,
+// and its consent is written down before the request, so a reply that never
+// arrives leaves a record of what this device already agreed to.
+func (runtime *v2PeerRuntime) acceptV2PeerResetProposal(ctx context.Context, opts v2PeerResetOptions, reset *v2RelationshipReset, proposal map[int]any) (*v2RelationshipReset, map[int]any, error) {
+	if err := runtime.acceptV2Reset(reset, proposal); err != nil {
+		return nil, nil, err
+	}
+	reset.RecoveryCommand = "dud peer reset " + opts.alias + " --yes"
+	runtime.state.Reset = reset
+	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+		return nil, nil, err
+	}
+	proposalSignature, _ := decodeV2Base64URL(reset.ProposalSignature, 64)
+	acceptance, _ := decodeV2ResetMap(reset.Acceptance)
+	acceptanceSignature, _ := decodeV2Base64URL(reset.AcceptanceSignature, 64)
+	result, err := runtime.v2ResetRequest(ctx, map[int]any{
+		1: uint64(3), 2: proposal, 3: proposalSignature,
+		4: acceptance, 5: acceptanceSignature,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return runtime.applyV2ResetResponse(result)
+}
+
+// reportV2PeerReset renders the state a reset reached. A reset the server has
+// not activated is waiting for the other device, so the line names the command
+// that device runs, and the same command re-entered here picks the reset up
+// where it stands.
+func (a *app) reportV2PeerReset(opts v2PeerResetOptions, reset *v2RelationshipReset) error {
+	output := map[string]any{
+		"peer": opts.alias, "reset_id": reset.ResetID, "generation": reset.Generation,
+		"phase": reset.Phase, "local_consent": reset.LocalConsent,
+		"peer_consent": reset.PeerConsent, "server_activated": reset.ServerActivated,
+		"local_abandoned": reset.LocalDisposition, "peer_abandoned": reset.PeerDisposition,
+	}
+	if !reset.ServerActivated {
+		output["next"] = "dud peer reset " + opts.alias + " --yes"
+	}
+	if opts.json {
+		return writeJSON(a.out, output)
+	}
+	if reset.ServerActivated {
+		fmt.Fprintf(a.out, "Activated peer relationship reset %s for %q at generation %d.\n", reset.ResetID, opts.alias, reset.Generation)
+	} else {
+		fmt.Fprintf(a.out, "Peer relationship reset %s for %q is waiting for peer consent.\n", reset.ResetID, opts.alias)
+	}
+	return nil
+}
+
+func (a *app) cmdPeerReset(args []string) error {
+	opts, err := parseV2PeerResetOptions(args)
+	if err != nil {
+		return err
+	}
+	return a.withV2PeerForRecovery(opts.alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
 		capabilities, err := runtime.state.ServerContract.capabilities()
 		if err != nil || !hasV2Feature(capabilities.Features, 12) {
 			return errors.New("server does not support peer relationship reset; no reset state was written")
@@ -770,112 +994,27 @@ func (a *app) cmdPeerReset(args []string) error {
 		if !hasV2Feature(runtime.state.PeerFeatures, 12) {
 			return errors.New("peer does not advertise peer relationship reset support; no reset state was written")
 		}
-		disposition := v2ResetDispositionOf(runtime.state)
-		if cancel {
-			if runtime.state.Reset == nil || runtime.state.Reset.Phase == "active" || runtime.state.Reset.Phase == "cancelled" {
-				return errors.New("there is no pending peer relationship reset to cancel")
-			}
-			if !confirmed {
-				return fatalError("cancelling a peer relationship reset requires --yes")
-			}
-			body, err := runtime.resetCancellationBody(runtime.state.Reset)
-			if err != nil {
-				return err
-			}
-			result, err := runtime.v2ResetRequest(context.Background(), body)
-			if err != nil {
-				return err
-			}
-			reset, _, err := runtime.applyV2ResetResponse(result)
-			if err != nil {
-				return err
-			}
-			reset.RecoveryCommand = ""
-			runtime.state.Reset = reset
-			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-				return err
-			}
-			if jsonOutput {
-				return writeJSON(a.out, map[string]any{"peer": alias, "reset_id": reset.ResetID, "phase": reset.Phase})
-			}
-			fmt.Fprintf(a.out, "Cancelled peer relationship reset %s for %q.\n", reset.ResetID, alias)
-			return nil
+		if opts.cancel {
+			return a.cancelV2PeerReset(runtime, opts)
 		}
-		if !confirmed {
-			if jsonOutput {
-				return writeJSON(a.out, map[string]any{"peer": alias, "confirmed": false, "abandons": disposition, "next": "dud peer reset " + alias + " --yes"})
-			}
-			fmt.Fprintf(a.out, "Peer relationship reset for %q abandons:\n", alias)
-			report := &textReport{}
-			section := report.section("")
-			section.addf("queued deliveries", "%d", disposition.QueuedDeliveries)
-			section.addf("queued completions", "%d", disposition.QueuedCompletions)
-			section.addf("queued control events", "%d", disposition.QueuedControlEvents)
-			section.addf("unacknowledged deliveries", "%d", disposition.Unacknowledged)
-			section.addf("inbound transfers", "%d", disposition.InboundTransfers)
-			section.addf("quarantined chains", "%d", disposition.QuarantinedChains)
-			section.addf("resumable transfers", "%d", disposition.ResumableTransfers)
-			section.addf("refused Git checkpoints", "%d", disposition.RefusedGitCheckpoints)
-			if err := report.write(a.out); err != nil {
-				return err
-			}
-			return fatalError("review the abandoned work, then rerun with --yes")
+		if !opts.confirmed {
+			return a.reportV2ResetDisposition(opts, v2ResetDispositionOf(runtime.state))
 		}
 		ctx := context.Background()
-		result, found, err := runtime.findV2Reset(ctx)
+		reset, proposal, err := runtime.proposeV2PeerReset(ctx)
 		if err != nil {
 			return err
 		}
-		canPropose := runtime.state.Reset == nil || runtime.state.Reset.Phase == "active" || runtime.state.Reset.Phase == "cancelled"
-		if !found && !canPropose {
-			return errors.New("pending peer relationship reset is unavailable on the server")
-		}
-		var proposal map[int]any
-		if !found {
-			local, err := runtime.newV2ResetProposal()
-			if err != nil {
-				return err
-			}
-			proposal, _ = decodeV2ResetMap(local.Proposal)
-			signature, _ := decodeV2Base64URL(local.ProposalSignature, 64)
-			result, err = runtime.v2ResetRequest(ctx, map[int]any{1: uint64(1), 2: proposal, 3: signature})
-			if err != nil {
-				return err
-			}
-		}
-		reset, selectedProposal, err := runtime.applyV2ResetResponse(result)
-		if err != nil {
-			return err
-		}
-		proposal = selectedProposal
-		reset.RecoveryCommand = "dud peer reset " + alias + " --yes"
+		reset.RecoveryCommand = "dud peer reset " + opts.alias + " --yes"
 		if reset.InitiatorRole != runtime.state.Role && !reset.ServerActivated {
-			if err := runtime.acceptV2Reset(reset, proposal); err != nil {
-				return err
-			}
-			reset.RecoveryCommand = "dud peer reset " + alias + " --yes"
-			runtime.state.Reset = reset
-			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-				return err
-			}
-			proposalSignature, _ := decodeV2Base64URL(reset.ProposalSignature, 64)
-			acceptance, _ := decodeV2ResetMap(reset.Acceptance)
-			acceptanceSignature, _ := decodeV2Base64URL(reset.AcceptanceSignature, 64)
-			result, err = runtime.v2ResetRequest(ctx, map[int]any{
-				1: uint64(3), 2: proposal, 3: proposalSignature,
-				4: acceptance, 5: acceptanceSignature,
-			})
+			reset, proposal, err = runtime.acceptV2PeerResetProposal(ctx, opts, reset, proposal)
 			if err != nil {
 				return err
 			}
-			reset, proposal, err = runtime.applyV2ResetResponse(result)
-			if err != nil {
-				return err
-			}
-			reset.RecoveryCommand = "dud peer reset " + alias + " --yes"
+			reset.RecoveryCommand = "dud peer reset " + opts.alias + " --yes"
 		}
 		if reset.ServerActivated {
-			if err := runtime.activateV2ResetLocally(ctx, a, alias, reset, proposal); err != nil {
+			if err := runtime.activateV2ResetLocally(ctx, a, opts.alias, reset, proposal); err != nil {
 				return err
 			}
 		} else {
@@ -884,23 +1023,6 @@ func (a *app) cmdPeerReset(args []string) error {
 				return err
 			}
 		}
-		output := map[string]any{
-			"peer": alias, "reset_id": reset.ResetID, "generation": reset.Generation,
-			"phase": reset.Phase, "local_consent": reset.LocalConsent,
-			"peer_consent": reset.PeerConsent, "server_activated": reset.ServerActivated,
-			"local_abandoned": reset.LocalDisposition, "peer_abandoned": reset.PeerDisposition,
-		}
-		if !reset.ServerActivated {
-			output["next"] = "dud peer reset " + alias + " --yes"
-		}
-		if jsonOutput {
-			return writeJSON(a.out, output)
-		}
-		if reset.ServerActivated {
-			fmt.Fprintf(a.out, "Activated peer relationship reset %s for %q at generation %d.\n", reset.ResetID, alias, reset.Generation)
-		} else {
-			fmt.Fprintf(a.out, "Peer relationship reset %s for %q is waiting for peer consent.\n", reset.ResetID, alias)
-		}
-		return nil
+		return a.reportV2PeerReset(opts, reset)
 	})
 }

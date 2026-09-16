@@ -8,6 +8,51 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add Go static analysis: `gocyclo`, `errcheck`, `deadcode`, `goimports`,
+  `govulncheck`, and `staticcheck`, plus a multichecker bundling the
+  `golang.org/x/tools` analyzers that `go vet` leaves off. They are declared in
+  `tools/`, a module separate from the two that ship, so nothing they depend on
+  reaches the client binary, and `tools/go.sum` fixes the version of each one.
+  `npm run analyze:go` runs them; the analyzers that report nothing block
+  through `npm run check`, and the rest report on pull requests.
+- Add `npm run check:tidy`, which fails if `go mod tidy` would change any
+  module, so the pinned analyzer set always matches what the build uses.
+
+### Removed
+
+- Remove `headV2ChunkUploadPart`, a chunk upload probe nothing called. Its
+  removal makes `deadcode` report nothing, so that analyzer now blocks.
+- Stop reading the deprecated `tar.Header.Xattrs` and matching the deprecated
+  `tar.TypeRegA` when inspecting a collection archive. An extended attribute
+  arrives as a `SCHILY.xattr.*` record that the record check already rejects,
+  and the reader reports a pre-POSIX regular file as `tar.TypeReg`, so both
+  reads were redundant.
+
+### Changed
+
+- Build `govulncheck` from the pinned tools module instead of installing it at
+  job time, so the scanner that runs is the version `tools/go.sum` hashes.
+- Verify the Go language version of every module against
+  `.github/supported-versions.json`, not the client module alone.
+- Declare the terminal echo restore function inside the branch that uses it, so
+  a visible prompt no longer assigns a value nothing reads.
+- Promote `staticcheck` to a blocking analyzer. `ST1005` is off. Every error
+  string it reported opens with the proper noun "Git", which the check reads as
+  a sentence opening.
+- Promote `errcheck` to a blocking analyzer. Every deferred `Close`, `Remove`,
+  and terminal restore whose failure cannot change the result now discards its
+  error explicitly. `-blank` and `-asserts` are off: a `_ =` here marks a
+  discard the author chose, and a bare type assertion reads a field whose type a
+  validator has already checked or whose type the standard library documents.
+
+### Fixed
+
+- Report a failed write of a command's own output. `dud flush`, `dud test`, and
+  `dud upload --json` pass a response body through to standard output, and a
+  short write there exited 0 as though the whole body had been written.
+
 ## [2.4.0] - 2026-09-12
 
 ### Added

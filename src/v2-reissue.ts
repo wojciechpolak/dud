@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { concatBytes } from './bytes.js';
 import type { CborValue } from './cbor.js';
 import { bytesToHex, decodeBase64Url } from './v2-auth.js';
 import { v2CborResponse, v2ErrorResponse } from './v2-http.js';
@@ -69,18 +70,6 @@ function granularRecoveryRepository(
 
 function seconds(milliseconds: number): number {
   return Math.floor(milliseconds / 1000);
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(
-    parts.reduce((length, part) => length + part.byteLength, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-  return result;
 }
 
 async function claimReissueSourceWindow(
@@ -198,7 +187,7 @@ async function claimStoredReissue(
   assertStoredTuplesActive(state, request);
   const nonceKey = bytesToHex(
     sha256(
-      concat(
+      concatBytes(
         textEncoder.encode('dud/v2/reissue-nonce|'),
         request.relationship,
         Uint8Array.of(request.role),

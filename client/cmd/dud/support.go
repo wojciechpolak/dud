@@ -34,7 +34,22 @@ func loadConfig() config {
 		GitBin:       envDefault("DUD_GIT_BIN", "git"),
 		QREncodeBin:  envDefault("DUD_QRENCODE_BIN", "qrencode"),
 		Image:        envDefault("DUD_IMAGE", "ghcr.io/wojciechpolak/dud/dud-client:latest"),
+
+		GitTrustedDir: absolutePathEnvironment("DUD_GIT_TRUSTED_DIR"),
 	}
+}
+
+// absolutePathEnvironment reads a variable that names one directory. Git reads
+// the value as a path to compare against, so a relative path names nothing it
+// can match and the wildcard "*" would trust every repository the caller ever
+// runs dud in. Rejecting both leaves the caller with Git's own ownership error,
+// which names the directory and the setting that would accept it.
+func absolutePathEnvironment(name string) string {
+	value := os.Getenv(name)
+	if !filepath.IsAbs(value) {
+		return ""
+	}
+	return filepath.Clean(value)
 }
 
 func envDefaultChain(fallback string, names ...string) string {
@@ -94,7 +109,7 @@ func (a *app) runCommand(name string, args []string, stdin io.Reader, stdout io.
 func (a *app) runAge(args ...string) error {
 	stdin := a.in
 	if tty, err := openInteractiveInput(); err == nil {
-		defer tty.Close()
+		defer func() { _ = tty.Close() }()
 		stdin = tty
 	}
 	return a.runCommand(a.cfg.AgeBin, args, stdin, a.out, a.errOut)
@@ -120,7 +135,7 @@ func tempFile(pattern string) (string, error) {
 		return "", err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(name)
+		_ = os.Remove(name)
 		return "", err
 	}
 	tempFilesMu.Lock()
@@ -133,14 +148,14 @@ func removeTempFile(path string) {
 	tempFilesMu.Lock()
 	delete(tempFiles, path)
 	tempFilesMu.Unlock()
-	os.Remove(path)
+	_ = os.Remove(path)
 }
 
 func removeAllTempFiles() {
 	tempFilesMu.Lock()
 	defer tempFilesMu.Unlock()
 	for path := range tempFiles {
-		os.Remove(path)
+		_ = os.Remove(path)
 	}
 	tempFiles = map[string]struct{}{}
 }
@@ -150,7 +165,7 @@ func copyFile(dst, src string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.Create(dst)
 	if err != nil {
 		return err

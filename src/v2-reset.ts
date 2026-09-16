@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { concatBytes, toArrayBuffer } from './bytes.js';
+import { openV2AesGcm, sealV2AesGcm } from './v2-aes-gcm.js';
 import {
   bytesEqual,
   decodeCbor,
@@ -29,6 +31,7 @@ import type {
   V2RelationshipRecord,
   V2RelationshipResetRecord,
   V2Store,
+  V2StoredState,
 } from './v2-types.js';
 
 const encoder = new TextEncoder();
@@ -66,22 +69,6 @@ interface ResetDependencies {
 
 function seconds(milliseconds: number): number {
   return Math.floor(milliseconds / 1000);
-}
-
-function arrayBuffer(value: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(value).buffer;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(
-    parts.reduce((length, part) => length + part.byteLength, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-  return result;
 }
 
 function requiredBytes(
@@ -152,7 +139,7 @@ async function verifyResetSignature(
   try {
     const key = await crypto.subtle.importKey(
       'raw',
-      arrayBuffer(decodeBase64Url(encodedPublicKey, 32)),
+      toArrayBuffer(decodeBase64Url(encodedPublicKey, 32)),
       { name: 'Ed25519' },
       false,
       ['verify'],
@@ -160,9 +147,9 @@ async function verifyResetSignature(
     return crypto.subtle.verify(
       'Ed25519',
       key,
-      arrayBuffer(signature),
-      arrayBuffer(
-        concat(
+      toArrayBuffer(signature),
+      toArrayBuffer(
+        concatBytes(
           encoder.encode(`dud/v2/relationship-reset/${label}\0`),
           sha256(encodeCbor(value)),
         ),
@@ -295,26 +282,12 @@ async function encryptStoredReset(
   data: StoredResetData,
   randomBytes: (length: number) => Uint8Array,
 ): Promise<Uint8Array> {
-  const nonce = randomBytes(12);
-  const key = await crypto.subtle.importKey(
-    'raw',
-    arrayBuffer(keyBytes),
-    'AES-GCM',
-    false,
-    ['encrypt'],
+  return sealV2AesGcm(
+    keyBytes,
+    randomBytes(12),
+    resetAad(oldRelationshipId),
+    encodeStoredReset(data),
   );
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: 'AES-GCM',
-        iv: arrayBuffer(nonce),
-        additionalData: arrayBuffer(resetAad(oldRelationshipId)),
-      },
-      key,
-      arrayBuffer(encodeStoredReset(data)),
-    ),
-  );
-  return concat(nonce, ciphertext);
 }
 
 async function decryptStoredReset(
@@ -323,23 +296,10 @@ async function decryptStoredReset(
   encrypted: Uint8Array,
 ): Promise<StoredResetData> {
   try {
-    const key = await crypto.subtle.importKey(
-      'raw',
-      arrayBuffer(keyBytes),
-      'AES-GCM',
-      false,
-      ['decrypt'],
-    );
-    const plaintext = new Uint8Array(
-      await crypto.subtle.decrypt(
-        {
-          name: 'AES-GCM',
-          iv: arrayBuffer(encrypted.subarray(0, 12)),
-          additionalData: arrayBuffer(resetAad(oldRelationshipId)),
-        },
-        key,
-        arrayBuffer(encrypted.subarray(12)),
-      ),
+    const plaintext = await openV2AesGcm(
+      keyBytes,
+      encrypted,
+      resetAad(oldRelationshipId),
     );
     return decodeStoredReset(plaintext);
   } catch {
@@ -751,7 +711,7 @@ export function createV2ResetHandler(dependencies: ResetDependencies) {
       );
       return responseForReset(selected, stored.state);
     }
-    await dependencies.store.transaction((state) => {
+    const storeProposal = (state: V2StoredState): void => {
       const existing = state.relationshipResets[oldId];
       if (
         existing &&
@@ -771,7 +731,9 @@ export function createV2ResetHandler(dependencies: ResetDependencies) {
         updatedAt: now,
         relationship,
       };
-    });
+    };
+
+    await dependencies.store.transaction(storeProposal);
     const selected = await loadReset(dependencies, oldId);
     if (!selected) {
       throw new ResetError(4, 'Relationship is not active.');
@@ -942,7 +904,7 @@ export function createV2ResetHandler(dependencies: ResetDependencies) {
         );
       }
     } else {
-      await dependencies.store.transaction((state) => {
+      const activateReset = (state: V2StoredState): void => {
         const current = state.relationshipResets[oldId];
         if (!current || current.resetId !== stored.resetId) {
           throw new ResetError(5, 'Relationship reset activation conflicted.');
@@ -982,7 +944,9 @@ export function createV2ResetHandler(dependencies: ResetDependencies) {
           updatedAt: now,
           activatedAt: now,
         } satisfies Partial<V2RelationshipResetRecord>);
-      });
+      };
+
+      await dependencies.store.transaction(activateReset);
     }
     const active = await loadReset(dependencies, oldId);
     if (!active) {

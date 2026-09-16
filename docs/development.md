@@ -13,25 +13,30 @@ those see the [README](../README.md#quick-start).
 - `tests/` — Node tests for the server; Go tests live beside the CLI sources
 - `migrations/d1` — the single idempotent D1 schema file
 - `migrations/reset-d1.sql` — drops that schema so it can be applied again
+- `tools/` — the static analyzers, in a module of their own
 - `scripts/` — build, release, and offline verification gates
 
 ## 2. Commands
 
-| Command                 | What it does                                       |
-| ----------------------- | -------------------------------------------------- |
-| `npm run build`         | TypeScript → `dist/`, Go client → `client/bin/dud` |
-| `npm run build:client`  | only the Go binary                                 |
-| `npm test`              | build, then `node --test tests/*.test.mjs`         |
-| `npm run test:client`   | `go test ./...` for the CLI                        |
-| `npm run check`         | the full gate CI runs                              |
-| `npm run format`        | `oxfmt` plus `gofmt`                               |
-| `npm run lint`          | `oxlint` plus `go vet`                             |
-| `npm run check:pins`    | offline supply-chain pin verification              |
-| `npm run check:docs`    | required documents, links, and terminology         |
-| `npm run check:vectors` | protocol test vectors on both sides                |
-| `npm run test:e2e:v2`   | Dockerized end-to-end integration                  |
-| `npm version minor`     | prepare, commit, and tag the next minor release    |
-| `npx wrangler dev`      | run the Worker locally                             |
+| Command                      | What it does                                       |
+| ---------------------------- | -------------------------------------------------- |
+| `npm run build`              | TypeScript → `dist/`, Go client → `client/bin/dud` |
+| `npm run build:client`       | only the Go binary                                 |
+| `npm test`                   | build, then `node --test tests/*.test.mjs`         |
+| `npm run test:client`        | `go test ./...` for the CLI                        |
+| `npm run check`              | the full gate CI runs                              |
+| `npm run format`             | `oxfmt` plus `gofmt` and `goimports`               |
+| `npm run lint`               | `oxlint` plus `go vet`                             |
+| `npm run analyze:go`         | every Go static analyzer, without failing          |
+| `npm run analyze:go:pending` | the analyzers whose findings are open              |
+| `npm run tools:go`           | build the analyzers into `bin/`                    |
+| `npm run check:pins`         | offline supply-chain pin verification              |
+| `npm run check:tidy`         | every Go module is tidy                            |
+| `npm run check:docs`         | required documents, links, and terminology         |
+| `npm run check:vectors`      | protocol test vectors on both sides                |
+| `npm run test:e2e:v2`        | Dockerized end-to-end integration                  |
+| `npm version minor`          | prepare, commit, and tag the next minor release    |
+| `npx wrangler dev`           | run the Worker locally                             |
 
 Run a single test file:
 
@@ -39,10 +44,10 @@ Run a single test file:
 node --test tests/worker.test.mjs
 ```
 
-`npm run check` is `format:check`, `lint`, the three offline gates,
-`test:client`, `test:client:race`, and `npm test`. Run it before handing off a
-broad change; run `npm run test:e2e:v2` as well when deployment or end-to-end
-peer behavior changes.
+`npm run check` is `format:check`, `lint`, the four offline gates,
+`analyze:go:gate`, `test:client`, `test:client:race`, `test:tools`, and
+`npm test`. Run it before handing off a broad change; run `npm run test:e2e:v2`
+as well when deployment or end-to-end peer behavior changes.
 
 Use `npm version major`, `npm version minor`, or `npm version patch` to cut a
 release commit and its `vMAJOR.MINOR.PATCH` tag. The command updates the package
@@ -51,7 +56,65 @@ tests, and adds a dated heading below `Unreleased` in the changelog. It stops
 before editing those files if any checked-in version has drifted from
 `package.json`.
 
-## 3. Coverage
+## 3. Go static analysis
+
+The analyzers are declared in `tools/go.mod`, a module separate from the two
+that ship. Nothing they depend on can appear in the dependency graph of the
+client binary or of the protocol vector generator, and `tools/go.sum` fixes the
+exact version of each one. `npm run tools:go` compiles them into `bin/`, which
+is ignored by git; `npm run analyze:go` builds anything missing and then runs
+them.
+
+| Analyzer      | What it reports                                             | Blocks |
+| ------------- | ----------------------------------------------------------- | ------ |
+| `analyze`     | the x/tools passes `go vet` leaves off, as one multichecker | yes    |
+| `deadcode`    | functions unreachable from `main`                           | yes    |
+| `govulncheck` | known vulnerabilities in the modules the client calls       | yes    |
+| `errcheck`    | unchecked error returns                                     | yes    |
+| `staticcheck` | correctness, simplification, and style checks               | yes    |
+| `gocyclo`     | functions above the cyclomatic complexity ceiling           | yes    |
+
+How the scripts invoke them decides whether their output means anything:
+
+- Each type-checking analyzer runs once per `GOOS`. An analyzer never examines a
+  file that a build constraint excludes, and the client has separate terminal,
+  process, and filesystem sources for each platform.
+- `deadcode` runs with `-test`. The client is one `package main` whose tests sit
+  beside the sources, so without it every helper that only a test calls reports
+  as unreachable.
+- `errcheck` runs without `-blank` and without `-asserts`. A `_ =` in this
+  repository marks a discard the author chose, and a bare type assertion reads a
+  field whose type a validator has already checked or whose type the standard
+  library documents, so both flags would report code that states its intent.
+- `gocyclo` reports every function above complexity 30, which is the ceiling
+  this repository holds to. A function that exceeds it carries several
+  independent stages in one body; split it into one function per stage rather
+  than raising the ceiling. Set `GOCYCLO_OVER` to survey a different one.
+
+An analyzer that reports nothing on this tree blocks. `npm run check` calls
+`analyze:go:gate`, which fails on any new finding. Every analyzer listed above
+is in that set, so `npm run analyze:go:pending` has nothing to report. An
+analyzer added with findings left to fix goes in `PENDING_TOOLS` in
+`scripts/go-analyze.sh`, where it reports without failing, and moves to
+`GATING_TOOLS` once it reports nothing. The two lists say which set each one is
+in.
+
+`npm run analyze:go` runs every analyzer without failing, which is what to use
+while fixing findings. `npm run analyze:go:strict` fails on any finding from any
+of them. Name a single analyzer to run it alone, either as
+`npm run analyze:staticcheck` or as `./scripts/go-analyze.sh staticcheck`.
+
+`staticcheck.conf` at the repository root configures every module, because
+staticcheck walks up from the directory it runs in.
+`scripts/errcheck-excludes.txt` lists the calls errcheck ignores: writes to
+stderr and to usage writers, where a failed write has nowhere to be reported.
+
+`govulncheck` uses the release policy in `scripts/check-security-waivers.mjs`.
+Every finding requires an unexpired waiver in `.github/security-waivers.json`;
+failed scans also fail the gate. `check:tidy` uses `go mod tidy -diff` to report
+module changes without writing `go.mod` or `go.sum`.
+
+## 4. Coverage
 
 ```sh
 npm run test:coverage
@@ -65,7 +128,7 @@ provides the native Go `coverage.out`, per-function text, and uncovered block
 ranges in its JSON summary. Run one side with `npm run test:coverage:server` or
 `npm run test:coverage:client`.
 
-## 4. Host Caddy on localhost
+## 5. Host Caddy on localhost
 
 For local browser or manual HTTPS testing, run Caddy on the host:
 
@@ -82,7 +145,7 @@ against it. `dud.localhost` also resolves to a loopback address, which the
 client refuses for every command in either mode; treat it as a browser or manual
 HTTPS target, not a client test target.
 
-## 5. Docker-only integration testing
+## 6. Docker-only integration testing
 
 ```sh
 npm run test:e2e:v2
@@ -125,7 +188,7 @@ whenever a change depends on how the runtime behaves rather than on what the
 code says: the type D1 returns for a column, what R2 requires of a stream, or
 whether the checked-in schema still matches the queries.
 
-## 6. Real ECH
+## 7. Real ECH
 
 Beyond local testing:
 
@@ -137,7 +200,7 @@ Beyond local testing:
 Caddy's documentation notes that functioning ECH requires publishing HTTPS DNS
 records, and therefore a Caddy build with a DNS provider module.
 
-## 7. Documentation rules
+## 8. Documentation rules
 
 `npm run check:docs` is a gate, not a linter suggestion. It verifies that every
 required document exists, that every relative link between Markdown files

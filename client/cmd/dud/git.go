@@ -4,7 +4,6 @@ package main
 
 import (
 	"io"
-	"os/exec"
 	"regexp"
 	"strings"
 )
@@ -105,7 +104,7 @@ func (a *app) cmdGit(args []string) error {
 }
 
 func (a *app) requireGitRepository(action string) error {
-	cmd := exec.Command(a.cfg.GitBin, "rev-parse", "--git-dir")
+	cmd := a.gitCommand("rev-parse", "--git-dir")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
@@ -129,7 +128,7 @@ func validateGitRemoteName(remote string) error {
 }
 
 func (a *app) gitBundleHintBranch(bundle string) string {
-	cmd := exec.Command(a.cfg.GitBin, "ls-remote", bundle, "refs/heads/*")
+	cmd := a.gitCommand("ls-remote", bundle, "refs/heads/*")
 	output, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -175,7 +174,7 @@ func (a *app) cmdGitPush(args []string) error {
 	}
 	defer removeTempFile(bundleFile)
 
-	cmd := exec.Command(a.cfg.GitBin, "bundle", "create", bundleFile, "--branches", "--tags")
+	cmd := a.gitCommand("bundle", "create", bundleFile, "--branches", "--tags")
 	cmd.Stdout = a.out
 	cmd.Stderr = a.errOut
 	if err := cmd.Run(); err != nil {
@@ -217,14 +216,14 @@ func (a *app) cmdGitFetch(args []string) error {
 	if opts.outputJSON {
 		gitOut = a.errOut
 	}
-	cmd := exec.Command(a.cfg.GitBin, "bundle", "verify", bundleFile)
+	cmd := a.gitCommand("bundle", "verify", bundleFile)
 	cmd.Stdout = gitOut
 	cmd.Stderr = a.errOut
 	if err := cmd.Run(); err != nil {
 		return err
 	}
 	hintBranch := a.gitBundleHintBranch(bundleFile)
-	cmd = exec.Command(a.cfg.GitBin, "fetch", bundleFile, "+refs/heads/*:refs/remotes/"+opts.remote+"/*", "refs/tags/*:refs/tags/*")
+	cmd = a.gitCommand("fetch", bundleFile, "+refs/heads/*:refs/remotes/"+opts.remote+"/*", "refs/tags/*:refs/tags/*")
 	cmd.Stdout = gitOut
 	cmd.Stderr = a.errOut
 	if err := cmd.Run(); err != nil {

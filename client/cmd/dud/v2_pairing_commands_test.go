@@ -604,9 +604,41 @@ func (transport *revocationTestTransport) Do(ctx context.Context, request v2Requ
 	}
 }
 
-func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
-	root := t.TempDir()
-	setPairingTestHome(t, filepath.Join(root, "inviter"))
+// v2PairingFlow is one full pairing carried out between two simulated devices
+// in a single test. Each device has its own world directory under root, and the
+// phases below switch between them the way the two real devices alternate.
+type v2PairingFlow struct {
+	root           string
+	inviterApp     *app
+	inviterPaths   v2Paths
+	inviterPending *v2PendingPairing
+	inviteeApp     *app
+	inviteePaths   v2Paths
+	inviteePending *v2PendingPairing
+	code           string
+	createMap      map[int]any
+	acceptWrapper  map[int]any
+}
+
+// inviterHome and inviteeHome point the process at one device's world
+// directory. Only one is in effect at a time, so each phase reads and writes
+// the state of the device it belongs to.
+func (flow *v2PairingFlow) inviterHome(t *testing.T) {
+	t.Helper()
+	setPairingTestHome(t, filepath.Join(flow.root, "inviter"))
+}
+
+func (flow *v2PairingFlow) inviteeHome(t *testing.T) {
+	t.Helper()
+	setPairingTestHome(t, filepath.Join(flow.root, "invitee"))
+}
+
+// startV2PairingFlow creates the inviter's invitation and the rendezvous
+// payload that carries it.
+func startV2PairingFlow(t *testing.T) *v2PairingFlow {
+	t.Helper()
+	flow := &v2PairingFlow{root: t.TempDir()}
+	flow.inviterHome(t)
 	inviterConfig, inviterPaths, err := initializeV2Config(
 		"desktop",
 		"https://dud.example.com",
@@ -616,8 +648,9 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
-	inviterPending, code, createBody, err := a.newV2Invitation(
+	flow.inviterPaths = inviterPaths
+	flow.inviterApp = newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	inviterPending, code, createBody, err := flow.inviterApp.newV2Invitation(
 		inviterConfig,
 		inviterPaths,
 		"laptop",
@@ -634,8 +667,19 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 	if err := v2DecMode.Unmarshal(createBody, &createMap); err != nil {
 		t.Fatal(err)
 	}
+	flow.inviterPending = inviterPending
+	flow.code = code
+	flow.createMap = createMap
+	return flow
+}
 
-	setPairingTestHome(t, filepath.Join(root, "invitee"))
+// acceptInvitation runs the invitee's half: it opens the invitation with the
+// pairing code and posts an acceptance. The transport stops the flow right
+// after the acceptance is sent, so the test drives the inviter's response
+// itself rather than through a status poll.
+func (flow *v2PairingFlow) acceptInvitation(t *testing.T) {
+	t.Helper()
+	flow.inviteeHome(t)
 	_, inviteePaths, err := initializeV2Config(
 		"laptop",
 		"https://dud.example.com",
@@ -645,24 +689,26 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	flow.inviteePaths = inviteePaths
 	acceptTransport := &pairingFlowTransport{
-		locator:    inviterPending.RendezvousLocator,
-		nonce:      createMap[3].([]byte),
-		ciphertext: createMap[4].([]byte),
-		expiresAt:  createMap[5].(uint64),
+		locator:    flow.inviterPending.RendezvousLocator,
+		nonce:      flow.createMap[3].([]byte),
+		ciphertext: flow.createMap[4].([]byte),
+		expiresAt:  flow.createMap[5].(uint64),
 		stopStatus: true,
 	}
-	inviteeApp := newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
-	inviteeApp.newV2Transport = func(v2TransportOptions) (v2Transport, error) {
+	flow.inviteeApp = newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	flow.inviteeApp.newV2Transport = func(v2TransportOptions) (v2Transport, error) {
 		return acceptTransport, nil
 	}
-	if err := inviteeApp.acceptV2PeerInvitation("desktop", code, false); err == nil || !strings.Contains(err.Error(), "stop after acceptance") {
+	if err := flow.inviteeApp.acceptV2PeerInvitation("desktop", flow.code, false); err == nil || !strings.Contains(err.Error(), "stop after acceptance") {
 		t.Fatalf("accept flow stop = %v", err)
 	}
 	inviteePending, err := loadV2PendingPairing(inviteePaths, "desktop")
 	if err != nil {
 		t.Fatal(err)
 	}
+	flow.inviteePending = inviteePending
 	if !slices.Equal(inviteePending.PeerFeatures, v2LocalPeerFeatures) {
 		t.Fatalf("invitee retained peer features %#v, want %#v", inviteePending.PeerFeatures, v2LocalPeerFeatures)
 	}
@@ -670,6 +716,7 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 	if err := v2DecMode.Unmarshal(acceptTransport.acceptBody, &acceptWrapper); err != nil {
 		t.Fatal(err)
 	}
+	flow.acceptWrapper = acceptWrapper
 	acceptance, err := normalizeV2Map(acceptWrapper[2])
 	if err != nil {
 		t.Fatal(err)
@@ -677,17 +724,24 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 	if key, ok := acceptance[8].([]byte); !ok || len(key) != 32 {
 		t.Fatalf("acceptance field 8 = %T, %d", acceptance[8], len(key))
 	}
+}
 
-	setPairingTestHome(t, filepath.Join(root, "inviter"))
-	inviterPending, err = loadV2PendingPairing(inviterPaths, "laptop")
+// confirmKeys runs both key confirmations and checks that the two devices
+// arrived at the same relationship secrets in opposite directions, which is
+// what the whole exchange exists to establish.
+func (flow *v2PairingFlow) confirmKeys(t *testing.T) {
+	t.Helper()
+	flow.inviterHome(t)
+	inviterPending, err := loadV2PendingPairing(flow.inviterPaths, "laptop")
 	if err != nil {
 		t.Fatal(err)
 	}
+	flow.inviterPending = inviterPending
 	confirmTransport := &pairingFlowTransport{locator: inviterPending.RendezvousLocator}
-	if err := a.completeInviterKeyConfirmation(
-		inviterPaths,
+	if err := flow.inviterApp.completeInviterKeyConfirmation(
+		flow.inviterPaths,
 		inviterPending,
-		map[int]any{1: acceptWrapper[2], 2: acceptWrapper[3]},
+		map[int]any{1: flow.acceptWrapper[2], 2: flow.acceptWrapper[3]},
 		confirmTransport,
 	); err != nil {
 		t.Fatal(err)
@@ -699,14 +753,14 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 	if err := v2DecMode.Unmarshal(confirmTransport.confirmBody, &confirmWrapper); err != nil {
 		t.Fatal(err)
 	}
-
-	setPairingTestHome(t, filepath.Join(root, "invitee"))
-	inviteePending, err = loadV2PendingPairing(inviteePaths, "desktop")
+	flow.inviteeHome(t)
+	inviteePending, err := loadV2PendingPairing(flow.inviteePaths, "desktop")
 	if err != nil {
 		t.Fatal(err)
 	}
+	flow.inviteePending = inviteePending
 	if err := completeInviteeKeyConfirmation(
-		inviteePaths,
+		flow.inviteePaths,
 		inviteePending,
 		map[int]any{1: confirmWrapper[1], 2: confirmWrapper[2]},
 	); err != nil {
@@ -716,17 +770,32 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 		inviterPending.InboundRelationshipSecret != inviteePending.OutboundRelationshipSecret {
 		t.Fatal("directional relationship secrets do not agree across devices")
 	}
+}
 
-	inviteeComplete := &pairingFlowTransport{locator: inviteePending.RendezvousLocator}
-	if err := inviteeApp.submitV2PairingCompletion(inviteePaths, inviteePending, inviteeComplete); err != nil {
+// submitCompletions has both devices post their pairing completion and returns
+// each one's body keyed by the role that sent it.
+func (flow *v2PairingFlow) submitCompletions(t *testing.T) map[uint64][]byte {
+	t.Helper()
+	inviteeComplete := &pairingFlowTransport{locator: flow.inviteePending.RendezvousLocator}
+	if err := flow.inviteeApp.submitV2PairingCompletion(flow.inviteePaths, flow.inviteePending, inviteeComplete); err != nil {
 		t.Fatal(err)
 	}
-	setPairingTestHome(t, filepath.Join(root, "inviter"))
-	inviterComplete := &pairingFlowTransport{locator: inviterPending.RendezvousLocator}
-	if err := a.submitV2PairingCompletion(inviterPaths, inviterPending, inviterComplete); err != nil {
+	flow.inviterHome(t)
+	inviterComplete := &pairingFlowTransport{locator: flow.inviterPending.RendezvousLocator}
+	if err := flow.inviterApp.submitV2PairingCompletion(flow.inviterPaths, flow.inviterPending, inviterComplete); err != nil {
 		t.Fatal(err)
 	}
-	for role, body := range map[uint64][]byte{0: inviterComplete.completeBody, 1: inviteeComplete.completeBody} {
+	return map[uint64][]byte{0: inviterComplete.completeBody, 1: inviteeComplete.completeBody}
+}
+
+// assertV2PairingCompletionSignatures checks that each completion states the
+// role that sent it and verifies under that device's own signing key. The
+// inviter's key comes from the invitation it published and the invitee's from
+// the profile the inviter stored, so neither is taken from the message being
+// checked.
+func assertV2PairingCompletionSignatures(t *testing.T, flow *v2PairingFlow, bodies map[uint64][]byte) {
+	t.Helper()
+	for role, body := range bodies {
 		var wrapper map[int]any
 		if err := v2DecMode.Unmarshal(body, &wrapper); err != nil {
 			t.Fatal(err)
@@ -738,9 +807,9 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 		if !v2UintEquals(completion[5], role) {
 			t.Fatalf("completion role = %v, want %d", completion[5], role)
 		}
-		publicKey := inviterPending.PeerSigningPublicKey
+		publicKey := flow.inviterPending.PeerSigningPublicKey
 		if role == 0 {
-			invitation, _ := decodeV2StoredMap(inviterPending.InvitationMap)
+			invitation, _ := decodeV2StoredMap(flow.inviterPending.InvitationMap)
 			publicKey = v2Base64URL(invitation[8].([]byte))
 		}
 		key, err := decodeV2Base64URL(publicKey, 32)
@@ -752,6 +821,13 @@ func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
 			t.Fatalf("role %d completion signature did not verify", role)
 		}
 	}
+}
+
+func TestV2InviteAcceptKeyConfirmAndSignedCompletion(t *testing.T) {
+	flow := startV2PairingFlow(t)
+	flow.acceptInvitation(t)
+	flow.confirmKeys(t)
+	assertV2PairingCompletionSignatures(t, flow, flow.submitCompletions(t))
 }
 
 func TestPeerAcceptResumesSavedAcceptance(t *testing.T) {

@@ -35,7 +35,7 @@ import {
   registerCapability,
   requestedPolicy,
   V2_DATA_SLOT,
-  V2_DEPLOYMENT_KEY,
+  V2_DELIVERY_DEPLOYMENT_KEY,
   V2_EPOCH,
   V2_RELATIONSHIP_CAPABILITIES,
   V2_TOKENS,
@@ -105,7 +105,7 @@ async function startWorker(t) {
       DUD_DROP_SECRET: 'workerd-suite-v1-secret',
       DUD_PEER_ENABLED: 'true',
       DUD_PEER_OPEN_ENROLLMENT: 'true',
-      DUD_PEER_DEPLOYMENT_KEY: base64url(V2_DEPLOYMENT_KEY),
+      DUD_PEER_DEPLOYMENT_KEY: base64url(V2_DELIVERY_DEPLOYMENT_KEY),
     },
   });
   t.after(() => miniflare.dispose());

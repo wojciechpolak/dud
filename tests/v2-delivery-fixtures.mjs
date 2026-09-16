@@ -40,6 +40,9 @@ import {
   V2_CONTENT_SHA256_HEADER,
 } from '../dist/src/v2-http.js';
 import { createMigratedLocalD1, LocalD1Database } from './d1-local.mjs';
+import { V2_ORIGIN } from './v2-helpers.mjs';
+
+export { V2_ORIGIN };
 
 // Workers expose FixedLengthStream; Node does not, and the handler only uses it
 // to declare a length it already enforces.
@@ -51,10 +54,9 @@ globalThis.FixedLengthStream ??= class FixedLengthStream extends (
   }
 };
 
-export const V2_ORIGIN = 'https://dud.example.com';
 export const V2_NOW = 1_800_000_000;
 export const V2_EPOCH = 20_000;
-export const V2_DEPLOYMENT_KEY = Uint8Array.from(
+export const V2_DELIVERY_DEPLOYMENT_KEY = Uint8Array.from(
   { length: 32 },
   (_, index) => index + 33,
 );
@@ -350,7 +352,7 @@ export async function buildInboxRequest({
   );
 }
 
-export async function buildCompletionRequest({
+async function buildCompletionRequest({
   deliveryId,
   ackNonce,
   controlNonce,
@@ -513,7 +515,7 @@ export async function registerCapability(
     {
       ...capability,
       encryptedTokenSecret: await encryptV2TokenSecret(
-        V2_DEPLOYMENT_KEY,
+        V2_DELIVERY_DEPLOYMENT_KEY,
         capability,
         tokenSecret,
         (length) => new Uint8Array(length).fill(id.length),
@@ -622,7 +624,7 @@ export function attachHandler(
   const handler = createV2DeliveryHandler({
     repository,
     bodyStore,
-    deploymentKey: V2_DEPLOYMENT_KEY,
+    deploymentKey: V2_DELIVERY_DEPLOYMENT_KEY,
     now: () => current * 1000,
     ...handlerOptions,
   });

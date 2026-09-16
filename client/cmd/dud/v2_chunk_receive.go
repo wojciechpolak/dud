@@ -91,7 +91,7 @@ func verifyV2ChunkFile(path string, length uint64, digest []byte) bool {
 	if err != nil {
 		return false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	hasher := sha256.New()
 	written, err := io.Copy(hasher, io.LimitReader(file, int64(length)+1))
 	return err == nil && written == int64(length) && bytes.Equal(hasher.Sum(nil), digest)
@@ -198,7 +198,7 @@ func atomicCopyV2File(target, source string) error {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := setPrivatePathPermissions(temporary.Name(), false); err != nil {
 		_ = temporary.Close()
 		return err
@@ -224,67 +224,58 @@ func atomicCopyV2File(target, source string) error {
 	return replaceLocalFile(temporaryPath, target)
 }
 
-func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, delivery *v2GranularInboxDelivery, envelope *validatedV2Envelope, sourceSlotEpoch uint64, policyDigest []byte, sequence, expiresAt uint64) (string, [32]byte, v2InboundTransfer, bool, error) {
-	var resultDigest [32]byte
-	descriptorDigest := hex.EncodeToString(envelope.DescriptorDigest[:])
-	chunkSize, plaintextLength, plaintextHash, err := descriptorV2ChunkManifest(envelope.Descriptor, delivery.Chunks)
-	if err != nil {
-		return "", resultDigest, v2InboundTransfer{}, false, err
-	}
-	copy(resultDigest[:], plaintextHash)
-	transferDirectory := filepath.Join(runtime.paths.StateDir, "transfers", runtime.state.RelationshipID)
-	chunkDirectory := filepath.Join(transferDirectory, descriptorDigest+".chunks")
-	if err := os.MkdirAll(chunkDirectory, 0o700); err != nil {
-		return "", resultDigest, v2InboundTransfer{}, false, err
-	}
-	parts := inboundV2ChunkParts(chunkDirectory, delivery.Chunks)
-	durableOutput := filepath.Join(transferDirectory, descriptorDigest)
+// openV2InboundChunkTransfer finds or creates the record that tracks a chunked
+// delivery across runs, and reports whether an earlier run had already started
+// it. A record that does not agree with the signed descriptor on every field
+// describes a different delivery under the same digest, so its parts are
+// discarded and the transfer starts again rather than mixing the two.
+func (runtime *v2PeerRuntime) openV2InboundChunkTransfer(delivery *v2GranularInboxDelivery, descriptorDigest, chunkDirectory, durableOutput string, manifest v2InboundChunkManifest, parts []v2InboundChunkPart, policyDigest []byte, sequence, expiresAt uint64) (v2InboundTransfer, bool, error) {
 	transfer, resume := runtime.state.InboundTransfers[descriptorDigest]
-	if resume {
-		if !matchesV2InboundChunkState(transfer, delivery, descriptorDigest, sequence, chunkSize, plaintextLength, plaintextHash, policyDigest, parts) {
-			if err := discardV2InboundChunks(transfer); err != nil {
-				return "", resultDigest, v2InboundTransfer{}, true, fmt.Errorf("discard conflicting inbound chunk state: %w", err)
-			}
-			delete(runtime.state.InboundTransfers, descriptorDigest)
-			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-				return "", resultDigest, v2InboundTransfer{}, true, err
-			}
-			resume = false
+	if resume && !matchesV2InboundChunkState(transfer, delivery, descriptorDigest, sequence, manifest.chunkSize, manifest.plaintextLength, manifest.plaintextHash, policyDigest, parts) {
+		if err := discardV2InboundChunks(transfer); err != nil {
+			return v2InboundTransfer{}, true, fmt.Errorf("discard conflicting inbound chunk state: %w", err)
 		}
-	}
-	if !resume {
-		if err := os.MkdirAll(chunkDirectory, 0o700); err != nil {
-			return "", resultDigest, v2InboundTransfer{}, false, err
-		}
-		transfer = v2InboundTransfer{
-			EntryID:              hex.EncodeToString(delivery.ID),
-			Slot:                 hex.EncodeToString(delivery.Slot),
-			DescriptorDigest:     descriptorDigest,
-			Sequence:             sequence,
-			Phase:                "chunks-downloading",
-			TemporaryOutput:      durableOutput,
-			OutputDigest:         hex.EncodeToString(plaintextHash),
-			PolicyDigest:         hex.EncodeToString(policyDigest),
-			DescriptorCiphertext: v2Base64URL(delivery.EncryptedDescriptor),
-			ChunkSize:            chunkSize,
-			PlaintextLength:      plaintextLength,
-			Chunks:               parts,
-			ExpiresAt:            expiresAt,
-		}
-		runtime.state.InboundTransfers[descriptorDigest] = transfer
+		delete(runtime.state.InboundTransfers, descriptorDigest)
 		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-			return "", resultDigest, v2InboundTransfer{}, false, err
+			return v2InboundTransfer{}, true, err
 		}
+		resume = false
 	}
-	if transfer.Phase == "payload-verified" || transfer.Phase == "output-committed" {
-		if !verifyV2ChunkFile(durableOutput, plaintextLength, plaintextHash) {
-			return "", resultDigest, v2InboundTransfer{}, resume, errors.New("durable peer output conflicts with the signed delivery")
-		}
-		return durableOutput, resultDigest, transfer, resume, nil
+	if resume {
+		return transfer, true, nil
 	}
+	if err := os.MkdirAll(chunkDirectory, 0o700); err != nil {
+		return v2InboundTransfer{}, false, err
+	}
+	transfer = v2InboundTransfer{
+		EntryID:              hex.EncodeToString(delivery.ID),
+		Slot:                 hex.EncodeToString(delivery.Slot),
+		DescriptorDigest:     descriptorDigest,
+		Sequence:             sequence,
+		Phase:                "chunks-downloading",
+		TemporaryOutput:      durableOutput,
+		OutputDigest:         hex.EncodeToString(manifest.plaintextHash),
+		PolicyDigest:         hex.EncodeToString(policyDigest),
+		DescriptorCiphertext: v2Base64URL(delivery.EncryptedDescriptor),
+		ChunkSize:            manifest.chunkSize,
+		PlaintextLength:      manifest.plaintextLength,
+		Chunks:               parts,
+		ExpiresAt:            expiresAt,
+	}
+	runtime.state.InboundTransfers[descriptorDigest] = transfer
+	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+		return v2InboundTransfer{}, false, err
+	}
+	return transfer, false, nil
+}
+
+// checkV2InboundChunkSpace refuses a transfer that cannot finish on this disk.
+// The reservation covers the parts still to download plus the assembled
+// plaintext, because both exist at once until the parts are removed.
+func checkV2InboundChunkSpace(chunkDirectory string, transfer v2InboundTransfer, plaintextLength uint64) error {
 	available, err := v2AvailableBytes(chunkDirectory)
 	if err != nil {
-		return "", resultDigest, v2InboundTransfer{}, resume, err
+		return err
 	}
 	needed := plaintextLength
 	for _, part := range transfer.Chunks {
@@ -293,15 +284,23 @@ func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, deliv
 		}
 	}
 	if available < needed {
-		return "", resultDigest, v2InboundTransfer{}, resume, fmt.Errorf("resumable receive needs %d bytes but only %d bytes are free", needed, available)
+		return fmt.Errorf("resumable receive needs %d bytes but only %d bytes are free", needed, available)
 	}
+	return nil
+}
+
+// downloadV2InboundChunks fetches the parts this device does not already hold.
+// A part already on disk whose contents hash to what the descriptor signed is
+// kept, so an interrupted receive re-downloads only what is missing. The
+// file's digest decides that, not the record, so a part truncated by a crash is
+// detected and fetched again.
+func (runtime *v2PeerRuntime) downloadV2InboundChunks(ctx context.Context, delivery *v2GranularInboxDelivery, descriptorDigest string, transfer *v2InboundTransfer, sourceSlotEpoch uint64) error {
 	readSecret, err := v2CapabilitySecret(runtime.state, v2InboundDirection(runtime.state.Role), "read")
 	if err != nil {
-		return "", resultDigest, v2InboundTransfer{}, resume, err
+		return err
 	}
-	var downloadTotal int64
+	var downloadTotal, downloadedBase int64
 	reusable := make([]bool, len(transfer.Chunks))
-	var downloadedBase int64
 	for index, part := range transfer.Chunks {
 		downloadTotal += int64(part.CiphertextLength)
 		digest, _ := hex.DecodeString(part.CiphertextHash)
@@ -318,9 +317,9 @@ func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, deliv
 		if reusable[index] {
 			if !part.Downloaded {
 				part.Downloaded = true
-				runtime.state.InboundTransfers[descriptorDigest] = transfer
+				runtime.state.InboundTransfers[descriptorDigest] = *transfer
 				if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-					return "", resultDigest, v2InboundTransfer{}, resume, err
+					return err
 				}
 			}
 			continue
@@ -330,7 +329,7 @@ func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, deliv
 		_ = os.Remove(part.Path + ".tmp")
 		proof, err := newV2GranularSlotProofInput(readSecret, v2DirectionName(v2InboundDirection(runtime.state.Role)), "read", v2GranularDataChain, delivery.Slot, sourceSlotEpoch, time.Now())
 		if err != nil {
-			return "", resultDigest, v2InboundTransfer{}, resume, err
+			return err
 		}
 		base := downloadedBase
 		stream, err := getV2DeliveryChunkObserved(ctx, runtime.transport, runtime.origin, delivery.ID, delivery.Chunks[index], proof, func(transferred, _ int64) {
@@ -339,46 +338,104 @@ func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, deliv
 			}
 		})
 		if err != nil {
-			return "", resultDigest, v2InboundTransfer{}, resume, err
+			return err
 		}
 		if err := writeV2DownloadedChunk(part.Path, stream); err != nil {
-			return "", resultDigest, v2InboundTransfer{}, resume, err
+			return err
 		}
 		part.Downloaded = true
 		downloadedBase += int64(part.CiphertextLength)
 		if runtime.progress != nil {
 			runtime.progress.Set(downloadedBase, downloadTotal)
 		}
-		runtime.state.InboundTransfers[descriptorDigest] = transfer
+		runtime.state.InboundTransfers[descriptorDigest] = *transfer
 		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-			return "", resultDigest, v2InboundTransfer{}, resume, err
+			return err
 		}
 	}
+	return nil
+}
+
+// assembleV2InboundPayload decrypts the downloaded parts into the single
+// plaintext the descriptor signed and drops the parts. The assembled file is
+// recorded before the parts are removed, so an interrupted assembly leaves
+// either the parts to retry from or a verified payload, never neither.
+func (runtime *v2PeerRuntime) assembleV2InboundPayload(descriptorDigest, durableOutput, chunkDirectory string, transfer *v2InboundTransfer, manifest v2InboundChunkManifest) error {
 	if runtime.progress != nil {
 		runtime.progress.Phase("verification and completion", 0)
 	}
-	if verifyV2ChunkFile(durableOutput, plaintextLength, plaintextHash) {
-		transfer.Phase = "payload-verified"
-	} else {
+	if !verifyV2ChunkFile(durableOutput, manifest.plaintextLength, manifest.plaintextHash) {
 		_ = os.Remove(durableOutput + ".tmp")
-		if err := assembleV2ChunkedPlaintext(durableOutput, transfer.Chunks, chunkSize, plaintextLength, plaintextHash, runtime.identity); err != nil {
-			return "", resultDigest, v2InboundTransfer{}, resume, err
+		if err := assembleV2ChunkedPlaintext(durableOutput, transfer.Chunks, manifest.chunkSize, manifest.plaintextLength, manifest.plaintextHash, runtime.identity); err != nil {
+			return err
 		}
-		transfer.Phase = "payload-verified"
 	}
+	transfer.Phase = "payload-verified"
 	transfer.PlaintextPayload = durableOutput
 	transfer.TemporaryOutput = durableOutput
-	runtime.state.InboundTransfers[descriptorDigest] = transfer
+	runtime.state.InboundTransfers[descriptorDigest] = *transfer
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-		return "", resultDigest, v2InboundTransfer{}, resume, err
+		return err
 	}
 	for _, part := range transfer.Chunks {
 		_ = os.Remove(part.Path)
 	}
 	_ = os.Remove(chunkDirectory)
 	transfer.Chunks = nil
-	runtime.state.InboundTransfers[descriptorDigest] = transfer
-	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+	runtime.state.InboundTransfers[descriptorDigest] = *transfer
+	return writeV2PeerDeliveryState(runtime.paths, runtime.state)
+}
+
+// v2InboundChunkManifest holds what a chunked descriptor commits to about the
+// payload as a whole: the size each part covers, the total plaintext length,
+// and the digest the assembled plaintext must have.
+type v2InboundChunkManifest struct {
+	chunkSize       uint64
+	plaintextLength uint64
+	plaintextHash   []byte
+}
+
+// receiveV2ChunkedPayload downloads and reassembles a delivery that arrived as
+// separate parts, and reports the path of the assembled plaintext together with
+// its digest and whether the work resumed an earlier run. Every step records
+// its progress before the next begins, so an interrupted receive continues from
+// where it stopped rather than re-downloading the payload.
+func (runtime *v2PeerRuntime) receiveV2ChunkedPayload(ctx context.Context, delivery *v2GranularInboxDelivery, envelope *validatedV2Envelope, sourceSlotEpoch uint64, policyDigest []byte, sequence, expiresAt uint64) (string, [32]byte, v2InboundTransfer, bool, error) {
+	var resultDigest [32]byte
+	descriptorDigest := hex.EncodeToString(envelope.DescriptorDigest[:])
+	chunkSize, plaintextLength, plaintextHash, err := descriptorV2ChunkManifest(envelope.Descriptor, delivery.Chunks)
+	if err != nil {
+		return "", resultDigest, v2InboundTransfer{}, false, err
+	}
+	manifest := v2InboundChunkManifest{chunkSize: chunkSize, plaintextLength: plaintextLength, plaintextHash: plaintextHash}
+	copy(resultDigest[:], plaintextHash)
+	transferDirectory := filepath.Join(runtime.paths.StateDir, "transfers", runtime.state.RelationshipID)
+	chunkDirectory := filepath.Join(transferDirectory, descriptorDigest+".chunks")
+	if err := os.MkdirAll(chunkDirectory, 0o700); err != nil {
+		return "", resultDigest, v2InboundTransfer{}, false, err
+	}
+	parts := inboundV2ChunkParts(chunkDirectory, delivery.Chunks)
+	durableOutput := filepath.Join(transferDirectory, descriptorDigest)
+	transfer, resume, err := runtime.openV2InboundChunkTransfer(delivery, descriptorDigest, chunkDirectory, durableOutput, manifest, parts, policyDigest, sequence, expiresAt)
+	if err != nil {
+		return "", resultDigest, v2InboundTransfer{}, resume, err
+	}
+	// A transfer that already reached its payload still has to prove the
+	// assembled file is the one the descriptor signed: nothing else guards a
+	// durable output that was replaced between runs.
+	if transfer.Phase == "payload-verified" || transfer.Phase == "output-committed" {
+		if !verifyV2ChunkFile(durableOutput, plaintextLength, plaintextHash) {
+			return "", resultDigest, v2InboundTransfer{}, resume, errors.New("durable peer output conflicts with the signed delivery")
+		}
+		return durableOutput, resultDigest, transfer, resume, nil
+	}
+	if err := checkV2InboundChunkSpace(chunkDirectory, transfer, plaintextLength); err != nil {
+		return "", resultDigest, v2InboundTransfer{}, resume, err
+	}
+	if err := runtime.downloadV2InboundChunks(ctx, delivery, descriptorDigest, &transfer, sourceSlotEpoch); err != nil {
+		return "", resultDigest, v2InboundTransfer{}, resume, err
+	}
+	if err := runtime.assembleV2InboundPayload(descriptorDigest, durableOutput, chunkDirectory, &transfer, manifest); err != nil {
 		return "", resultDigest, v2InboundTransfer{}, resume, err
 	}
 	return durableOutput, resultDigest, transfer, resume, nil

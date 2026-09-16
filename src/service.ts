@@ -332,6 +332,27 @@ async function meterLegacyRequest(
       );
 }
 
+/**
+ * A dead drop upload shares the peer deployment's concurrency, staging, object,
+ * and total-byte ceilings, counted across its in-flight and committed uploads.
+ */
+function legacyQuotaAdmits(
+  state: V2StoredState,
+  limits: DudConfig['v2Limits'],
+  reservedBytes: number,
+): boolean {
+  const reservations = Object.keys(state.reservations).length;
+  const reservedForLegacy = legacyReservedBytes(state);
+  return (
+    reservations < limits.maxConcurrentUploads &&
+    reservedForLegacy + reservedBytes <= limits.maxStagedBytes &&
+    Object.keys(state.legacyObjects).length + reservations <
+      limits.maxObjectsPerCapability &&
+    state.legacyCommittedBytes + reservedForLegacy + reservedBytes <=
+      limits.maxTotalBytes
+  );
+}
+
 async function reserveLegacyUpload(
   service: DudServiceContext,
   objectId: string,
@@ -347,18 +368,7 @@ async function reserveLegacyUpload(
   try {
     await service.legacyAccounting.transaction((state) => {
       pruneLegacyAccounting(state, now);
-      const legacyReservations = Object.values(state.reservations);
-      const reservedForLegacy = legacyReservedBytes(state);
-      if (
-        legacyReservations.length >=
-          service.config.v2Limits.maxConcurrentUploads ||
-        reservedForLegacy + reservedBytes >
-          service.config.v2Limits.maxStagedBytes ||
-        Object.keys(state.legacyObjects).length + legacyReservations.length >=
-          service.config.v2Limits.maxObjectsPerCapability ||
-        state.legacyCommittedBytes + reservedForLegacy + reservedBytes >
-          service.config.v2Limits.maxTotalBytes
-      ) {
+      if (!legacyQuotaAdmits(state, service.config.v2Limits, reservedBytes)) {
         throw new Error('legacy-quota');
       }
       state.reservations[reservationId] = {
@@ -1104,6 +1114,60 @@ async function handleFetch(
   return shellResponse();
 }
 
+/**
+ * Decodes the peer-mode credentials and refuses a deployment that reuses one
+ * credential for two roles or leaves enrollment open without opting in.
+ */
+function parseV2Credentials(config: DudConfig): {
+  deploymentKey: Uint8Array;
+  adminSecret?: Uint8Array;
+  enrollmentSecret?: string;
+} {
+  const deploymentKey = parseV2DeploymentKey(config.v2DeploymentKey);
+  const adminSecret = config.v2AdminSecret
+    ? parseV2Credential('DUD_PEER_ADMIN_SECRET', config.v2AdminSecret)
+    : undefined;
+  const enrollmentSecret = parseV2EnrollmentSecret(
+    config.v2Secret,
+    config.v2AcceptWeakEnrollmentKdf,
+  );
+  // Compare 32-byte credentials after decoding to catch two encodings of one
+  // key. This includes an enrollment secret carrying a derived key, whose
+  // prefix can make a reused deployment key look distinct. The v1 secret and
+  // enrollment passphrase are opaque strings, so compare them as text.
+  const textCredentials = [
+    config.secretToken,
+    config.v2DeploymentKey,
+    config.v2AdminSecret,
+    config.v2Secret,
+  ].filter((value): value is string => value !== undefined);
+  const carriedEnrollmentKey =
+    enrollmentSecret === undefined
+      ? undefined
+      : parseV2EnrollmentCredential(enrollmentSecret);
+  const reusedBinaryKey =
+    carriedEnrollmentKey?.kind === 'key' &&
+    [deploymentKey, adminSecret].some(
+      (credential) =>
+        credential && bytesEqual(credential, carriedEnrollmentKey.key),
+    );
+  const collides =
+    (adminSecret && bytesEqual(adminSecret, deploymentKey)) ||
+    reusedBinaryKey ||
+    new Set(textCredentials).size !== textCredentials.length;
+  if (collides) {
+    throw new Error(
+      'V1, v2 administration, v2 enrollment, and v2 deployment credentials must be distinct.',
+    );
+  }
+  if (!enrollmentSecret && !config.v2OpenEnrollment) {
+    throw new Error(
+      'DUD_PEER_SECRET is required when v2 is enabled. Set DUD_PEER_OPEN_ENROLLMENT=true to accept pairing from anyone who learns the hostname.',
+    );
+  }
+  return { deploymentKey, adminSecret, enrollmentSecret };
+}
+
 export function createDudService(dependencies: DudDependencies) {
   const config = {
     ...DEFAULT_CONFIG,
@@ -1124,48 +1188,8 @@ export function createDudService(dependencies: DudDependencies) {
     if (!dependencies.v2Store) {
       throw new Error('A v2 store is required when v2 endpoints are enabled.');
     }
-    const deploymentKey = parseV2DeploymentKey(config.v2DeploymentKey);
-    const adminSecret = config.v2AdminSecret
-      ? parseV2Credential('DUD_PEER_ADMIN_SECRET', config.v2AdminSecret)
-      : undefined;
-    const enrollmentSecret = parseV2EnrollmentSecret(
-      config.v2Secret,
-      config.v2AcceptWeakEnrollmentKdf,
-    );
-    // Compare 32-byte credentials after decoding to catch two encodings of one
-    // key. This includes an enrollment secret carrying a derived key, whose
-    // prefix can make a reused deployment key look distinct. The v1 secret and
-    // enrollment passphrase are opaque strings, so compare them as text.
-    const textCredentials = [
-      config.secretToken,
-      config.v2DeploymentKey,
-      config.v2AdminSecret,
-      config.v2Secret,
-    ].filter((value): value is string => value !== undefined);
-    const carriedEnrollmentKey =
-      enrollmentSecret === undefined
-        ? undefined
-        : parseV2EnrollmentCredential(enrollmentSecret);
-    const reusedBinaryKey =
-      carriedEnrollmentKey?.kind === 'key' &&
-      [deploymentKey, adminSecret].some(
-        (credential) =>
-          credential && bytesEqual(credential, carriedEnrollmentKey.key),
-      );
-    const collides =
-      (adminSecret && bytesEqual(adminSecret, deploymentKey)) ||
-      reusedBinaryKey ||
-      new Set(textCredentials).size !== textCredentials.length;
-    if (collides) {
-      throw new Error(
-        'V1, v2 administration, v2 enrollment, and v2 deployment credentials must be distinct.',
-      );
-    }
-    if (!enrollmentSecret && !config.v2OpenEnrollment) {
-      throw new Error(
-        'DUD_PEER_SECRET is required when v2 is enabled. Set DUD_PEER_OPEN_ENROLLMENT=true to accept pairing from anyone who learns the hostname.',
-      );
-    }
+    const { deploymentKey, adminSecret, enrollmentSecret } =
+      parseV2Credentials(config);
     if (dependencies.v2Store.wholeState) {
       service.legacyAccounting = dependencies.v2Store;
     }

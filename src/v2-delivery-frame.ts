@@ -277,7 +277,7 @@ export function encodeV2DeliveryFrame(
 }
 
 /** Decodes and verifies the common framing envelope before it is published. */
-export function decodeV2DeliveryFrame(
+function decodeV2DeliveryFrame(
   frame: Uint8Array,
   payloadLengthKey: number,
   payloadDigestKey: number,

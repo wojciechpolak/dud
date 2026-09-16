@@ -8,14 +8,23 @@ import { join } from 'node:path';
 import { bytesEqual } from './cbor.js';
 import {
   v2DeliveryChunkKey,
+  v2ExpiredChunkPartBodyKeys,
   v2StagedChunkKey,
   validateV2BodyPartDeclarations,
 } from './v2-body-keys.js';
 import {
+  v2RelationshipStatusFromRows,
+  type V2RelationshipStatus,
+} from './v2-relationship-status.js';
+import {
   applyV2SQLiteMigrations,
   type V2SQLiteDatabase,
 } from './v2-sqlite-schema.js';
-import { V2OperationConflictError } from './v2-repository.js';
+import {
+  countV2AuthorizationClaims,
+  isV2ChunkUploadLeaseWellFormed,
+  V2OperationConflictError,
+} from './v2-repository.js';
 import type {
   V2CapabilityRegistration,
   V2CapabilityReissueInput,
@@ -34,6 +43,27 @@ import type {
   D1PairingRecord,
   V2PairingCommit,
 } from './v2-d1-pairing-repository.js';
+
+/**
+ * Binds a relationship, direction, and clock followed by one
+ * `(slot = ? AND epoch = ?)` alternative per requested slot.
+ */
+function slotFilter(
+  relationshipId: string,
+  direction: 0 | 1,
+  now: number,
+  slots: readonly { slot: Uint8Array; epoch: number }[],
+): { clauses: string; parameters: unknown[] } {
+  return {
+    clauses: slots.map(() => '(slot = ? AND epoch = ?)').join(' OR '),
+    parameters: [
+      relationshipId,
+      direction,
+      now,
+      ...slots.flatMap(({ slot, epoch }) => [slot, epoch]),
+    ],
+  };
+}
 
 function randomRecordId(): string {
   return crypto.randomUUID().replaceAll('-', '');
@@ -340,17 +370,8 @@ export class SQLiteV2Database {
         | undefined;
       if (
         !capability ||
-        input.expiresAt <= input.now ||
         input.expiresAt > Number(capability.expires_at) ||
-        !Number.isSafeInteger(input.chain) ||
-        input.chain < 0 ||
-        input.slot.byteLength !== 16 ||
-        !Number.isSafeInteger(input.epoch) ||
-        input.epoch < 0 ||
-        !Number.isSafeInteger(input.maximumConcurrentUploads) ||
-        input.maximumConcurrentUploads < 1 ||
-        !Number.isSafeInteger(input.maximumStagedBytes) ||
-        input.maximumStagedBytes < input.totalLength
+        !isV2ChunkUploadLeaseWellFormed(input)
       ) {
         throw new Error('Chunk upload lease is invalid.');
       }
@@ -469,23 +490,9 @@ export class SQLiteV2Database {
     authorization: V2RepositoryAuthorization;
     now: number;
   }): V2ChunkUpload {
-    const database = this.requireDatabase();
-    database.exec('BEGIN IMMEDIATE');
-    try {
-      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
-      this.authorizeChunkRequest(
-        database,
-        input.capabilityId,
-        input.authorization,
-        input.now,
-      );
-      const upload = this.requireChunkUpload(input.id);
-      database.exec('COMMIT');
-      return upload;
-    } catch (error) {
-      database.exec('ROLLBACK');
-      throw error;
-    }
+    return this.withAuthorizedChunkUpload(input, () =>
+      this.requireChunkUpload(input.id),
+    );
   }
 
   prepareChunkUploadPart(input: {
@@ -507,78 +514,9 @@ export class SQLiteV2Database {
     ) {
       throw new Error('Chunk upload part write lease is invalid.');
     }
-    const database = this.requireDatabase();
-    database.exec('BEGIN IMMEDIATE');
-    try {
-      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
-      this.authorizeChunkRequest(
-        database,
-        input.capabilityId,
-        input.authorization,
-        input.now,
-      );
-      const part = database
-        .prepare(
-          'SELECT body_key, operation_id, operation_digest, write_token, write_expires_at FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
-        )
-        .get(input.id, input.partId) as Record<string, unknown> | undefined;
-      if (!part) {
-        throw new Error('Chunk upload part is unavailable.');
-      }
-      if (part.body_key !== null) {
-        if (
-          part.operation_id === null ||
-          !bytesEqual(part.operation_id as Uint8Array, input.operationId) ||
-          !bytesEqual(
-            part.operation_digest as Uint8Array,
-            input.operationDigest,
-          )
-        ) {
-          throw new V2OperationConflictError(
-            'Chunk upload part conflicts with existing bytes.',
-          );
-        }
-        const upload = this.requireChunkUpload(input.id);
-        database.exec('COMMIT');
-        return { upload, idempotent: true };
-      }
-      if (
-        part.operation_id !== null &&
-        (!bytesEqual(part.operation_id as Uint8Array, input.operationId) ||
-          !bytesEqual(
-            part.operation_digest as Uint8Array,
-            input.operationDigest,
-          ))
-      ) {
-        throw new V2OperationConflictError(
-          'Chunk upload part conflicts with an in-flight write.',
-        );
-      }
-      if (
-        part.write_token !== null &&
-        Number(part.write_expires_at) > input.now
-      ) {
-        throw new Error('Chunk upload part write is unavailable.');
-      }
-      database
-        .prepare(
-          'UPDATE chunk_upload_parts SET write_token = ?, write_expires_at = ?, operation_id = ?, operation_digest = ? WHERE upload_id = ? AND part_id = ? AND body_key IS NULL',
-        )
-        .run(
-          input.writeToken,
-          input.writeExpiresAt,
-          input.operationId,
-          input.operationDigest,
-          input.id,
-          input.partId,
-        );
-      const upload = this.requireChunkUpload(input.id);
-      database.exec('COMMIT');
-      return { upload, idempotent: false };
-    } catch (error) {
-      database.exec('ROLLBACK');
-      throw error;
-    }
+    return this.withAuthorizedChunkUpload(input, (database) =>
+      this.preparePartWrite(database, input),
+    );
   }
 
   completeChunkUploadPart(input: {
@@ -731,24 +669,11 @@ export class SQLiteV2Database {
     authorization: V2RepositoryAuthorization;
     now: number;
   }): void {
-    const database = this.requireDatabase();
-    database.exec('BEGIN IMMEDIATE');
-    try {
-      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
-      this.authorizeChunkRequest(
-        database,
-        input.capabilityId,
-        input.authorization,
-        input.now,
-      );
+    this.withAuthorizedChunkUpload(input, (database) => {
       database
         .prepare('UPDATE chunk_uploads SET expires_at = ? WHERE id = ?')
         .run(input.now, input.id);
-      database.exec('COMMIT');
-    } catch (error) {
-      database.exec('ROLLBACK');
-      throw error;
-    }
+    });
   }
 
   createRelationship(input: {
@@ -1134,103 +1059,24 @@ export class SQLiteV2Database {
     return result.changes > 0;
   }
 
-  relationshipStatus(relationshipId: string): {
-    fullyRevoked: boolean;
-    tuples: Array<{
-      direction: V2RepositoryCapability['direction'];
-      scope: V2RepositoryCapability['scope'];
-      revoked: boolean;
-      rotatedAt: number;
-    }>;
-  } {
+  relationshipStatus(relationshipId: string): V2RelationshipStatus {
     const database = this.requireDatabase();
     const relationship = database
-      .prepare('SELECT state, revoked_at FROM relationships WHERE id = ?')
+      .prepare('SELECT state FROM relationships WHERE id = ?')
       .get(relationshipId) as Record<string, unknown> | undefined;
-    const revocations = database
-      .prepare(
-        'SELECT direction, scope, created_at FROM revocations WHERE relationship_id = ?',
-      )
-      .all(relationshipId) as Record<string, unknown>[];
-    const fullyRevoked =
-      relationship?.state === 'revoked' ||
-      revocations.some((row) => row.direction === null && row.scope === null);
-    const covering = (
-      direction: V2RepositoryCapability['direction'],
-      scope: V2RepositoryCapability['scope'],
-    ): number | undefined => {
-      const matches = revocations.filter(
-        (row) =>
-          (row.direction === null ||
-            Number(row.direction) ===
-              (direction === 'inviter->invitee' ? 0 : 1)) &&
-          (row.scope === null || row.scope === scope),
-      );
-      return matches.length === 0
-        ? undefined
-        : Math.max(...matches.map((row) => Number(row.created_at)));
-    };
-    const tuples = new Map<
-      string,
-      {
-        direction: V2RepositoryCapability['direction'];
-        scope: V2RepositoryCapability['scope'];
-        revoked: boolean;
-        rotatedAt: number;
-      }
-    >();
-    const rows = database
-      .prepare(
-        'SELECT direction, scope, revoked_at, created_at FROM capabilities WHERE relationship_id = ?',
-      )
-      .all(relationshipId) as Record<string, unknown>[];
-    for (const row of rows) {
-      const direction: V2RepositoryCapability['direction'] =
-        Number(row.direction) === 0 ? 'inviter->invitee' : 'invitee->inviter';
-      const scope = row.scope as V2RepositoryCapability['scope'];
-      const key = `${direction}|${scope}`;
-      const revokedAt =
-        row.revoked_at === null ? undefined : Number(row.revoked_at);
-      const recorded = covering(direction, scope);
-      const existing = tuples.get(key);
-      tuples.set(key, {
-        direction,
-        scope,
-        revoked:
-          fullyRevoked ||
-          revokedAt !== undefined ||
-          recorded !== undefined ||
-          existing?.revoked === true,
-        rotatedAt: Math.max(
-          Number(row.created_at),
-          revokedAt ?? 0,
-          recorded ?? 0,
-          existing?.rotatedAt ?? 0,
-        ),
-      });
-    }
-    for (const row of revocations) {
-      if (row.direction === null || row.scope === null) {
-        continue;
-      }
-      const direction: V2RepositoryCapability['direction'] =
-        Number(row.direction) === 0 ? 'inviter->invitee' : 'invitee->inviter';
-      const scope = row.scope as V2RepositoryCapability['scope'];
-      const key = `${direction}|${scope}`;
-      const existing = tuples.get(key);
-      tuples.set(key, {
-        direction,
-        scope,
-        revoked: true,
-        rotatedAt: Math.max(existing?.rotatedAt ?? 0, Number(row.created_at)),
-      });
-    }
-    return {
-      fullyRevoked,
-      tuples: Array.from(tuples.values()).sort((a, b) =>
-        `${a.direction}|${a.scope}`.localeCompare(`${b.direction}|${b.scope}`),
-      ),
-    };
+    return v2RelationshipStatusFromRows({
+      relationshipRevoked: relationship?.state === 'revoked',
+      capabilities: database
+        .prepare(
+          'SELECT direction, scope, revoked_at, created_at FROM capabilities WHERE relationship_id = ?',
+        )
+        .all(relationshipId) as Record<string, unknown>[],
+      revocations: database
+        .prepare(
+          'SELECT direction, scope, created_at FROM revocations WHERE relationship_id = ?',
+        )
+        .all(relationshipId) as Record<string, unknown>[],
+    });
   }
 
   findPairing(locator: string): D1PairingRecord | null {
@@ -1515,77 +1361,22 @@ export class SQLiteV2Database {
     now: number;
   }): boolean {
     const database = this.requireDatabase();
-    const keys = input.claims.map(
-      ({ capabilityId, nonce }) =>
-        `${capabilityId}:${Array.from(nonce).join(',')}`,
-    );
-    if (new Set(keys).size !== keys.length) {
+    const counts = countV2AuthorizationClaims(input.claims);
+    if (!counts) {
       return false;
     }
     database.exec('BEGIN IMMEDIATE');
     try {
-      const minute = Math.floor(input.now / 60);
-      const counts = new Map<string, number>();
-      for (const claim of input.claims) {
-        const active = database
-          .prepare(
-            'SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
-          )
-          .get(claim.capabilityId, input.now);
-        const replay = database
-          .prepare(
-            'SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?',
-          )
-          .get(claim.capabilityId, claim.nonce, input.now);
-        if (!active || replay) {
-          database.exec('ROLLBACK');
-          return false;
-        }
-        counts.set(
-          claim.capabilityId,
-          (counts.get(claim.capabilityId) ?? 0) + 1,
-        );
+      if (this.spendClaims(database, input, counts, input.now) !== 'accepted') {
+        database.exec('ROLLBACK');
+        return false;
       }
-      for (const [capabilityId, count] of counts) {
-        const window = database
-          .prepare(
-            'SELECT count FROM rate_windows WHERE capability_id = ? AND minute = ?',
-          )
-          .get(capabilityId, minute) as { count: number } | undefined;
-        if ((window?.count ?? 0) + count > input.maximumRequestsPerMinute) {
-          database.exec('ROLLBACK');
-          return false;
-        }
-      }
-      for (const claim of input.claims) {
-        database
-          .prepare(
-            'INSERT INTO nonces(capability_id, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?',
-          )
-          .run(claim.capabilityId, claim.nonce, claim.expiresAt, input.now);
-      }
-      for (const [capabilityId, count] of counts) {
-        database
-          .prepare(
-            'INSERT INTO rate_windows(capability_id, minute, count) VALUES (?, ?, ?) ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count',
-          )
-          .run(capabilityId, minute, count);
-      }
-      if (input.consumeControlEventIds.length) {
-        const placeholders = input.consumeControlEventIds
-          .map(() => '?')
-          .join(', ');
-        database
-          .prepare(
-            `UPDATE control_events SET consumed_at = ? WHERE consumed_at IS NULL AND relationship_id = ? AND direction = ? AND id IN (${placeholders})`,
-          )
-          .run(
-            input.now,
-            input.relationshipId,
-            input.direction,
-            ...input.consumeControlEventIds,
-          );
-      }
+      this.consumeControlEventsInTransaction({
+        ids: input.consumeControlEventIds,
+        relationshipId: input.relationshipId,
+        direction: input.direction,
+        now: input.now,
+      });
       database.exec('COMMIT');
       return true;
     } catch (error) {
@@ -1602,14 +1393,7 @@ export class SQLiteV2Database {
     expiresAt: number,
     maximumTotalBytes?: number,
     now = 0,
-    authorization?: {
-      claims: readonly {
-        capabilityId: string;
-        nonce: Uint8Array;
-        expiresAt: number;
-      }[];
-      maximumRequestsPerMinute: number;
-    },
+    authorization?: V2RepositoryAuthorization,
     consumeControlEvents?: {
       ids: readonly string[];
       relationshipId: string;
@@ -1623,25 +1407,6 @@ export class SQLiteV2Database {
     const database = this.requireDatabase();
     database.exec('BEGIN IMMEDIATE');
     try {
-      const consumeControls = () => {
-        if (!consumeControlEvents || consumeControlEvents.ids.length === 0) {
-          return;
-        }
-        const placeholders = consumeControlEvents.ids.map(() => '?').join(', ');
-        database
-          .prepare(
-            `UPDATE control_events SET consumed_at = ? WHERE consumed_at IS NULL AND relationship_id = ? AND direction = ? AND id IN (${placeholders})`,
-          )
-          .run(
-            consumeControlEvents.now,
-            consumeControlEvents.relationshipId,
-            consumeControlEvents.direction === 'inviter->invitee' ||
-              consumeControlEvents.direction === 0
-              ? 0
-              : 1,
-            ...consumeControlEvents.ids,
-          );
-      };
       const activeCapability = database
         .prepare(
           'SELECT relationship_id FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
@@ -1651,192 +1416,289 @@ export class SQLiteV2Database {
         throw new Error('Delivery capability is not active.');
       }
       if (authorization) {
-        const claims = authorization.claims;
-        const keys = claims.map(
-          (claim) =>
-            `${claim.capabilityId}:${Array.from(claim.nonce).join(',')}`,
-        );
-        if (new Set(keys).size !== keys.length) {
-          throw new Error('Request authorization nonce is duplicated.');
-        }
-        const minute = Math.floor(now / 60);
-        const counts = new Map<string, number>();
-        for (const claim of claims) {
-          const active = database
-            .prepare(
-              'SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
-            )
-            .get(claim.capabilityId, now);
-          const replay = database
-            .prepare(
-              'SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?',
-            )
-            .get(claim.capabilityId, claim.nonce, now);
-          if (!active || replay) {
-            throw new Error('Request authorization is unavailable.');
-          }
-          counts.set(
-            claim.capabilityId,
-            (counts.get(claim.capabilityId) ?? 0) + 1,
-          );
-        }
-        for (const [capabilityId, count] of counts) {
-          const row = database
-            .prepare(
-              'SELECT count FROM rate_windows WHERE capability_id = ? AND minute = ?',
-            )
-            .get(capabilityId, minute) as { count: number } | undefined;
-          if (
-            (row?.count ?? 0) + count >
-            authorization.maximumRequestsPerMinute
-          ) {
-            throw new Error('Request rate limit is exceeded.');
-          }
-        }
-        for (const claim of claims) {
-          database
-            .prepare(
-              'INSERT INTO nonces(capability_id, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?',
-            )
-            .run(claim.capabilityId, claim.nonce, claim.expiresAt, now);
-        }
-        for (const [capabilityId, count] of counts) {
-          database
-            .prepare(
-              'INSERT INTO rate_windows(capability_id, minute, count) VALUES (?, ?, ?) ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count',
-            )
-            .run(capabilityId, minute, count);
-        }
+        this.requireSpentClaims(database, authorization, now);
       }
-      const published = database
-        .prepare('SELECT * FROM deliveries WHERE operation_id = ?')
-        .get(operationId) as Record<string, unknown> | undefined;
-      if (published) {
-        if (
-          !bytesEqual(published.operation_digest as Uint8Array, operationDigest)
-        ) {
-          throw new V2OperationConflictError(
-            'Operation ID conflicts with existing delivery.',
-          );
-        }
-        consumeControls();
-        database.exec('COMMIT');
-        return { existing: this.deliveryFromRow(published) };
-      }
-      const prior = database
-        .prepare(
-          'SELECT delivery_id, payload_key, operation_digest FROM reservations WHERE operation_id = ?',
-        )
-        .get(operationId) as Record<string, unknown> | undefined;
-      if (prior) {
-        if (
-          !bytesEqual(prior.operation_digest as Uint8Array, operationDigest)
-        ) {
-          throw new V2OperationConflictError(
-            'Operation ID conflicts with existing reservation.',
-          );
-        }
-        consumeControls();
-        database.exec('COMMIT');
-        return {
-          deliveryId: String(prior.delivery_id),
-          payloadKey: String(prior.payload_key),
-          expiresAt,
-        };
-      }
-      const upload = chunkUploadId
-        ? (database
-            .prepare(
-              'SELECT delivery_id, total_length FROM chunk_uploads WHERE id = ? AND capability_id = ? AND committed_at IS NULL AND expires_at > ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts WHERE upload_id = ? AND body_key IS NULL)',
-            )
-            .get(chunkUploadId, capabilityId, now, chunkUploadId) as
-            | { delivery_id: string; total_length: number }
-            | undefined)
-        : undefined;
-      if (chunkUploadId && Number(upload?.total_length) !== reservedBytes) {
-        throw new Error('Chunk upload cannot be committed.');
-      }
-      const deliveryId =
-        upload?.delivery_id ?? crypto.randomUUID().replaceAll('-', '');
-      const firstPart = chunkUploadId
-        ? (database
-            .prepare(
-              'SELECT part_id FROM chunk_upload_parts WHERE upload_id = ? ORDER BY ordinal LIMIT 1',
-            )
-            .get(chunkUploadId) as { part_id: string } | undefined)
-        : undefined;
-      const payloadKey = firstPart
-        ? v2DeliveryChunkKey(deliveryId, firstPart.part_id)
-        : `deliveries/${deliveryId}.bin`;
-      if (maximumPendingDeliveries !== undefined) {
-        const pending = database
-          .prepare(
-            "SELECT (SELECT COUNT(*) FROM deliveries d WHERE d.relationship_id = c.relationship_id AND d.direction = c.direction AND d.state = 'published' AND d.expires_at > ?) + (SELECT COUNT(*) FROM reservations r JOIN capabilities rc ON rc.id = r.capability_id WHERE rc.relationship_id = c.relationship_id AND rc.direction = c.direction AND r.expires_at > ?) AS pending FROM capabilities c WHERE c.id = ?",
-          )
-          .get(now, now, capabilityId) as { pending: number } | undefined;
-        if (Number(pending?.pending ?? 0) >= maximumPendingDeliveries) {
-          throw new Error('Relationship pending delivery limit is reached.');
-        }
-      }
-      if (maximumTotalBytes !== undefined) {
-        const capability = database
-          .prepare('SELECT relationship_id FROM capabilities WHERE id = ?')
-          .get(capabilityId) as { relationship_id: string } | undefined;
-        if (!capability) {
-          throw new Error('Delivery capability is unavailable.');
-        }
-        const committed = database
-          .prepare(
-            'SELECT COALESCE(SUM(payload_length), 0) AS bytes FROM deliveries WHERE relationship_id = ?',
-          )
-          .get(capability.relationship_id) as { bytes: number };
-        const inFlight = database
-          .prepare(
-            'SELECT COALESCE(SUM(reserved_bytes), 0) AS bytes FROM reservations r JOIN capabilities c ON c.id = r.capability_id WHERE c.relationship_id = ?',
-          )
-          .get(capability.relationship_id) as { bytes: number };
-        if (
-          Number(committed.bytes) + Number(inFlight.bytes) + reservedBytes >
-          maximumTotalBytes
-        ) {
-          throw new Error('Relationship delivery quota is exhausted.');
-        }
-      }
-      if (maximumObjectsPerCapability !== undefined) {
-        const retained = database
-          .prepare(
-            'SELECT (SELECT COUNT(*) FROM deliveries WHERE relationship_id = ?) + (SELECT COUNT(*) FROM reservations r JOIN capabilities c ON c.id = r.capability_id WHERE c.relationship_id = ?) AS objects',
-          )
-          .get(
-            activeCapability.relationship_id,
-            activeCapability.relationship_id,
-          ) as {
-          objects: number;
-        };
-        if (Number(retained.objects) >= maximumObjectsPerCapability) {
-          throw new Error('Relationship delivery object quota is exhausted.');
-        }
-      }
-      database
-        .prepare(
-          'INSERT INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        )
-        .run(
-          deliveryId,
+      let reservation = this.existingReservation(
+        operationId,
+        operationDigest,
+        expiresAt,
+      );
+      if (!reservation) {
+        const target = this.reservationTarget(
           capabilityId,
-          payloadKey,
           reservedBytes,
-          expiresAt,
-          operationId,
-          operationDigest,
+          now,
+          chunkUploadId,
         );
-      consumeControls();
+        this.requireReservationQuota({
+          capabilityId,
+          relationshipId: activeCapability.relationship_id,
+          reservedBytes,
+          now,
+          maximumTotalBytes,
+          maximumPendingDeliveries,
+          maximumObjectsPerCapability,
+        });
+        database
+          .prepare(
+            'INSERT INTO reservations(delivery_id, capability_id, payload_key, reserved_bytes, expires_at, operation_id, operation_digest) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          )
+          .run(
+            target.deliveryId,
+            capabilityId,
+            target.payloadKey,
+            reservedBytes,
+            expiresAt,
+            operationId,
+            operationDigest,
+          );
+        reservation = { ...target, expiresAt };
+      }
+      this.consumeControlEventsInTransaction(consumeControlEvents);
       database.exec('COMMIT');
-      return { deliveryId, payloadKey, expiresAt };
+      return reservation;
     } catch (error) {
       database.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  /**
+   * Spends a reservation's proofs inside the open transaction, raising the
+   * refusal so the caller's rollback discards any partial work.
+   */
+  private requireSpentClaims(
+    database: any,
+    authorization: V2RepositoryAuthorization,
+    now: number,
+  ): void {
+    const counts = countV2AuthorizationClaims(authorization.claims);
+    if (!counts) {
+      throw new Error('Request authorization nonce is duplicated.');
+    }
+    const outcome = this.spendClaims(database, authorization, counts, now);
+    if (outcome === 'unavailable') {
+      throw new Error('Request authorization is unavailable.');
+    }
+    if (outcome === 'rate-limited') {
+      throw new Error('Request rate limit is exceeded.');
+    }
+  }
+
+  /**
+   * Returns the prior answer for a retried operation: the published delivery,
+   * or the in-flight reservation. A retry whose bytes differ is a conflict.
+   */
+  private existingReservation(
+    operationId: Uint8Array,
+    operationDigest: Uint8Array,
+    expiresAt: number,
+  ): V2DeliveryReservation | { existing: V2RepositoryDelivery } | undefined {
+    const database = this.requireDatabase();
+    const published = database
+      .prepare('SELECT * FROM deliveries WHERE operation_id = ?')
+      .get(operationId) as Record<string, unknown> | undefined;
+    if (published) {
+      if (
+        !bytesEqual(published.operation_digest as Uint8Array, operationDigest)
+      ) {
+        throw new V2OperationConflictError(
+          'Operation ID conflicts with existing delivery.',
+        );
+      }
+      return { existing: this.deliveryFromRow(published) };
+    }
+    const prior = database
+      .prepare(
+        'SELECT delivery_id, payload_key, operation_digest FROM reservations WHERE operation_id = ?',
+      )
+      .get(operationId) as Record<string, unknown> | undefined;
+    if (!prior) {
+      return undefined;
+    }
+    if (!bytesEqual(prior.operation_digest as Uint8Array, operationDigest)) {
+      throw new V2OperationConflictError(
+        'Operation ID conflicts with existing reservation.',
+      );
+    }
+    return {
+      deliveryId: String(prior.delivery_id),
+      payloadKey: String(prior.payload_key),
+      expiresAt,
+    };
+  }
+
+  /**
+   * Chooses the delivery ID and payload key a new reservation claims. A
+   * chunked reservation reuses its upload's delivery ID and requires every
+   * declared part to be received.
+   */
+  private reservationTarget(
+    capabilityId: string,
+    reservedBytes: number,
+    now: number,
+    chunkUploadId: string | undefined,
+  ): { deliveryId: string; payloadKey: string } {
+    if (!chunkUploadId) {
+      const deliveryId = randomRecordId();
+      return { deliveryId, payloadKey: `deliveries/${deliveryId}.bin` };
+    }
+    const database = this.requireDatabase();
+    const upload = database
+      .prepare(
+        'SELECT delivery_id, total_length FROM chunk_uploads WHERE id = ? AND capability_id = ? AND committed_at IS NULL AND expires_at > ? AND NOT EXISTS (SELECT 1 FROM chunk_upload_parts WHERE upload_id = ? AND body_key IS NULL)',
+      )
+      .get(chunkUploadId, capabilityId, now, chunkUploadId) as
+      | { delivery_id: string; total_length: number }
+      | undefined;
+    if (!upload || Number(upload.total_length) !== reservedBytes) {
+      throw new Error('Chunk upload cannot be committed.');
+    }
+    const firstPart = database
+      .prepare(
+        'SELECT part_id FROM chunk_upload_parts WHERE upload_id = ? ORDER BY ordinal LIMIT 1',
+      )
+      .get(chunkUploadId) as { part_id: string } | undefined;
+    return {
+      deliveryId: upload.delivery_id,
+      payloadKey: firstPart
+        ? v2DeliveryChunkKey(upload.delivery_id, firstPart.part_id)
+        : `deliveries/${upload.delivery_id}.bin`,
+    };
+  }
+
+  /** Applies each relationship ceiling the caller configured. */
+  private requireReservationQuota(input: {
+    capabilityId: string;
+    relationshipId: string;
+    reservedBytes: number;
+    now: number;
+    maximumTotalBytes?: number;
+    maximumPendingDeliveries?: number;
+    maximumObjectsPerCapability?: number;
+  }): void {
+    const database = this.requireDatabase();
+    if (input.maximumPendingDeliveries !== undefined) {
+      const pending = database
+        .prepare(
+          "SELECT (SELECT COUNT(*) FROM deliveries d WHERE d.relationship_id = c.relationship_id AND d.direction = c.direction AND d.state = 'published' AND d.expires_at > ?) + (SELECT COUNT(*) FROM reservations r JOIN capabilities rc ON rc.id = r.capability_id WHERE rc.relationship_id = c.relationship_id AND rc.direction = c.direction AND r.expires_at > ?) AS pending FROM capabilities c WHERE c.id = ?",
+        )
+        .get(input.now, input.now, input.capabilityId) as
+        | { pending: number }
+        | undefined;
+      if (Number(pending?.pending ?? 0) >= input.maximumPendingDeliveries) {
+        throw new Error('Relationship pending delivery limit is reached.');
+      }
+    }
+    if (input.maximumTotalBytes !== undefined) {
+      const used = database
+        .prepare(
+          'SELECT (SELECT COALESCE(SUM(payload_length), 0) FROM deliveries WHERE relationship_id = ?) + (SELECT COALESCE(SUM(reserved_bytes), 0) FROM reservations r JOIN capabilities c ON c.id = r.capability_id WHERE c.relationship_id = ?) AS bytes',
+        )
+        .get(input.relationshipId, input.relationshipId) as { bytes: number };
+      if (Number(used.bytes) + input.reservedBytes > input.maximumTotalBytes) {
+        throw new Error('Relationship delivery quota is exhausted.');
+      }
+    }
+    if (input.maximumObjectsPerCapability !== undefined) {
+      const retained = database
+        .prepare(
+          'SELECT (SELECT COUNT(*) FROM deliveries WHERE relationship_id = ?) + (SELECT COUNT(*) FROM reservations r JOIN capabilities c ON c.id = r.capability_id WHERE c.relationship_id = ?) AS objects',
+        )
+        .get(input.relationshipId, input.relationshipId) as {
+        objects: number;
+      };
+      if (Number(retained.objects) >= input.maximumObjectsPerCapability) {
+        throw new Error('Relationship delivery object quota is exhausted.');
+      }
+    }
+  }
+
+  /**
+   * Marks acknowledged control events consumed inside the open transaction.
+   * Only events still pending for the named relationship and direction change.
+   */
+  private consumeControlEventsInTransaction(
+    input:
+      | {
+          ids: readonly string[];
+          relationshipId: string;
+          direction: 0 | 1 | 'inviter->invitee' | 'invitee->inviter';
+          now: number;
+        }
+      | undefined,
+  ): void {
+    if (!input || input.ids.length === 0) {
+      return;
+    }
+    this.requireDatabase()
+      .prepare(
+        `UPDATE control_events SET consumed_at = ? WHERE consumed_at IS NULL AND relationship_id = ? AND direction = ? AND id IN (${input.ids.map(() => '?').join(', ')})`,
+      )
+      .run(
+        input.now,
+        input.relationshipId,
+        input.direction === 'inviter->invitee' || input.direction === 0 ? 0 : 1,
+        ...input.ids,
+      );
+  }
+
+  /**
+   * Spends every proof nonce and charges each capability's rate window inside
+   * the caller's open transaction. Every claim is checked before anything is
+   * written, so a refusal leaves the transaction untouched and the caller
+   * chooses whether it rolls back quietly or raises.
+   */
+  private spendClaims(
+    database: any,
+    authorization: V2RepositoryAuthorization,
+    counts: ReadonlyMap<string, number>,
+    now: number,
+  ): 'accepted' | 'unavailable' | 'rate-limited' {
+    const minute = Math.floor(now / 60);
+    for (const claim of authorization.claims) {
+      const active = database
+        .prepare(
+          'SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
+        )
+        .get(claim.capabilityId, now);
+      const replay = database
+        .prepare(
+          'SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?',
+        )
+        .get(claim.capabilityId, claim.nonce, now);
+      if (!active || replay) {
+        return 'unavailable';
+      }
+    }
+    for (const [capabilityId, count] of counts) {
+      const window = database
+        .prepare(
+          'SELECT count FROM rate_windows WHERE capability_id = ? AND minute = ?',
+        )
+        .get(capabilityId, minute) as { count: number } | undefined;
+      if (
+        (window?.count ?? 0) + count >
+        authorization.maximumRequestsPerMinute
+      ) {
+        return 'rate-limited';
+      }
+    }
+    for (const claim of authorization.claims) {
+      database
+        .prepare(
+          'INSERT INTO nonces(capability_id, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?',
+        )
+        .run(claim.capabilityId, claim.nonce, claim.expiresAt, now);
+    }
+    for (const [capabilityId, count] of counts) {
+      database
+        .prepare(
+          'INSERT INTO rate_windows(capability_id, minute, count) VALUES (?, ?, ?) ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count',
+        )
+        .run(capabilityId, minute, count);
+    }
+    return 'accepted';
   }
 
   finalizeReservation(
@@ -1986,11 +1848,12 @@ export class SQLiteV2Database {
     if (slots.length === 0) {
       return null;
     }
-    const clauses = slots.map(() => '(slot = ? AND epoch = ?)').join(' OR ');
-    const parameters: unknown[] = [relationshipId, direction, now];
-    for (const entry of slots) {
-      parameters.push(entry.slot, entry.epoch);
-    }
+    const { clauses, parameters } = slotFilter(
+      relationshipId,
+      direction,
+      now,
+      slots,
+    );
     return (
       (this.requireDatabase()
         .prepare(
@@ -2016,11 +1879,12 @@ export class SQLiteV2Database {
     if (slots.length === 0) {
       return new Set();
     }
-    const clauses = slots.map(() => '(slot = ? AND epoch = ?)').join(' OR ');
-    const parameters: unknown[] = [relationshipId, direction, now];
-    for (const entry of slots) {
-      parameters.push(entry.slot, entry.epoch);
-    }
+    const { clauses, parameters } = slotFilter(
+      relationshipId,
+      direction,
+      now,
+      slots,
+    );
     const rows = this.requireDatabase()
       .prepare(
         `SELECT DISTINCT epoch FROM deliveries WHERE relationship_id = ? AND direction = ? AND state = 'published' AND expires_at > ? AND (${clauses})`,
@@ -2096,73 +1960,23 @@ export class SQLiteV2Database {
         idempotent: boolean;
       }
     | undefined {
+    const counts = authorization
+      ? countV2AuthorizationClaims(authorization.claims)
+      : undefined;
+    if (counts === null) {
+      return undefined;
+    }
     const database = this.requireDatabase();
     database.exec('BEGIN IMMEDIATE');
     try {
-      if (authorization) {
-        const keys = authorization.claims.map(
-          ({ capabilityId, nonce }) =>
-            `${capabilityId}:${Array.from(nonce).join(',')}`,
-        );
-        if (new Set(keys).size !== keys.length) {
-          database.exec('ROLLBACK');
-          return undefined;
-        }
-        const minute = Math.floor(event.createdAt / 60);
-        const counts = new Map<string, number>();
-        for (const claim of authorization.claims) {
-          const active = database
-            .prepare(
-              'SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
-            )
-            .get(claim.capabilityId, event.createdAt);
-          const replay = database
-            .prepare(
-              'SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?',
-            )
-            .get(claim.capabilityId, claim.nonce, event.createdAt);
-          if (!active || replay) {
-            database.exec('ROLLBACK');
-            return undefined;
-          }
-          counts.set(
-            claim.capabilityId,
-            (counts.get(claim.capabilityId) ?? 0) + 1,
-          );
-        }
-        for (const [capabilityId, count] of counts) {
-          const window = database
-            .prepare(
-              'SELECT count FROM rate_windows WHERE capability_id = ? AND minute = ?',
-            )
-            .get(capabilityId, minute) as { count: number } | undefined;
-          if (
-            (window?.count ?? 0) + count >
-            authorization.maximumRequestsPerMinute
-          ) {
-            database.exec('ROLLBACK');
-            return undefined;
-          }
-        }
-        for (const claim of authorization.claims) {
-          database
-            .prepare(
-              'INSERT INTO nonces(capability_id, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?',
-            )
-            .run(
-              claim.capabilityId,
-              claim.nonce,
-              claim.expiresAt,
-              event.createdAt,
-            );
-        }
-        for (const [capabilityId, count] of counts) {
-          database
-            .prepare(
-              'INSERT INTO rate_windows(capability_id, minute, count) VALUES (?, ?, ?) ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count',
-            )
-            .run(capabilityId, minute, count);
-        }
+      if (
+        authorization &&
+        counts &&
+        this.spendClaims(database, authorization, counts, event.createdAt) !==
+          'accepted'
+      ) {
+        database.exec('ROLLBACK');
+        return undefined;
       }
       const result = this.publishControlEventInTransaction(
         event,
@@ -2205,74 +2019,28 @@ export class SQLiteV2Database {
         idempotent: boolean;
       }
     | undefined {
+    const authorization = input.authorization;
+    const counts = authorization
+      ? countV2AuthorizationClaims(authorization.claims)
+      : undefined;
+    if (counts === null) {
+      return undefined;
+    }
     const database = this.requireDatabase();
     database.exec('BEGIN IMMEDIATE');
     try {
-      const authorization = input.authorization;
-      if (authorization) {
-        const keys = authorization.claims.map(
-          ({ capabilityId, nonce }) =>
-            `${capabilityId}:${Array.from(nonce).join(',')}`,
-        );
-        if (new Set(keys).size !== keys.length) {
-          database.exec('ROLLBACK');
-          return undefined;
-        }
-        const minute = Math.floor(input.completion.now / 60);
-        const counts = new Map<string, number>();
-        for (const claim of authorization.claims) {
-          const active = database
-            .prepare(
-              'SELECT 1 FROM capabilities WHERE id = ? AND expires_at > ? AND revoked_at IS NULL',
-            )
-            .get(claim.capabilityId, input.completion.now);
-          const replay = database
-            .prepare(
-              'SELECT 1 FROM nonces WHERE capability_id = ? AND nonce = ? AND expires_at >= ?',
-            )
-            .get(claim.capabilityId, claim.nonce, input.completion.now);
-          if (!active || replay) {
-            database.exec('ROLLBACK');
-            return undefined;
-          }
-          counts.set(
-            claim.capabilityId,
-            (counts.get(claim.capabilityId) ?? 0) + 1,
-          );
-        }
-        for (const [capabilityId, count] of counts) {
-          const window = database
-            .prepare(
-              'SELECT count FROM rate_windows WHERE capability_id = ? AND minute = ?',
-            )
-            .get(capabilityId, minute) as { count: number } | undefined;
-          if (
-            (window?.count ?? 0) + count >
-            authorization.maximumRequestsPerMinute
-          ) {
-            database.exec('ROLLBACK');
-            return undefined;
-          }
-        }
-        for (const claim of authorization.claims) {
-          database
-            .prepare(
-              'INSERT INTO nonces(capability_id, nonce, expires_at) VALUES (?, ?, ?) ON CONFLICT(capability_id, nonce) DO UPDATE SET expires_at = excluded.expires_at WHERE nonces.expires_at < ?',
-            )
-            .run(
-              claim.capabilityId,
-              claim.nonce,
-              claim.expiresAt,
-              input.completion.now,
-            );
-        }
-        for (const [capabilityId, count] of counts) {
-          database
-            .prepare(
-              'INSERT INTO rate_windows(capability_id, minute, count) VALUES (?, ?, ?) ON CONFLICT(capability_id, minute) DO UPDATE SET count = count + excluded.count',
-            )
-            .run(capabilityId, minute, count);
-        }
+      if (
+        authorization &&
+        counts &&
+        this.spendClaims(
+          database,
+          authorization,
+          counts,
+          input.completion.now,
+        ) !== 'accepted'
+      ) {
+        database.exec('ROLLBACK');
+        return undefined;
       }
       const completionIdempotent = this.completeDelivery(
         input.completion.id,
@@ -2381,11 +2149,12 @@ export class SQLiteV2Database {
     if (slots.length === 0) {
       return [];
     }
-    const clauses = slots.map(() => '(slot = ? AND epoch = ?)').join(' OR ');
-    const parameters: unknown[] = [relationshipId, direction, now];
-    for (const entry of slots) {
-      parameters.push(entry.slot, entry.epoch);
-    }
+    const { clauses, parameters } = slotFilter(
+      relationshipId,
+      direction,
+      now,
+      slots,
+    );
     const rows = this.requireDatabase()
       .prepare(
         `SELECT * FROM control_events WHERE relationship_id = ? AND direction = ? AND consumed_at IS NULL AND expires_at > ? AND (${clauses}) ORDER BY sequence, id LIMIT ?`,
@@ -2557,38 +2326,29 @@ export class SQLiteV2Database {
             ...abandoned.map((row) => String(row.payload_key)),
             ...expiredDeliveryParts.map((row) => String(row.body_key)),
             ...staged.map((row) => String(row.body_key)),
-            ...chunkParts.flatMap((row) =>
-              row.body_key === null
-                ? row.committed_at === null
-                  ? [
-                      v2StagedChunkKey(
-                        String(row.upload_id),
-                        String(row.part_id),
-                      ),
-                    ]
-                  : []
-                : [String(row.body_key)],
-            ),
+            ...chunkParts.flatMap(v2ExpiredChunkPartBodyKeys),
           ]),
         ),
         deletedNonces,
         deletedControlEvents: controls.length,
         deletedRateWindows,
         deletedInvitations,
-        complete:
-          expired.length < limit &&
-          abandoned.length < limit &&
-          controls.length < limit &&
-          staged.length < limit &&
-          expiredDeliveryParts.length < limit &&
-          chunkParts.length < limit &&
-          chunkUploads.length < limit &&
-          nonceResult.changes < limit &&
-          relationshipNonceResult.changes < limit &&
-          rateResult.changes < limit &&
-          relationshipRateResult.changes < limit &&
-          pairingRateResult.changes < limit &&
-          deletedInvitations < limit,
+        // A batch that filled any bounded query may have left rows behind.
+        complete: [
+          expired.length,
+          abandoned.length,
+          controls.length,
+          staged.length,
+          expiredDeliveryParts.length,
+          chunkParts.length,
+          chunkUploads.length,
+          nonceResult.changes,
+          relationshipNonceResult.changes,
+          rateResult.changes,
+          relationshipRateResult.changes,
+          pairingRateResult.changes,
+          deletedInvitations,
+        ].every((count) => count < limit),
       };
     } catch (error) {
       database.exec('ROLLBACK');
@@ -2774,6 +2534,110 @@ export class SQLiteV2Database {
   ): void {
     if (operationId.byteLength !== 16 || operationDigest.byteLength !== 32) {
       throw new Error('Chunk upload operation is invalid.');
+    }
+  }
+
+  /**
+   * Runs `work` in a write transaction after confirming the chunk upload is
+   * live and spending the request's proof. Any error rolls back the proof
+   * along with the work.
+   */
+  /**
+   * Leases a part for writing. A part already stored under the same operation
+   * is an idempotent retry; a different operation, or a live lease held by
+   * another writer, is refused.
+   */
+  private preparePartWrite(
+    database: any,
+    input: {
+      id: string;
+      capabilityId: string;
+      partId: string;
+      writeToken: string;
+      writeExpiresAt: number;
+      operationId: Uint8Array;
+      operationDigest: Uint8Array;
+      authorization: V2RepositoryAuthorization;
+      now: number;
+    },
+  ): { upload: V2ChunkUpload; idempotent: boolean } {
+    const part = database
+      .prepare(
+        'SELECT body_key, operation_id, operation_digest, write_token, write_expires_at FROM chunk_upload_parts WHERE upload_id = ? AND part_id = ?',
+      )
+      .get(input.id, input.partId) as Record<string, unknown> | undefined;
+    if (!part) {
+      throw new Error('Chunk upload part is unavailable.');
+    }
+    if (part.body_key !== null) {
+      if (
+        part.operation_id === null ||
+        !bytesEqual(part.operation_id as Uint8Array, input.operationId) ||
+        !bytesEqual(part.operation_digest as Uint8Array, input.operationDigest)
+      ) {
+        throw new V2OperationConflictError(
+          'Chunk upload part conflicts with existing bytes.',
+        );
+      }
+      const upload = this.requireChunkUpload(input.id);
+      return { upload, idempotent: true };
+    }
+    if (
+      part.operation_id !== null &&
+      (!bytesEqual(part.operation_id as Uint8Array, input.operationId) ||
+        !bytesEqual(part.operation_digest as Uint8Array, input.operationDigest))
+    ) {
+      throw new V2OperationConflictError(
+        'Chunk upload part conflicts with an in-flight write.',
+      );
+    }
+    if (
+      part.write_token !== null &&
+      Number(part.write_expires_at) > input.now
+    ) {
+      throw new Error('Chunk upload part write is unavailable.');
+    }
+    database
+      .prepare(
+        'UPDATE chunk_upload_parts SET write_token = ?, write_expires_at = ?, operation_id = ?, operation_digest = ? WHERE upload_id = ? AND part_id = ? AND body_key IS NULL',
+      )
+      .run(
+        input.writeToken,
+        input.writeExpiresAt,
+        input.operationId,
+        input.operationDigest,
+        input.id,
+        input.partId,
+      );
+    const upload = this.requireChunkUpload(input.id);
+    return { upload, idempotent: false };
+  }
+
+  private withAuthorizedChunkUpload<T>(
+    input: {
+      id: string;
+      capabilityId: string;
+      authorization: V2RepositoryAuthorization;
+      now: number;
+    },
+    work: (database: any) => T,
+  ): T {
+    const database = this.requireDatabase();
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      this.requireActiveChunkUpload(input.id, input.capabilityId, input.now);
+      this.authorizeChunkRequest(
+        database,
+        input.capabilityId,
+        input.authorization,
+        input.now,
+      );
+      const result = work(database);
+      database.exec('COMMIT');
+      return result;
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
     }
   }
 

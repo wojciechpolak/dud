@@ -7,6 +7,7 @@ import { StreamingSha256 } from './sha256.js';
 import {
   isV2BodyKey,
   v2BodyKeyKind,
+  v2CommittedBodyParts,
   v2DeliveryChunkKey,
   v2StagedChunkKey,
   validateV2BodyPartDeclarations,
@@ -299,12 +300,7 @@ export class R2V2BodyStore implements V2BodyStore, V2BodyInventory {
       }
       await this.blobStore.delete(part.stagedKey);
     }
-    return parts.map(({ id, length, digest, key }) => ({
-      id,
-      length,
-      digest: Uint8Array.from(digest),
-      key,
-    }));
+    return v2CommittedBodyParts(parts);
   }
 
   async put(
@@ -451,31 +447,7 @@ export class R2V2Store implements V2Store {
     });
     this.queue = this.queue.then(async () => {
       try {
-        for (let attempt = 0; attempt < 8; attempt++) {
-          const object = await this.bucket.get(STATE_KEY);
-          if (!object?.body || !object.etag) {
-            throw new Error('R2 v2 state or ETag is missing.');
-          }
-          const state = structuredClone(
-            validateState(JSON.parse(await new Response(object.body).text())),
-          );
-          const value = await operation(state);
-          const updated = await this.bucket.put(
-            STATE_KEY,
-            JSON.stringify(state),
-            {
-              onlyIf: { etagMatches: object.etag },
-              httpMetadata: { contentType: 'application/json' },
-            },
-          );
-          if (updated !== null) {
-            resolveResult(value);
-            return;
-          }
-        }
-        throw new Error(
-          'R2 v2 state transaction contention exceeded retry limit.',
-        );
+        resolveResult(await this.commitWithRetries(operation));
       } catch (error) {
         rejectResult(error);
       }
@@ -520,5 +492,33 @@ export class R2V2Store implements V2Store {
       }
     }
     return deleted;
+  }
+
+  /**
+   * Applies `operation` to the current state and writes it back only if the
+   * stored ETag is unchanged, rereading and retrying a bounded number of times
+   * when another writer won.
+   */
+  private async commitWithRetries<T>(
+    operation: (state: V2StoredState) => T | Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const object = await this.bucket.get(STATE_KEY);
+      if (!object?.body || !object.etag) {
+        throw new Error('R2 v2 state or ETag is missing.');
+      }
+      const state = structuredClone(
+        validateState(JSON.parse(await new Response(object.body).text())),
+      );
+      const value = await operation(state);
+      const updated = await this.bucket.put(STATE_KEY, JSON.stringify(state), {
+        onlyIf: { etagMatches: object.etag },
+        httpMetadata: { contentType: 'application/json' },
+      });
+      if (updated !== null) {
+        return value;
+      }
+    }
+    throw new Error('R2 v2 state transaction contention exceeded retry limit.');
   }
 }
