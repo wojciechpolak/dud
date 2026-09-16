@@ -17,3 +17,4 @@ wrangler.toml
 *.recipient
 client/dud
 client/dud.exe
+tests/vectors/protocol-v2/protocol-v2-vectors

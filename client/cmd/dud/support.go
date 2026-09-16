@@ -94,7 +94,7 @@ func (a *app) runCommand(name string, args []string, stdin io.Reader, stdout io.
 func (a *app) runAge(args ...string) error {
 	stdin := a.in
 	if tty, err := openInteractiveInput(); err == nil {
-		defer tty.Close()
+		defer func() { _ = tty.Close() }()
 		stdin = tty
 	}
 	return a.runCommand(a.cfg.AgeBin, args, stdin, a.out, a.errOut)
@@ -120,7 +120,7 @@ func tempFile(pattern string) (string, error) {
 		return "", err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(name)
+		_ = os.Remove(name)
 		return "", err
 	}
 	tempFilesMu.Lock()
@@ -133,14 +133,14 @@ func removeTempFile(path string) {
 	tempFilesMu.Lock()
 	delete(tempFiles, path)
 	tempFilesMu.Unlock()
-	os.Remove(path)
+	_ = os.Remove(path)
 }
 
 func removeAllTempFiles() {
 	tempFilesMu.Lock()
 	defer tempFilesMu.Unlock()
 	for path := range tempFiles {
-		os.Remove(path)
+		_ = os.Remove(path)
 	}
 	tempFiles = map[string]struct{}{}
 }
@@ -150,7 +150,7 @@ func copyFile(dst, src string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.Create(dst)
 	if err != nil {
 		return err

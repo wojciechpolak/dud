@@ -91,7 +91,7 @@ func verifyV2ChunkFile(path string, length uint64, digest []byte) bool {
 	if err != nil {
 		return false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	hasher := sha256.New()
 	written, err := io.Copy(hasher, io.LimitReader(file, int64(length)+1))
 	return err == nil && written == int64(length) && bytes.Equal(hasher.Sum(nil), digest)
@@ -198,7 +198,7 @@ func atomicCopyV2File(target, source string) error {
 		return err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := setPrivatePathPermissions(temporary.Name(), false); err != nil {
 		_ = temporary.Close()
 		return err

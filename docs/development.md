@@ -70,8 +70,8 @@ them.
 | `analyze`     | the x/tools passes `go vet` leaves off, as one multichecker | yes    |
 | `deadcode`    | functions unreachable from `main`                           | yes    |
 | `govulncheck` | known vulnerabilities in the modules the client calls       | yes    |
+| `errcheck`    | unchecked error returns                                     | yes    |
 | `staticcheck` | correctness, simplification, and style checks               | yes    |
-| `errcheck`    | unchecked errors and unchecked type assertions              | no     |
 | `gocyclo`     | functions above the cyclomatic complexity ceiling           | no     |
 
 How the scripts invoke them decides whether their output means anything:
@@ -82,6 +82,10 @@ How the scripts invoke them decides whether their output means anything:
 - `deadcode` runs with `-test`. The client is one `package main` whose tests sit
   beside the sources, so without it every helper that only a test calls reports
   as unreachable.
+- `errcheck` runs without `-blank` and without `-asserts`. A `_ =` in this
+  repository marks a discard the author chose, and a bare type assertion reads a
+  field whose type a validator has already checked or whose type the standard
+  library documents, so both flags would report code that states its intent.
 - `gocyclo` reports against the limit this repository intends to hold, not the
   limit it currently meets. Set `GOCYCLO_OVER` to try a different one.
 
@@ -98,7 +102,8 @@ of them. Name a single analyzer to run it alone, either as
 
 `staticcheck.conf` at the repository root configures every module, because
 staticcheck walks up from the directory it runs in.
-`scripts/errcheck-excludes.txt` lists the calls errcheck ignores.
+`scripts/errcheck-excludes.txt` lists the calls errcheck ignores: writes to
+stderr and to usage writers, where a failed write has nowhere to be reported.
 
 ## 4. Coverage
 

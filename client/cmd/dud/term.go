@@ -23,7 +23,7 @@ func readV2TTYLine(prompt string, hidden bool) (string, error) {
 	if err != nil {
 		return "", errors.New("this operation requires an interactive TTY")
 	}
-	defer terminal.close()
+	defer func() { _ = terminal.close() }()
 	if _, err := fmt.Fprint(terminal.out, prompt); err != nil {
 		return "", err
 	}
@@ -32,7 +32,10 @@ func readV2TTYLine(prompt string, hidden bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		defer restore()
+		// A failed restore leaves the terminal with echo off, which the
+		// shell resets on the next prompt. The line the caller asked for
+		// is the result worth reporting, so this discards the error.
+		defer func() { _ = restore() }()
 	}
 	line, readErr := bufio.NewReader(terminal.in).ReadString('\n')
 	if hidden {

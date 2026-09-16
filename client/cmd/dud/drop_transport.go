@@ -115,7 +115,7 @@ func (a *app) dropRequest(ctx context.Context, targetURL string, request v2Reque
 	}
 	if response.StatusCode >= 400 {
 		if response.Stream != nil {
-			response.Stream.Close()
+			_ = response.Stream.Close()
 		}
 		return nil, &dropStatusError{StatusCode: response.StatusCode, URL: targetURL}
 	}

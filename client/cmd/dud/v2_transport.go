@@ -433,7 +433,7 @@ func (transport *productionV2Transport) doTarget(
 		return nil, fmt.Errorf("v2 request failed: %w", err)
 	}
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		response.Body.Close()
+		_ = response.Body.Close()
 		if guard != nil {
 			guard.stop()
 		}
@@ -467,7 +467,7 @@ func (transport *productionV2Transport) doTarget(
 		return result, nil
 	}
 
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if guard != nil {
 		defer guard.stop()
 	}
@@ -924,7 +924,7 @@ func (transport *productionV2Transport) dohQuery(ctx context.Context, host strin
 	if err != nil {
 		return nil, fmt.Errorf("DoH query failed: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("DoH query returned HTTP status %d", response.StatusCode)
 	}

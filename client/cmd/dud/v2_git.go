@@ -874,7 +874,7 @@ func parseV2GitBundleHeaderWithOffset(path string, objectBytes int) (uint64, map
 	if err != nil {
 		return 0, nil, nil, 0, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	counting := &v2GitCountingReader{reader: io.LimitReader(file, 1024*1024)}
 	reader := bufio.NewReader(counting)
 	first, err := reader.ReadString('\n')
@@ -1511,7 +1511,7 @@ func (a *app) cmdV2GitPush(args []string) error {
 		if err != nil {
 			return err
 		}
-		defer os.Remove(bundlePath)
+		defer func() { _ = os.Remove(bundlePath) }()
 		body, err := os.ReadFile(bundlePath)
 		if err != nil {
 			return err
@@ -1990,7 +1990,7 @@ func (a *app) promoteV2GitQuarantine(repository *v2GitRepository, state *v2GitPe
 	if err := validateGitRemoteName(remote); err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(scratch)
+	defer func() { _ = os.RemoveAll(scratch) }()
 	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
 	defer cancel()
 	names := make([]string, 0, len(metadata.Refs))

@@ -389,7 +389,7 @@ func atomicWriteV2File(path string, body []byte, mode os.FileMode) error {
 		return err
 	}
 	temp := file.Name()
-	defer os.Remove(temp)
+	defer func() { _ = os.Remove(temp) }()
 	if err := setPrivatePathPermissions(temp, false); err != nil {
 		_ = file.Close()
 		return err

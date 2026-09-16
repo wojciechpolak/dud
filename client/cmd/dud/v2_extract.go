@@ -361,7 +361,7 @@ func extractV2CollectionArchive(body []byte, destination string, signedPlaintext
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	reader := tar.NewReader(bytes.NewReader(body))
 	for _, entry := range entries {
 		header, err := reader.Next()

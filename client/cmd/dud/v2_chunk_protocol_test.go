@@ -121,7 +121,7 @@ func TestV2ChunkDownloadReturnsVerifiedResponseStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Body.Close()
+	defer func() { _ = stream.Body.Close() }()
 	body, err := io.ReadAll(stream.Body)
 	if err != nil || string(body) != "first ciphertext" {
 		t.Fatalf("download body = %q, %v", body, err)

@@ -15,7 +15,7 @@ func TestIsTerminalRejectsDevNull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if isTerminal(f.Fd()) {
 		t.Fatal("expected /dev/null to not be a terminal")
 	}

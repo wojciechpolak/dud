@@ -622,7 +622,7 @@ func TestV2TargetDialingNeverConsultsTheSystemResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	transport, err := newProductionV2Transport(v2TransportOptions{
@@ -652,7 +652,7 @@ func TestV2TargetDialingNeverConsultsTheSystemResolver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial did not reach the validated address: %v", err)
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	if got := connection.RemoteAddr().String(); got != listener.Addr().String() {
 		t.Fatalf("dialled %s, want the validated %s", got, listener.Addr())
 	}

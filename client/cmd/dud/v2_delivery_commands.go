@@ -516,7 +516,7 @@ func (a *app) readV2PeerSendPayloadObserved(opts v2PeerSendOptions, observe func
 	if err != nil {
 		return nil, 0, "", nil, nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	reader := io.Reader(file)
 	if observe != nil {
 		observe(0, info.Size())
@@ -1215,7 +1215,7 @@ func (a *app) cmdPeerSend(args []string) error {
 				if err != nil {
 					return err
 				}
-				defer plaintextSource.Close()
+				defer func() { _ = plaintextSource.Close() }()
 				plaintextSize = uint64(info.Size())
 				payloadType = 2
 			}
@@ -1827,7 +1827,7 @@ func v2ExistingOutputMatches(target string, payloadDigest []byte) bool {
 	if err != nil {
 		return false
 	}
-	defer existing.Close()
+	defer func() { _ = existing.Close() }()
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, existing); err != nil {
 		return false

@@ -263,7 +263,7 @@ func TestV2GitBuildsIncrementalBundleFromAcknowledgedSnapshot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.Remove(path)
+		defer func() { _ = os.Remove(path) }()
 		if mode != v2GitCheckpointIncremental || metadata.BaseSequence != 9 {
 			t.Fatalf("checkpoint mode/base = %s/%d", mode, metadata.BaseSequence)
 		}
@@ -421,7 +421,7 @@ func TestV2GitAutomaticModeReplacesAnEmptyIncrementalPack(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.Remove(path)
+		defer func() { _ = os.Remove(path) }()
 		if mode != v2GitCheckpointFull || len(metadata.Prerequisites) != 0 || metadata.BaseSequence != 0 {
 			t.Fatalf("deletion-only checkpoint = %s %#v", mode, metadata)
 		}
@@ -456,7 +456,7 @@ func TestV2GitAutomaticModeFallsBackToCompleteCheckpoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.Remove(path)
+		defer func() { _ = os.Remove(path) }()
 		if mode != v2GitCheckpointFull || metadata.BaseSequence != 0 || len(metadata.Prerequisites) != 0 {
 			t.Fatalf("bootstrap checkpoint = %s %#v", mode, metadata)
 		}
@@ -724,7 +724,7 @@ func TestV2GitQuarantinePromotesOnlyRemoteTrackingRefs(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(bundlePath)
+	defer func() { _ = os.Remove(bundlePath) }()
 
 	withGitTestDirectory(t, destination, func() {
 		repository, err := a.resolveV2GitRepository("fetch")
@@ -792,7 +792,7 @@ func TestV2GitIncrementalQuarantineUsesOnlyTheReceivedPack(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(baseBundle)
+	defer func() { _ = os.Remove(baseBundle) }()
 	peerID := strings.Repeat("a", 32)
 	destinationState := newV2GitPeerState(repositoryID, peerID)
 	withGitTestDirectory(t, destination, func() {
@@ -835,7 +835,7 @@ func TestV2GitIncrementalQuarantineUsesOnlyTheReceivedPack(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(incrementalBundle)
+	defer func() { _ = os.Remove(incrementalBundle) }()
 
 	withGitTestDirectory(t, destination, func() {
 		repository, err := a.resolveV2GitRepository("fetch")
@@ -987,7 +987,7 @@ func TestV2GitQuarantineRejectsMetadataMismatchBeforePromotion(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(bundlePath)
+	defer func() { _ = os.Remove(bundlePath) }()
 	metadata.Refs["refs/heads/main"][0] ^= 0xff
 
 	withGitTestDirectory(t, destination, func() {
@@ -1071,7 +1071,7 @@ func TestV2GitBranchSelectionAndLinkedWorktreeShareIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.Remove(bundle)
+		defer func() { _ = os.Remove(bundle) }()
 		if _, exists := metadata.Refs["refs/heads/main"]; !exists {
 			t.Fatal("selected main branch is absent from the bundle")
 		}
@@ -1251,7 +1251,7 @@ func TestV2GitRewriteRequiresExplicitPermission(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(secondBundle)
+	defer func() { _ = os.Remove(secondBundle) }()
 	state := newV2GitPeerState(repositoryID, strings.Repeat("d", 32))
 	withGitTestDirectory(t, destination, func() {
 		repository, err := a.resolveV2GitRepository("fetch")
@@ -1288,7 +1288,7 @@ func TestV2GitRewriteRequiresExplicitPermission(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(rewrittenBundle)
+	defer func() { _ = os.Remove(rewrittenBundle) }()
 	withGitTestDirectory(t, destination, func() {
 		repository, err := a.resolveV2GitRepository("fetch")
 		if err != nil {
@@ -1365,7 +1365,7 @@ func TestV2GitSHA256CheckpointUsesBundleVersionThree(t *testing.T) {
 			t.Fatalf("unexpected SHA-256 metadata: %#v", metadata)
 		}
 	})
-	defer os.Remove(bundlePath)
+	defer func() { _ = os.Remove(bundlePath) }()
 	withGitTestDirectory(t, destination, func() {
 		repository, err := a.resolveV2GitRepository("fetch")
 		if err != nil {
@@ -1585,7 +1585,7 @@ func TestV2GitQuarantineRejectsExcessiveDeltaDepth(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(bundlePath)
+	defer func() { _ = os.Remove(bundlePath) }()
 
 	runGitTestCommand(t, destination, "config", "dud.gitDeltaDepth", strconv.Itoa(permitted))
 	digest := strings.Repeat("9", 64)
@@ -1675,7 +1675,7 @@ func TestV2GitFetchAppliesACompleteCheckpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	defer os.Remove(bundlePath)
+	defer func() { _ = os.Remove(bundlePath) }()
 	bundle, err := os.ReadFile(bundlePath)
 	if err != nil {
 		t.Fatal(err)

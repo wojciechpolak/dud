@@ -41,6 +41,11 @@ and this project follows
 - Promote `staticcheck` to a blocking analyzer. `ST1005` is off. Every error
   string it reported opens with the proper noun "Git", which the check reads as
   a sentence opening.
+- Promote `errcheck` to a blocking analyzer. Every deferred `Close`, `Remove`,
+  and terminal restore whose failure cannot change the result now discards its
+  error explicitly. `-blank` and `-asserts` are off: a `_ =` here marks a
+  discard the author chose, and a bare type assertion reads a field whose type a
+  validator has already checked or whose type the standard library documents.
 
 ### Fixed
 
