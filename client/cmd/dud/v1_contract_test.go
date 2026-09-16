@@ -254,6 +254,11 @@ func writeStubbedGit(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "git-stub.sh")
 	script := `#!/bin/sh
+# Real git accepts -c <name>=<value> pairs ahead of the subcommand, and dud
+# passes its setup flags that way, so drop them before dispatching.
+while [ "${1:-}" = "-c" ]; do
+  shift 2
+done
 case "$1" in
   rev-parse) printf '.git\n'; exit 0 ;;
   bundle|fetch) exit 0 ;;

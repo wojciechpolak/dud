@@ -34,7 +34,22 @@ func loadConfig() config {
 		GitBin:       envDefault("DUD_GIT_BIN", "git"),
 		QREncodeBin:  envDefault("DUD_QRENCODE_BIN", "qrencode"),
 		Image:        envDefault("DUD_IMAGE", "ghcr.io/wojciechpolak/dud/dud-client:latest"),
+
+		GitTrustedDir: absolutePathEnvironment("DUD_GIT_TRUSTED_DIR"),
 	}
+}
+
+// absolutePathEnvironment reads a variable that names one directory. Git reads
+// the value as a path to compare against, so a relative path names nothing it
+// can match and the wildcard "*" would trust every repository the caller ever
+// runs dud in. Rejecting both leaves the caller with Git's own ownership error,
+// which names the directory and the setting that would accept it.
+func absolutePathEnvironment(name string) string {
+	value := os.Getenv(name)
+	if !filepath.IsAbs(value) {
+		return ""
+	}
+	return filepath.Clean(value)
 }
 
 func envDefaultChain(fallback string, names ...string) string {

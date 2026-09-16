@@ -65,6 +65,11 @@ func TestCmdGitFetchForceUpdatesRemoteTrackingRefs(t *testing.T) {
 	ageMock := filepath.Join(dir, "age-mock.sh")
 
 	if err := os.WriteFile(gitMock, []byte(`#!/bin/sh
+# Real git accepts -c <name>=<value> pairs ahead of the subcommand, and dud
+# passes its setup flags that way, so drop them before dispatching.
+while [ "${1:-}" = "-c" ]; do
+  shift 2
+done
 printf '%s\n' "$@" >> "`+gitLog+`"
 if [ "$1" = "rev-parse" ]; then
   printf '.git\n'
@@ -119,4 +124,39 @@ cp "$input" "$output"
 	if !strings.Contains(stdout.String(), "git merge --ff-only peer/master") {
 		t.Fatalf("stdout missing merge hint: %q", stdout.String())
 	}
+}
+
+func TestGitSetupFlagsRefuseRepositoryNamedPrograms(t *testing.T) {
+	a := &app{cfg: config{GitBin: "git"}}
+	flags := strings.Join(a.gitSetupFlags(), " ")
+	if !strings.Contains(flags, "-c core.fsmonitor=false") {
+		t.Fatalf("setup flags = %q, want core.fsmonitor disabled", flags)
+	}
+	// Without a wrapper naming the directory it mounted, Git's ownership check
+	// applies to dud exactly as it applies to any other program.
+	if strings.Contains(flags, "safe.directory") {
+		t.Fatalf("setup flags = %q, want no safe.directory", flags)
+	}
+}
+
+func TestGitCommandCarriesTheTrustedDirectoryAheadOfTheSubcommand(t *testing.T) {
+	a := &app{cfg: config{GitBin: "git", GitTrustedDir: "/work"}}
+	args := a.gitCommand("rev-parse", "--git-dir").Args
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-c safe.directory=/work") {
+		t.Fatalf("args = %q, want the trusted directory", joined)
+	}
+	// Git reads configuration only from flags that precede the subcommand.
+	if index := indexOfArgument(args, "rev-parse"); index < 0 || indexOfArgument(args, "safe.directory=/work") > index {
+		t.Fatalf("args = %q, want the setup flags ahead of the subcommand", joined)
+	}
+}
+
+func indexOfArgument(args []string, want string) int {
+	for index, arg := range args {
+		if arg == want {
+			return index
+		}
+	}
+	return -1
 }

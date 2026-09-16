@@ -140,10 +140,25 @@ type v2GitLimitedBuffer struct {
 	limit  int
 }
 
-// localV2GitCommand constructs subprocesses for peer Git synchronization and
-// local repository deletion. It never performs a network request.
-func (a *app) localV2GitCommand(args ...string) *exec.Cmd {
-	return exec.Command(a.cfg.GitBin, args...)
+// gitSetupFlags returns the configuration every Git subprocess dud starts
+// carries ahead of its subcommand. Command-scope configuration outranks a
+// repository's own config, so a repository cannot weaken any of it.
+func (a *app) gitSetupFlags() []string {
+	// core.fsmonitor names a program Git starts to learn which paths changed,
+	// and a repository's config can name it. Every other program a repository
+	// could ask Git to run is already refused, so refuse this one as well.
+	flags := []string{"-c", "core.fsmonitor=false"}
+	if a.cfg.GitTrustedDir != "" {
+		flags = append(flags, "-c", "safe.directory="+a.cfg.GitTrustedDir)
+	}
+	return flags
+}
+
+// gitCommand constructs every Git subprocess dud starts, so that the setup
+// flags reach each one. It performs no network request of its own; the peer and
+// drop transports carry every byte that leaves the host.
+func (a *app) gitCommand(args ...string) *exec.Cmd {
+	return exec.Command(a.cfg.GitBin, append(a.gitSetupFlags(), args...)...)
 }
 
 func (writer *v2GitLimitedBuffer) Write(value []byte) (int, error) {
@@ -366,7 +381,7 @@ func (a *app) resolveV2GitReportingRepository(action string) (*v2GitRepository, 
 }
 
 func (a *app) openV2GitRepository(action string, requireCompleteHistory bool) (*v2GitRepository, error) {
-	command := exec.Command(a.cfg.GitBin, "rev-parse", "--git-common-dir")
+	command := a.gitCommand("rev-parse", "--git-common-dir")
 	command.Stderr = a.errOut
 	output, err := command.Output()
 	if err != nil {
@@ -387,7 +402,7 @@ func (a *app) openV2GitRepository(action string, requireCompleteHistory bool) (*
 	if !info.IsDir() {
 		return nil, errors.New("Git common directory is not a directory")
 	}
-	formatCommand := exec.Command(a.cfg.GitBin, "rev-parse", "--show-object-format")
+	formatCommand := a.gitCommand("rev-parse", "--show-object-format")
 	formatOutput, err := formatCommand.Output()
 	if err != nil {
 		return nil, fmt.Errorf("detect Git object format: %w", err)
@@ -408,7 +423,7 @@ func (a *app) openV2GitRepository(action string, requireCompleteHistory bool) (*
 	// not have. The check runs before any directory is created so a shallow
 	// repository never acquires DUD state.
 	if requireCompleteHistory {
-		shallowCommand := exec.Command(a.cfg.GitBin, "rev-parse", "--is-shallow-repository")
+		shallowCommand := a.gitCommand("rev-parse", "--is-shallow-repository")
 		shallowOutput, err := shallowCommand.Output()
 		if err != nil {
 			return nil, fmt.Errorf("detect shallow Git repository: %w", err)
@@ -442,7 +457,7 @@ func (a *app) openV2GitRepository(action string, requireCompleteHistory bool) (*
 }
 
 func (a *app) v2GitLocalLimit(name string, defaultValue, minimum, maximum uint64) (uint64, error) {
-	command := exec.Command(a.cfg.GitBin, "config", "--local", "--get", name)
+	command := a.gitCommand("config", "--local", "--get", name)
 	output, err := command.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -763,8 +778,8 @@ func (a *app) runV2GitWithEnv(ctx context.Context, repository *v2GitRepository, 
 // `pack-objects --stdout`, is then bounded by the limit of its destination
 // rather than by the smaller buffer that bounds diagnostic command output.
 func (a *app) runV2GitToWriter(ctx context.Context, repository *v2GitRepository, extraEnv []string, input []byte, stdout io.Writer, args ...string) error {
-	hardened := []string{
-		"-c", "core.hooksPath=" + os.DevNull,
+	hardened := append(a.gitSetupFlags(),
+		"-c", "core.hooksPath="+os.DevNull,
 		"-c", "protocol.allow=never",
 		"-c", "protocol.file.allow=always",
 		"-c", "fetch.fsckObjects=true",
@@ -773,7 +788,7 @@ func (a *app) runV2GitToWriter(ctx context.Context, repository *v2GitRepository,
 		"-c", fmt.Sprintf("pack.windowMemory=%d", repository.Limits.MemoryBytes*3/8),
 		"-c", fmt.Sprintf("pack.deltaCacheSize=%d", repository.Limits.MemoryBytes/8),
 		"-c", fmt.Sprintf("core.deltaBaseCacheLimit=%d", repository.Limits.MemoryBytes/8),
-	}
+	)
 	hardened = append(hardened, args...)
 	var command *exec.Cmd
 	if runtime.GOOS == "linux" {
@@ -991,7 +1006,7 @@ func checkpointLabelV2Git(mode v2GitCheckpointMode) string {
 func (a *app) selectedV2GitBranches(repository *v2GitRepository, opts v2GitPushOptions) ([]string, error) {
 	branches := append([]string(nil), opts.Branches...)
 	if opts.Current {
-		output, err := exec.Command(a.cfg.GitBin, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+		output, err := a.gitCommand("symbolic-ref", "--quiet", "--short", "HEAD").Output()
 		if err != nil {
 			return nil, errors.New("--current requires an attached current branch")
 		}
@@ -3054,7 +3069,7 @@ func (a *app) v2GitDivergence(repository *v2GitRepository, remote string, refs m
 		if _, exists, _ := a.v2GitRefOID(repository, local); !exists {
 			continue
 		}
-		command := exec.Command(a.cfg.GitBin, "rev-list", "--left-right", "--count", local+"..."+peer)
+		command := a.gitCommand("rev-list", "--left-right", "--count", local+"..."+peer)
 		output, err := command.Output()
 		if err != nil {
 			continue

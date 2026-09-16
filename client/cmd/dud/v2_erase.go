@@ -717,7 +717,7 @@ func (repository *v2GitRepository) updateManagedRefs(updates map[string]string, 
 }
 
 func (a *app) resolveV2GitRepositoryForErase() (*v2GitRepository, error) {
-	command := a.localV2GitCommand("rev-parse", "--git-common-dir")
+	command := a.gitCommand("rev-parse", "--git-common-dir")
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	if err != nil {
@@ -742,7 +742,7 @@ func (a *app) resolveV2GitRepositoryForErase() (*v2GitRepository, error) {
 }
 
 func (a *app) runV2EraseGit(input []byte, args ...string) ([]byte, error) {
-	command := a.localV2GitCommand(args...)
+	command := a.gitCommand(args...)
 	command.Env = append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
@@ -780,7 +780,7 @@ func (a *app) listV2EraseGitRefs(prefix string) (map[string]string, error) {
 }
 
 func (a *app) currentV2EraseGitRef(name string) (string, bool, error) {
-	command := a.localV2GitCommand("show-ref", "--verify", "--hash", name)
+	command := a.gitCommand("show-ref", "--verify", "--hash", name)
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	if err != nil {
@@ -816,7 +816,7 @@ func v2ManagedRefRemote(name string) string {
 }
 
 func (a *app) v2EraseGitHasDUDConfig() (bool, error) {
-	command := a.localV2GitCommand("config", "--local", "--get-regexp", `^dud\.`)
+	command := a.gitCommand("config", "--local", "--get-regexp", `^dud\.`)
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	if err := command.Run(); err != nil {
 		var exitErr *exec.ExitError

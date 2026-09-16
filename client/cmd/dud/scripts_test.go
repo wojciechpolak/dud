@@ -30,6 +30,7 @@ func TestShellInitScriptContainsWrapperContracts(t *testing.T) {
 		"DUD_BASE_URL DUD_DROP_BASE_URL DUD_PEER_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO",
 		"DUD_DOCKER_NETWORK",
 		"DUD_HOME=/dud",
+		"DUD_GIT_TRUSTED_DIR=/work",
 		`"$dud_world_dir:/dud/$dud_world"`,
 		`git rev-parse --path-format=absolute --git-common-dir`,
 		`"$dud_git_common_dir:$dud_git_common_dir"`,
@@ -69,6 +70,7 @@ func TestInstallScriptContainsWrapperContracts(t *testing.T) {
 		`"DUD_PROFILE=${DUD_PROFILE-}"`,
 		"DUD_BASE_URL DUD_DROP_BASE_URL DUD_PEER_BASE_URL DUD_DOH_URL DUD_ECH_MODE DUD_DROP_SECRET DUD_PEER_SECRET DUD_CA_BUNDLE DUD_CONNECT_TO",
 		"DUD_HOME=/dud",
+		"DUD_GIT_TRUSTED_DIR=/work",
 		`"$dud_world_dir:/dud/$dud_world"`,
 		`git rev-parse --path-format=absolute --git-common-dir`,
 		`"$dud_git_common_dir:$dud_git_common_dir"`,
@@ -209,6 +211,52 @@ func TestGeneratedWrappersOnlyMountAnAbsoluteReadableCABundle(t *testing.T) {
 			if !strings.Contains(guard, needle) {
 				t.Fatalf("%s wrapper CA bundle guard missing %q:\n%s", name, needle, guard)
 			}
+		}
+	}
+}
+
+// A repository's own .env reaches the container through --env-file. Every
+// selector the wrapper pins has to be passed after it, or a worktree could
+// name the directory Git trusts, the binaries the container runs, or the path
+// it resolves them against.
+func TestWrappersPinSelectorsAfterTheRepositoryEnvFile(t *testing.T) {
+	for name, script := range map[string]string{
+		"install":    installScript("dud-client-test"),
+		"shell-init": shellInitScript("dud-client-test"),
+	} {
+		envFile := strings.Index(script, "--env-file")
+		if envFile < 0 {
+			t.Fatalf("%s: no --env-file", name)
+		}
+		for _, pinned := range []string{
+			"DUD_GIT_TRUSTED_DIR=/work",
+			"DUD_GIT_BIN=git",
+			"LD_PRELOAD=",
+		} {
+			index := strings.Index(script, pinned)
+			if index < 0 {
+				t.Fatalf("%s: missing pinned %q", name, pinned)
+			}
+			if index < envFile {
+				t.Fatalf("%s: pinned %q precedes --env-file", name, pinned)
+			}
+		}
+	}
+}
+
+// The trusted directory names the mount the wrapper creates for the caller's
+// working directory. If the two ever disagree, Git is told to trust a path that
+// is not the repository it was handed.
+func TestWrappersTrustTheDirectoryTheyMount(t *testing.T) {
+	for name, script := range map[string]string{
+		"install":    installScript("dud-client-test"),
+		"shell-init": shellInitScript("dud-client-test"),
+	} {
+		if !strings.Contains(script, `-v \"$PWD:/work\"`) {
+			t.Fatalf("%s: working directory is not mounted at /work", name)
+		}
+		if strings.Count(script, "DUD_GIT_TRUSTED_DIR=") != 1 {
+			t.Fatalf("%s: the trusted directory is named more than once", name)
 		}
 	}
 }

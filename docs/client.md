@@ -110,25 +110,26 @@ on Windows.
 
 ## 1. Environment
 
-| Variable             | Default                                | Applies to                            |
-| -------------------- | -------------------------------------- | ------------------------------------- |
-| `DUD_DROP_BASE_URL`  | unset                                  | dead drops, above the shared fallback |
-| `DUD_PEER_BASE_URL`  | unset                                  | peers, above the shared fallback      |
-| `DUD_BASE_URL`       | `https://dud.example.com`              | fallback for both modes               |
-| `DUD_DOH_URL`        | `https://cloudflare-dns.com/dns-query` | both modes                            |
-| `DUD_ECH_MODE`       | `hard`                                 | both modes                            |
-| `DUD_DROP_SECRET`    | unset                                  | `upload` and `flush`                  |
-| `DUD_PEER_SECRET`    | unset                                  | `peer invite` on a gated deployment   |
-| `DUD_HOME`           | user home + `.dud`                     | peer commands; see §3                 |
-| `DUD_PROFILE`        | unset                                  | peer commands; see §3                 |
-| `DUD_IMAGE`          | the published image                    | the generated wrappers                |
-| `DUD_CA_BUNDLE`      | unset                                  | a CA bundle path inside the container |
-| `DUD_AGE_BIN`        | `age`                                  | payload encryption and decryption     |
-| `DUD_AGE_KEYGEN_BIN` | `age-keygen`                           | `keygen`                              |
-| `DUD_GIT_BIN`        | `git`                                  | `dud git *`                           |
-| `DUD_QRENCODE_BIN`   | `qrencode`                             | `upload` and `peer invite` QR codes   |
-| `DUD_DOCKER_NETWORK` | unset                                  | the generated wrappers                |
-| `DUD_CONNECT_TO`     | unset                                  | rejected; setting it fails every run  |
+| Variable              | Default                                | Applies to                            |
+| --------------------- | -------------------------------------- | ------------------------------------- |
+| `DUD_DROP_BASE_URL`   | unset                                  | dead drops, above the shared fallback |
+| `DUD_PEER_BASE_URL`   | unset                                  | peers, above the shared fallback      |
+| `DUD_BASE_URL`        | `https://dud.example.com`              | fallback for both modes               |
+| `DUD_DOH_URL`         | `https://cloudflare-dns.com/dns-query` | both modes                            |
+| `DUD_ECH_MODE`        | `hard`                                 | both modes                            |
+| `DUD_DROP_SECRET`     | unset                                  | `upload` and `flush`                  |
+| `DUD_PEER_SECRET`     | unset                                  | `peer invite` on a gated deployment   |
+| `DUD_HOME`            | user home + `.dud`                     | peer commands; see §3                 |
+| `DUD_PROFILE`         | unset                                  | peer commands; see §3                 |
+| `DUD_IMAGE`           | the published image                    | the generated wrappers                |
+| `DUD_CA_BUNDLE`       | unset                                  | a CA bundle path inside the container |
+| `DUD_AGE_BIN`         | `age`                                  | payload encryption and decryption     |
+| `DUD_AGE_KEYGEN_BIN`  | `age-keygen`                           | `keygen`                              |
+| `DUD_GIT_BIN`         | `git`                                  | `dud git *`                           |
+| `DUD_GIT_TRUSTED_DIR` | unset                                  | `dud git *`; set by the wrappers      |
+| `DUD_QRENCODE_BIN`    | `qrencode`                             | `upload` and `peer invite` QR codes   |
+| `DUD_DOCKER_NETWORK`  | unset                                  | the generated wrappers                |
+| `DUD_CONNECT_TO`      | unset                                  | rejected; setting it fails every run  |
 
 `DUD_ECH_MODE` accepts exactly two values:
 
@@ -356,6 +357,19 @@ values after `--env-file`, so a helper always resolves to an image binary and
 never to something under the bind-mounted `/work`. Exported shell variables do
 not lift the pin either; to run a different helper, run the `dud` binary
 directly rather than through a wrapper.
+
+`DUD_GIT_TRUSTED_DIR` is pinned the same way, to `/work`. Git refuses to operate
+on a repository owned by another user, and a bind mount reports the owner its
+file-sharing layer invents rather than the one the host records: Docker Desktop
+presents the mount root as owned by root whoever created the directory, so
+`dud git push` and `dud git fetch` would stop at `detected dubious ownership`.
+The wrappers mount the caller's own working directory and run as the caller, so
+they are the one component that can tell Git what the mount cannot. The variable
+names one absolute directory; a relative path and the wildcard `*` are both
+refused, and a repository's `.env` cannot widen it. Unset, which is how the
+native binaries run, Git's ownership check applies to `dud` exactly as it
+applies to any other program. Every Git subprocess dud starts also disables
+`core.fsmonitor`, so a repository cannot name a program for Git to run.
 
 ```dotenv
 # Example .env

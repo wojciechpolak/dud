@@ -625,7 +625,7 @@ func (runtime *v2PeerRuntime) resetCancellationBody(reset *v2RelationshipReset) 
 }
 
 func cleanupV2ResetGitState(a *app, oldPeerID string) error {
-	command := a.localV2GitCommand("rev-parse", "--git-common-dir")
+	command := a.gitCommand("rev-parse", "--git-common-dir")
 	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	if err != nil {

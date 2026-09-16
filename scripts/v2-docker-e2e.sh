@@ -16,8 +16,16 @@ DOH="$RUN_ID-doh"
 INVITER="$RUN_ID-inviter"
 CHUNK_SENDER="$RUN_ID-chunk-sender"
 TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/dud-v2-e2e.XXXXXX")
-DESKTOP_STATE="$TEMP_ROOT/desktop"
-LAPTOP_STATE="$TEMP_ROOT/laptop"
+# The client world directories are Docker volumes rather than host directories.
+# A peer Git repository lives inside one, and Git refuses to operate on a
+# repository whose owner is not the running user, so the ownership a container
+# sees has to be the ownership that was set. A volume is an ordinary filesystem
+# inside the Docker VM, where chown means what it says; a host directory reaches
+# the container through a file-sharing layer whose ownership mapping varies by
+# platform and by Docker release. Nothing outside a container reads these, so
+# they never have to be host paths.
+DESKTOP_STATE="$RUN_ID-desktop"
+LAPTOP_STATE="$RUN_ID-laptop"
 CADDY_STATE="$TEMP_ROOT/caddy"
 DROP_STATE="$TEMP_ROOT/drop"
 ORIGIN=https://dud.local.test
@@ -39,6 +47,7 @@ e2e_section() {
 cleanup() {
   docker rm -f "$CHUNK_SENDER" "$INVITER" "$DOH" "$CADDY" "$SERVER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  docker volume rm "$DESKTOP_STATE" "$LAPTOP_STATE" >/dev/null 2>&1 || true
 
   # Caddy owns its private PKI directory, so restore the invoking user's
   # ownership before removing the host-mounted test state.
@@ -107,12 +116,15 @@ fi
 e2e_section "Start the test deployment" \
   "Run the peer and dead drop server behind local TLS and DNS-over-HTTPS."
 
-mkdir -p "$DESKTOP_STATE" "$LAPTOP_STATE" "$CADDY_STATE"
+mkdir -p "$CADDY_STATE"
 chmod 700 "$CADDY_STATE"
-docker run --rm --user 0 --entrypoint /bin/chown \
-  -v "$DESKTOP_STATE:/state" "$CLIENT_IMAGE" -R 1000:1000 /state
-docker run --rm --user 0 --entrypoint /bin/chown \
-  -v "$LAPTOP_STATE:/state" "$CLIENT_IMAGE" -R 1000:1000 /state
+# A new volume is owned by root, so hand each one to the image user before any
+# client writes to it.
+for state in "$DESKTOP_STATE" "$LAPTOP_STATE"; do
+  docker volume create "$state" >/dev/null
+  docker run --rm --user 0 --entrypoint /bin/chown \
+    -v "$state:/state" "$CLIENT_IMAGE" -R 1000:1000 /state
+done
 docker network create --subnet "$E2E_SUBNET" "$NETWORK" >/dev/null
 
 docker run -d --name "$SERVER" --network "$NETWORK" \

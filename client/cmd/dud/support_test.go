@@ -155,3 +155,26 @@ var errWriteFailed = errors.New("write failed")
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errWriteFailed }
+
+func TestLoadConfigAcceptsOnlyAnAbsoluteGitTrustedDirectory(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "absolute", value: "/work", want: "/work"},
+		{name: "cleaned", value: "/work/repo/..", want: "/work"},
+		{name: "unset", value: "", want: ""},
+		{name: "relative", value: "work", want: ""},
+		// A wildcard would trust every repository the caller ever runs dud in,
+		// which is the opposite of naming the one directory a wrapper mounted.
+		{name: "wildcard", value: "*", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("DUD_GIT_TRUSTED_DIR", test.value)
+			if got := loadConfig().GitTrustedDir; got != test.want {
+				t.Fatalf("GitTrustedDir = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

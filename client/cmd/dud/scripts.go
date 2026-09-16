@@ -84,13 +84,22 @@ dud_docker_env_args() {
   args="$args $(dud_shell_quote -e) $(dud_shell_quote DUD_HOME=/dud)"
   args="$args $(dud_shell_quote -e) $(dud_shell_quote "DUD_PROFILE=${DUD_PROFILE-}")"
   # Repository .env may configure network settings, but nothing in the
-  # bind-mounted worktree may choose the code this container runs. Every
-  # selector is pinned after --env-file, so a .env assignment loses: the helper
-  # variables name the image's own binaries, PATH resolves those bare names
-  # against image-owned directories only (/work is never on it), and the dynamic
-  # loader overrides are cleared so a repository object cannot be injected into
-  # git, age, or qrencode instead.
+  # bind-mounted worktree may choose the code this container runs or widen what
+  # it trusts. Every selector is pinned after --env-file, so a .env assignment
+  # loses: the helper variables name the image's own binaries, PATH resolves
+  # those bare names against image-owned directories only (/work is never on
+  # it), and the dynamic loader overrides are cleared so a repository object
+  # cannot be injected into git, age, or qrencode instead.
+  #
+  # DUD_GIT_TRUSTED_DIR names the mount below, and only it. Git refuses to
+  # operate on a repository owned by another user, and a bind mount reports the
+  # owner its file-sharing layer invents rather than the one the host records --
+  # Docker Desktop presents the mount root as root-owned whoever created the
+  # directory. This wrapper mounts the caller's own working directory and runs
+  # as the caller, so it is the one component that can tell Git the answer the
+  # mount cannot give.
   for dud_pinned in \
+    DUD_GIT_TRUSTED_DIR=/work \
     DUD_GIT_BIN=git \
     DUD_AGE_BIN=age \
     DUD_AGE_KEYGEN_BIN=age-keygen \
@@ -790,13 +799,22 @@ dud() {
   dud_env_args="$dud_env_args $(_dud_shell_quote -e) $(_dud_shell_quote DUD_HOME=/dud)"
   dud_env_args="$dud_env_args $(_dud_shell_quote -e) $(_dud_shell_quote "DUD_PROFILE=${DUD_PROFILE-}")"
   # Repository .env may configure network settings, but nothing in the
-  # bind-mounted worktree may choose the code this container runs. Every
-  # selector is pinned after --env-file, so a .env assignment loses: the helper
-  # variables name the image's own binaries, PATH resolves those bare names
-  # against image-owned directories only (/work is never on it), and the dynamic
-  # loader overrides are cleared so a repository object cannot be injected into
-  # git, age, or qrencode instead.
+  # bind-mounted worktree may choose the code this container runs or widen what
+  # it trusts. Every selector is pinned after --env-file, so a .env assignment
+  # loses: the helper variables name the image's own binaries, PATH resolves
+  # those bare names against image-owned directories only (/work is never on
+  # it), and the dynamic loader overrides are cleared so a repository object
+  # cannot be injected into git, age, or qrencode instead.
+  #
+  # DUD_GIT_TRUSTED_DIR names the mount below, and only it. Git refuses to
+  # operate on a repository owned by another user, and a bind mount reports the
+  # owner its file-sharing layer invents rather than the one the host records --
+  # Docker Desktop presents the mount root as root-owned whoever created the
+  # directory. This wrapper mounts the caller's own working directory and runs
+  # as the caller, so it is the one component that can tell Git the answer the
+  # mount cannot give.
   for dud_pinned in \
+    DUD_GIT_TRUSTED_DIR=/work \
     DUD_GIT_BIN=git \
     DUD_AGE_BIN=age \
     DUD_AGE_KEYGEN_BIN=age-keygen \
