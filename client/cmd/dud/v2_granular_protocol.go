@@ -293,25 +293,70 @@ func queryV2GranularInboxObserved(ctx context.Context, transport v2Transport, or
 	return &v2GranularInboxResponse{Header: header, Payload: payload}, nil
 }
 
+// validateV2GranularInboxHeader checks the part of an inbox response that is
+// present whether or not a delivery was returned. An unknown key is refused
+// rather than ignored, because the response shape tells this client which
+// fields the server believes it is answering with.
+func validateV2GranularInboxHeader(header map[int]any) error {
+	for key := range header {
+		if key < 1 || key > 10 {
+			return fmt.Errorf("granular inbox response contains unknown key %d", key)
+		}
+	}
+	if _, err := decodeV2GranularControlEvents(header); err != nil {
+		return err
+	}
+	if raw, ok := header[1].([]any); !ok || len(raw) > v2GranularMaxSlotProofs {
+		return errors.New("granular inbox slot results are invalid")
+	}
+	for _, key := range []int{7, 8} {
+		if _, exists := header[key]; !exists {
+			return errors.New("granular inbox payload declaration is missing")
+		}
+	}
+	return nil
+}
+
+// decodeV2GranularChunkManifest reads the part list of a chunked delivery. The
+// manifest replaces the inline payload, so a response carrying both describes
+// two deliveries at once and is refused.
+func decodeV2GranularChunkManifest(rawManifest any, payload []byte) ([]v2ChunkManifestPart, error) {
+	invalid := errors.New("granular inbox chunk manifest is invalid")
+	rawParts, ok := rawManifest.([]any)
+	if !ok || len(rawParts) < 2 || len(rawParts) > v2MaximumChunkCount || len(payload) != 0 {
+		return nil, invalid
+	}
+	chunks := make([]v2ChunkManifestPart, len(rawParts))
+	for index, raw := range rawParts {
+		part, err := normalizeV2Map(raw)
+		if err != nil || len(part) != 3 {
+			return nil, invalid
+		}
+		id, idOK := part[1].([]byte)
+		length, lengthOK := asV2Uint(part[2])
+		digest, digestOK := part[3].([]byte)
+		if !idOK || !lengthOK || !digestOK {
+			return nil, invalid
+		}
+		chunks[index] = v2ChunkManifestPart{ID: append([]byte(nil), id...), Length: length, Digest: append([]byte(nil), digest...)}
+	}
+	if _, err := validateV2ChunkManifest(chunks); err != nil {
+		return nil, invalid
+	}
+	return chunks, nil
+}
+
+// decodeV2GranularInboxDelivery reads the delivery an inbox response carries,
+// and reports no delivery and no error when the inbox is empty. An empty inbox
+// carries none of the fields that describe a delivery: a response holding any
+// of them without a delivery ID is malformed rather than empty, because reading
+// it as empty would silently drop whatever the server did return.
 func decodeV2GranularInboxDelivery(response *v2GranularInboxResponse) (*v2GranularInboxDelivery, error) {
 	if response == nil {
 		return nil, errors.New("granular inbox response is missing")
 	}
-	for key := range response.Header {
-		if key < 1 || key > 10 {
-			return nil, fmt.Errorf("granular inbox response contains unknown key %d", key)
-		}
-	}
-	if _, err := decodeV2GranularControlEvents(response.Header); err != nil {
+	if err := validateV2GranularInboxHeader(response.Header); err != nil {
 		return nil, err
-	}
-	if raw, ok := response.Header[1].([]any); !ok || len(raw) > v2GranularMaxSlotProofs {
-		return nil, errors.New("granular inbox slot results are invalid")
-	}
-	for _, key := range []int{7, 8} {
-		if _, exists := response.Header[key]; !exists {
-			return nil, errors.New("granular inbox payload declaration is missing")
-		}
 	}
 	deliveryID, exists := response.Header[3].([]byte)
 	if !exists {
@@ -328,27 +373,11 @@ func decodeV2GranularInboxDelivery(response *v2GranularInboxResponse) (*v2Granul
 	}
 	var chunks []v2ChunkManifestPart
 	if rawManifest, chunked := response.Header[10]; chunked {
-		rawParts, ok := rawManifest.([]any)
-		if !ok || len(rawParts) < 2 || len(rawParts) > v2MaximumChunkCount || len(response.Payload) != 0 {
-			return nil, errors.New("granular inbox chunk manifest is invalid")
+		decoded, err := decodeV2GranularChunkManifest(rawManifest, response.Payload)
+		if err != nil {
+			return nil, err
 		}
-		chunks = make([]v2ChunkManifestPart, len(rawParts))
-		for index, raw := range rawParts {
-			part, err := normalizeV2Map(raw)
-			if err != nil || len(part) != 3 {
-				return nil, errors.New("granular inbox chunk manifest is invalid")
-			}
-			id, idOK := part[1].([]byte)
-			length, lengthOK := asV2Uint(part[2])
-			digest, digestOK := part[3].([]byte)
-			if !idOK || !lengthOK || !digestOK {
-				return nil, errors.New("granular inbox chunk manifest is invalid")
-			}
-			chunks[index] = v2ChunkManifestPart{ID: append([]byte(nil), id...), Length: length, Digest: append([]byte(nil), digest...)}
-		}
-		if _, err := validateV2ChunkManifest(chunks); err != nil {
-			return nil, errors.New("granular inbox chunk manifest is invalid")
-		}
+		chunks = decoded
 	}
 	return &v2GranularInboxDelivery{
 		ID:                  append([]byte(nil), deliveryID...),

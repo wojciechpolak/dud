@@ -860,21 +860,18 @@ func acquireV2EraseRepositoryLocks(repository *v2GitRepository) (func(), error) 
 	return unlock, nil
 }
 
-func (a *app) eraseV2Repository(dryRun bool) (v2EraseResult, error) {
-	result := newV2EraseResult("repo")
-	result.Warnings = append(result.Warnings, "unreachable Git objects are retained until ordinary Git garbage collection")
-	repository, err := a.resolveV2GitRepositoryForErase()
-	if err != nil {
-		return result, err
-	}
-	dudDirExists, err := validateV2EraseDirectory(repository.DUDDir)
-	if err != nil {
-		result.Retained = append(result.Retained, repository.DUDDir)
-		return result, err
-	}
+// collectV2EraseGitRefs lists the refs erasure may remove from this
+// repository: the refs under DUD's own namespace, plus the remote-tracking
+// refs DUD recorded as managed and that still hold exactly what it wrote.
+//
+// A managed ref is left in place, and reported, whenever removing it could
+// destroy something DUD does not own: a ref whose object changed since DUD last
+// wrote it has been moved by someone else, and one under a configured Git
+// remote's namespace is a remote the operator set up rather than a peer.
+func (a *app) collectV2EraseGitRefs(repository *v2GitRepository, dudDirExists bool, result *v2EraseResult) (map[string]string, error) {
 	ownedRefs, err := a.listV2EraseGitRefs("refs/dud/")
 	if err != nil {
-		return result, err
+		return nil, err
 	}
 	managed := &v2ManagedGitRefs{Version: v2ManagedRefsVersion, Refs: map[string]string{}}
 	if dudDirExists {
@@ -887,7 +884,7 @@ func (a *app) eraseV2Repository(dryRun bool) (v2EraseResult, error) {
 	}
 	remotes, err := a.v2EraseGitRemoteNames()
 	if err != nil {
-		return result, err
+		return nil, err
 	}
 	for name, recordedOID := range managed.Refs {
 		if _, alreadyOwned := ownedRefs[name]; alreadyOwned {
@@ -902,7 +899,7 @@ func (a *app) eraseV2Repository(dryRun bool) (v2EraseResult, error) {
 		}
 		currentOID, exists, refErr := a.currentV2EraseGitRef(name)
 		if refErr != nil {
-			return result, refErr
+			return nil, refErr
 		}
 		if !exists {
 			continue
@@ -913,6 +910,94 @@ func (a *app) eraseV2Repository(dryRun bool) (v2EraseResult, error) {
 			continue
 		}
 		ownedRefs[name] = currentOID
+	}
+	return ownedRefs, nil
+}
+
+// deleteV2EraseGitRefs removes the refs erasure owns in one ref transaction,
+// each pinned to the object it was expected to hold. A ref that moved between
+// the survey and this call fails the transaction rather than being deleted, and
+// nothing is removed at all in that case.
+func (a *app) deleteV2EraseGitRefs(ownedRefs map[string]string, result *v2EraseResult) error {
+	if len(ownedRefs) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ownedRefs))
+	for name := range ownedRefs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var transaction strings.Builder
+	transaction.WriteString("start\n")
+	for _, name := range names {
+		fmt.Fprintf(&transaction, "delete %s %s\n", name, ownedRefs[name])
+	}
+	transaction.WriteString("prepare\ncommit\n")
+	if _, err := a.runV2EraseGit([]byte(transaction.String()), "update-ref", "--stdin"); err != nil {
+		result.Retained = append(result.Retained, names...)
+		return err
+	}
+	result.Removed = append(result.Removed, names...)
+	return nil
+}
+
+// removeV2EraseRepositoryState removes DUD's configuration section and its
+// state directory, and reports what could not be removed. Each part is
+// attempted even after an earlier one fails, so one undeletable item does not
+// leave the rest of DUD's state in the repository. The state directory is
+// checked again after removal, because a directory that reappears means
+// something is still writing there and the erasure did not hold.
+func (a *app) removeV2EraseRepositoryState(repository *v2GitRepository, hasConfig, dudDirExists bool, result *v2EraseResult) []string {
+	var failures []string
+	configEntry := filepath.Join(repository.CommonDir, "config") + " [dud]"
+	if hasConfig {
+		if _, configErr := a.runV2EraseGit(nil, "config", "--local", "--remove-section", "dud"); configErr != nil {
+			result.Retained = append(result.Retained, configEntry)
+			failures = append(failures, configErr.Error())
+		} else {
+			result.Removed = append(result.Removed, configEntry)
+		}
+	}
+	if !dudDirExists {
+		return failures
+	}
+	removedDUDDir := false
+	if err := os.RemoveAll(repository.DUDDir); err != nil {
+		result.Retained = append(result.Retained, repository.DUDDir)
+		failures = append(failures, err.Error())
+	} else {
+		result.Removed = append(result.Removed, repository.DUDDir)
+		_ = syncV2EraseDirectory(repository.CommonDir)
+		removedDUDDir = true
+	}
+	if _, err := os.Lstat(repository.DUDDir); removedDUDDir && err == nil {
+		result.Retained = append(result.Retained, repository.DUDDir)
+		failures = append(failures, "DUD repository state reappeared during erasure")
+	} else if removedDUDDir && !errors.Is(err, os.ErrNotExist) {
+		result.Retained = append(result.Retained, repository.DUDDir)
+		failures = append(failures, err.Error())
+	}
+	return failures
+}
+
+// eraseV2Repository removes DUD's state from one Git repository. The survey
+// runs identically whether or not the erasure proceeds, so --dry-run reports
+// exactly what a real run would remove.
+func (a *app) eraseV2Repository(dryRun bool) (v2EraseResult, error) {
+	result := newV2EraseResult("repo")
+	result.Warnings = append(result.Warnings, "unreachable Git objects are retained until ordinary Git garbage collection")
+	repository, err := a.resolveV2GitRepositoryForErase()
+	if err != nil {
+		return result, err
+	}
+	dudDirExists, err := validateV2EraseDirectory(repository.DUDDir)
+	if err != nil {
+		result.Retained = append(result.Retained, repository.DUDDir)
+		return result, err
+	}
+	ownedRefs, err := a.collectV2EraseGitRefs(repository, dudDirExists, &result)
+	if err != nil {
+		return result, err
 	}
 	hasConfig, err := a.v2EraseGitHasDUDConfig()
 	if err != nil {
@@ -936,52 +1021,10 @@ func (a *app) eraseV2Repository(dryRun bool) (v2EraseResult, error) {
 		return result, err
 	}
 	defer unlock()
-	if len(ownedRefs) != 0 {
-		names := make([]string, 0, len(ownedRefs))
-		for name := range ownedRefs {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		var transaction strings.Builder
-		transaction.WriteString("start\n")
-		for _, name := range names {
-			fmt.Fprintf(&transaction, "delete %s %s\n", name, ownedRefs[name])
-		}
-		transaction.WriteString("prepare\ncommit\n")
-		if _, err := a.runV2EraseGit([]byte(transaction.String()), "update-ref", "--stdin"); err != nil {
-			result.Retained = append(result.Retained, names...)
-			return result, err
-		}
-		result.Removed = append(result.Removed, names...)
+	if err := a.deleteV2EraseGitRefs(ownedRefs, &result); err != nil {
+		return result, err
 	}
-	var failures []string
-	if hasConfig {
-		if _, configErr := a.runV2EraseGit(nil, "config", "--local", "--remove-section", "dud"); configErr != nil {
-			result.Retained = append(result.Retained, filepath.Join(repository.CommonDir, "config")+" [dud]")
-			failures = append(failures, configErr.Error())
-		} else {
-			result.Removed = append(result.Removed, filepath.Join(repository.CommonDir, "config")+" [dud]")
-		}
-	}
-	if dudDirExists {
-		removedDUDDir := false
-		if err := os.RemoveAll(repository.DUDDir); err != nil {
-			result.Retained = append(result.Retained, repository.DUDDir)
-			failures = append(failures, err.Error())
-		} else {
-			result.Removed = append(result.Removed, repository.DUDDir)
-			_ = syncV2EraseDirectory(repository.CommonDir)
-			removedDUDDir = true
-		}
-		if _, err := os.Lstat(repository.DUDDir); removedDUDDir && err == nil {
-			result.Retained = append(result.Retained, repository.DUDDir)
-			failures = append(failures, "DUD repository state reappeared during erasure")
-		} else if removedDUDDir && !errors.Is(err, os.ErrNotExist) {
-			result.Retained = append(result.Retained, repository.DUDDir)
-			failures = append(failures, err.Error())
-		}
-	}
-	if len(failures) != 0 {
+	if failures := a.removeV2EraseRepositoryState(repository, hasConfig, dudDirExists, &result); len(failures) != 0 {
 		return result, errors.New(strings.Join(failures, "; "))
 	}
 	return result, nil

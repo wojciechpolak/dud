@@ -1791,53 +1791,167 @@ func (a *app) requireV2GitRefObjects(ctx context.Context, repository *v2GitRepos
 	return nil
 }
 
-func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, digest string, metadata *v2GitMetadata) (string, error) {
+// preflightV2GitQuarantine checks a bundle against this repository's local
+// limits and against the metadata the peer signed, before any Git process is
+// started on it. It reports the bundle's size and the offset of its pack
+// section. The header is compared with the signed metadata here as well as at
+// delivery, because this is the last point before the objects are read.
+func preflightV2GitQuarantine(repository *v2GitRepository, bundlePath string, metadata *v2GitMetadata) (int64, int64, error) {
 	info, err := os.Lstat(bundlePath)
 	if err != nil {
-		return "", err
+		return 0, 0, err
 	}
 	if !info.Mode().IsRegular() || info.Size() <= 0 || uint64(info.Size()) > repository.Limits.BundleBytes {
-		return "", rejectV2Git(fmt.Errorf("Git bundle violates the local limit of %d bytes", repository.Limits.BundleBytes))
+		return 0, 0, rejectV2Git(fmt.Errorf("Git bundle violates the local limit of %d bytes", repository.Limits.BundleBytes))
 	}
 	available, err := v2AvailableBytes(repository.DUDDir)
 	if err != nil {
-		return "", err
+		return 0, 0, err
 	}
 	required := uint64(info.Size()) * repository.Limits.DiskMultiplier
 	if available < required {
-		return "", fmt.Errorf("Git quarantine requires %d free bytes but only %d are available", required, available)
+		return 0, 0, fmt.Errorf("Git quarantine requires %d free bytes but only %d are available", required, available)
 	}
 	version, refs, prerequisites, packOffset, err := parseV2GitBundleHeaderWithOffset(bundlePath, repository.ObjectHexLen/2)
 	if err != nil {
-		return "", err
+		return 0, 0, err
 	}
 	if version != metadata.BundleVersion || !equalV2GitPrerequisites(prerequisites, metadata.Prerequisites) || !equalV2GitRefs(refs, metadata.Refs) {
-		return "", rejectV2Git(errors.New("Git bundle header does not match the signed encrypted metadata"))
+		return 0, 0, rejectV2Git(errors.New("Git bundle header does not match the signed encrypted metadata"))
 	}
-	scratch := filepath.Join(repository.DUDDir, "quarantine", digest)
-	if filepath.Dir(scratch) != filepath.Join(repository.DUDDir, "quarantine") {
-		return "", errors.New("invalid Git quarantine path")
-	}
+	return info.Size(), packOffset, nil
+}
+
+// initV2GitQuarantine creates the bare repository a checkpoint's objects are
+// unpacked into. An incremental checkpoint carries only the objects its
+// prerequisites do not cover, so the quarantine borrows the real repository's
+// object store to resolve them; it never writes there, because alternates are
+// read-only to the borrowing repository.
+func (a *app) initV2GitQuarantine(ctx context.Context, repository *v2GitRepository, scratch string, metadata *v2GitMetadata) error {
 	if err := os.RemoveAll(scratch); err != nil {
-		return "", err
+		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
-	defer cancel()
 	objectFormat := "sha1"
 	if repository.ObjectFormat == 2 {
 		objectFormat = "sha256"
 	}
 	if _, err := a.runV2Git(ctx, repository, nil, "init", "--bare", "--object-format="+objectFormat, scratch); err != nil {
+		return err
+	}
+	if len(metadata.Prerequisites) == 0 {
+		return nil
+	}
+	infoDirectory := filepath.Join(scratch, "objects", "info")
+	if err := os.MkdirAll(infoDirectory, 0o700); err != nil {
+		return err
+	}
+	return atomicWriteV2File(filepath.Join(infoDirectory, "alternates"), []byte(filepath.Join(repository.CommonDir, "objects")+"\n"), 0o600)
+}
+
+// unpackV2GitIncrementalObjects indexes the pack section of an incremental
+// bundle directly. 'bundle unbundle' would refuse the bundle for prerequisites
+// that live in the borrowed object store rather than in the quarantine, so the
+// pack is indexed against the alternates and the refs the metadata names are
+// then required to resolve. That gives the same guarantee the prerequisite
+// check would have given.
+func (a *app) unpackV2GitIncrementalObjects(ctx context.Context, repository *v2GitRepository, scratch, bundlePath string, bundleSize, packOffset int64, alternateEnv []string, metadata *v2GitMetadata) error {
+	file, err := os.Open(bundlePath)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Seek(packOffset, io.SeekStart); err != nil {
+		_ = file.Close()
+		return err
+	}
+	pack, err := io.ReadAll(io.LimitReader(file, bundleSize-packOffset+1))
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if int64(len(pack)) != bundleSize-packOffset {
+		return errors.New("Git bundle pack section is truncated")
+	}
+	if _, err := a.runV2GitWithEnv(ctx, repository, alternateEnv, pack,
+		"-C", scratch, "index-pack", "--stdin", "--strict"); err != nil {
+		return err
+	}
+	return a.requireV2GitRefObjects(ctx, repository, scratch, alternateEnv, metadata.Refs)
+}
+
+// setV2GitQuarantineRefs points the quarantine's refs at the objects the signed
+// metadata names, so the checks that follow see exactly the history the peer
+// says it sent. The refs move in one transaction and in sorted order, which
+// keeps the quarantine identical for identical input.
+func (a *app) setV2GitQuarantineRefs(ctx context.Context, repository *v2GitRepository, scratch string, alternateEnv []string, metadata *v2GitMetadata) error {
+	var transaction strings.Builder
+	transaction.WriteString("start\n")
+	names := make([]string, 0, len(metadata.Refs))
+	for name := range metadata.Refs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(&transaction, "update %s %s\n", name, hex.EncodeToString(metadata.Refs[name]))
+	}
+	transaction.WriteString("prepare\ncommit\n")
+	_, err := a.runV2GitWithEnv(ctx, repository, alternateEnv, []byte(transaction.String()), "-C", scratch, "update-ref", "--stdin")
+	return err
+}
+
+// checkV2GitQuarantineContents runs the object and disk checks that need the
+// objects in place. A full checkpoint is self-contained, so its objects are
+// checked as a whole; an incremental one cannot be, because most of the history
+// it refers to lives in the borrowed object store.
+func (a *app) checkV2GitQuarantineContents(ctx context.Context, repository *v2GitRepository, scratch string, bundleSize int64, metadata *v2GitMetadata) error {
+	if len(metadata.Prerequisites) == 0 {
+		if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "fsck", "--strict", "--full", "--no-reflogs"); err != nil {
+			return err
+		}
+	}
+	// verify-pack covers every object in received packs, including valid dangling
+	// objects unreachable from advertised refs.
+	if err := a.verifyV2GitPackLimits(ctx, repository, scratch); err != nil {
+		return err
+	}
+	scratchBytes, err := v2GitDirectoryBytes(filepath.Join(scratch, "objects"))
+	if err != nil {
+		return err
+	}
+	// Pack indexes and an empty bare repository have fixed costs that dominate
+	// tiny bundles. The one-MiB allowance covers metadata, not object expansion.
+	// Payload-derived storage is capped at 2x here and at 3x by the preflight
+	// free-space reservation.
+	scratchMultiplier := uint64(0)
+	if repository.Limits.DiskMultiplier > 0 {
+		scratchMultiplier = repository.Limits.DiskMultiplier - 1
+	}
+	if scratchBytes > uint64(bundleSize)*scratchMultiplier+1024*1024 {
+		return errors.New("Git quarantine exceeds the local 3x bundle disk budget")
+	}
+	return nil
+}
+
+// verifyV2GitQuarantine unpacks a checkpoint into a bare repository of its own
+// and checks it there. Nothing the peer sent touches the operator's repository
+// until it has passed every check here, and a checkpoint that fails any of them
+// leaves only the quarantine behind, which this function removes. The caller
+// owns the returned quarantine path once the checks pass.
+func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, digest string, metadata *v2GitMetadata) (string, error) {
+	bundleSize, packOffset, err := preflightV2GitQuarantine(repository, bundlePath, metadata)
+	if err != nil {
 		return "", err
 	}
-	if len(metadata.Prerequisites) != 0 {
-		infoDirectory := filepath.Join(scratch, "objects", "info")
-		if err := os.MkdirAll(infoDirectory, 0o700); err != nil {
-			return "", err
-		}
-		if err := atomicWriteV2File(filepath.Join(infoDirectory, "alternates"), []byte(filepath.Join(repository.CommonDir, "objects")+"\n"), 0o600); err != nil {
-			return "", err
-		}
+	scratch := filepath.Join(repository.DUDDir, "quarantine", digest)
+	if filepath.Dir(scratch) != filepath.Join(repository.DUDDir, "quarantine") {
+		return "", errors.New("invalid Git quarantine path")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	defer cancel()
+	if err := a.initV2GitQuarantine(ctx, repository, scratch, metadata); err != nil {
+		return "", err
 	}
 	cleanup := true
 	defer func() {
@@ -1853,72 +1967,14 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 		if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "bundle", "unbundle", bundlePath); err != nil {
 			return "", err
 		}
-	} else {
-		file, err := os.Open(bundlePath)
-		if err != nil {
-			return "", err
-		}
-		if _, err := file.Seek(packOffset, io.SeekStart); err != nil {
-			_ = file.Close()
-			return "", err
-		}
-		pack, err := io.ReadAll(io.LimitReader(file, info.Size()-packOffset+1))
-		closeErr := file.Close()
-		if err != nil {
-			return "", err
-		}
-		if closeErr != nil {
-			return "", closeErr
-		}
-		if int64(len(pack)) != info.Size()-packOffset {
-			return "", errors.New("Git bundle pack section is truncated")
-		}
-		if _, err := a.runV2GitWithEnv(ctx, repository, alternateEnv, pack,
-			"-C", scratch, "index-pack", "--stdin", "--strict"); err != nil {
-			return "", err
-		}
-		if err := a.requireV2GitRefObjects(ctx, repository, scratch, alternateEnv, metadata.Refs); err != nil {
-			return "", err
-		}
-	}
-	var transaction strings.Builder
-	transaction.WriteString("start\n")
-	names := make([]string, 0, len(metadata.Refs))
-	for name := range metadata.Refs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		fmt.Fprintf(&transaction, "update %s %s\n", name, hex.EncodeToString(metadata.Refs[name]))
-	}
-	transaction.WriteString("prepare\ncommit\n")
-	if _, err := a.runV2GitWithEnv(ctx, repository, alternateEnv, []byte(transaction.String()), "-C", scratch, "update-ref", "--stdin"); err != nil {
+	} else if err := a.unpackV2GitIncrementalObjects(ctx, repository, scratch, bundlePath, bundleSize, packOffset, alternateEnv, metadata); err != nil {
 		return "", err
 	}
-	if len(metadata.Prerequisites) == 0 {
-		if _, err := a.runV2Git(ctx, repository, nil, "-C", scratch, "fsck", "--strict", "--full", "--no-reflogs"); err != nil {
-			return "", err
-		}
-	}
-	// verify-pack covers every object in received packs, including valid dangling
-	// objects unreachable from advertised refs.
-	if err := a.verifyV2GitPackLimits(ctx, repository, scratch); err != nil {
+	if err := a.setV2GitQuarantineRefs(ctx, repository, scratch, alternateEnv, metadata); err != nil {
 		return "", err
 	}
-	scratchBytes, err := v2GitDirectoryBytes(filepath.Join(scratch, "objects"))
-	if err != nil {
+	if err := a.checkV2GitQuarantineContents(ctx, repository, scratch, bundleSize, metadata); err != nil {
 		return "", err
-	}
-	// Pack indexes and an empty bare repository have fixed costs that dominate
-	// tiny bundles. The one-MiB allowance covers metadata, not object expansion.
-	// Payload-derived storage is capped at 2x here and at 3x by the preflight
-	// free-space reservation.
-	scratchMultiplier := uint64(0)
-	if repository.Limits.DiskMultiplier > 0 {
-		scratchMultiplier = repository.Limits.DiskMultiplier - 1
-	}
-	if scratchBytes > uint64(info.Size())*scratchMultiplier+1024*1024 {
-		return "", errors.New("Git quarantine exceeds the local 3x bundle disk budget")
 	}
 	cleanup = false
 	return scratch, nil
@@ -1986,6 +2042,185 @@ func v2GitRemoteRef(remote, advertised string) (string, error) {
 	}
 }
 
+// v2GitDroppedBranch is a remote-tracking branch a checkpoint stops carrying:
+// the name the peer gave it, and the local ref it was promoted to.
+type v2GitDroppedBranch struct {
+	name   string
+	target string
+}
+
+// v2GitDroppedBranches lists the branches the last accepted checkpoint carried
+// that this one does not. Dropping a branch is a deletion of accepted history
+// on this side, so it is treated like a rewrite rather than applied silently.
+func v2GitDroppedBranches(state *v2GitPeerState, remote string, metadata *v2GitMetadata) ([]v2GitDroppedBranch, error) {
+	names := make([]string, 0, len(state.LastReceivedRefs))
+	for prior := range state.LastReceivedRefs {
+		if !strings.HasPrefix(prior, "refs/heads/") {
+			continue
+		}
+		if _, retained := metadata.Refs[prior]; retained {
+			continue
+		}
+		names = append(names, prior)
+	}
+	sort.Strings(names)
+	dropped := make([]v2GitDroppedBranch, 0, len(names))
+	for _, prior := range names {
+		target, err := v2GitRemoteRef(remote, prior)
+		if err != nil {
+			return nil, err
+		}
+		dropped = append(dropped, v2GitDroppedBranch{name: prior, target: target})
+	}
+	return dropped, nil
+}
+
+// checkV2GitTagPromotion refuses a checkpoint that moves a tag this peer has
+// already delivered. A tag names one commit for good, so a peer that sends a
+// different object under a tag already held is either rewriting history or is
+// not the peer that sent the first one; neither is resolved by a flag.
+func (a *app) checkV2GitTagPromotion(repository *v2GitRepository, remote string, names []string, metadata *v2GitMetadata) error {
+	for _, name := range names {
+		if !strings.HasPrefix(name, "refs/tags/") {
+			continue
+		}
+		target, _ := v2GitRemoteRef(remote, name)
+		oldOID, exists, err := a.v2GitRefOID(repository, target)
+		if err != nil {
+			return err
+		}
+		newOID := hex.EncodeToString(metadata.Refs[name])
+		if exists && oldOID != newOID {
+			return fmt.Errorf("incoming tag %s conflicts with the isolated peer tag; tags are never force-updated", name)
+		}
+	}
+	return nil
+}
+
+// checkV2GitBranchPromotion refuses a checkpoint that would discard commits
+// this peer's remote-tracking branches already hold. A branch that only moves
+// forward is a fast-forward and is applied; anything else drops accepted
+// history and needs the operator to say the peer is trusted to do that.
+func (a *app) checkV2GitBranchPromotion(repository *v2GitRepository, remote, scratch string, names []string, metadata *v2GitMetadata, allowRewrite bool) error {
+	for _, name := range names {
+		if !strings.HasPrefix(name, "refs/heads/") {
+			continue
+		}
+		target, _ := v2GitRemoteRef(remote, name)
+		oldOID, exists, err := a.v2GitRefOID(repository, target)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		newOID := hex.EncodeToString(metadata.Refs[name])
+		if oldOID == newOID {
+			continue
+		}
+		fastForward, err := a.v2GitIsAncestor(repository, oldOID, newOID, scratch)
+		if err != nil {
+			return err
+		}
+		if !fastForward && !allowRewrite {
+			return fmt.Errorf("peer branch %s rewrites accepted history; rerun with --allow-rewrite after verifying the peer", name)
+		}
+	}
+	return nil
+}
+
+// checkV2GitBranchRemoval refuses a checkpoint that drops a branch this peer
+// already delivered, unless the operator allows rewrites.
+func (a *app) checkV2GitBranchRemoval(repository *v2GitRepository, dropped []v2GitDroppedBranch, allowRewrite bool) error {
+	for _, branch := range dropped {
+		_, exists, err := a.v2GitRefOID(repository, branch.target)
+		if err != nil {
+			return err
+		}
+		if exists && !allowRewrite {
+			return fmt.Errorf("checkpoint deletes accepted peer branch %s; rerun with --allow-rewrite after verifying the peer", branch.name)
+		}
+	}
+	return nil
+}
+
+// importV2GitQuarantineRefs copies the verified objects out of the quarantine
+// repository under a private import prefix, which makes them reachable in this
+// repository before any ref the operator sees moves. It returns the
+// function that removes that prefix: the import refs exist only to keep the
+// objects alive across the promotion, and the objects are reachable from the
+// peer's remote-tracking refs once it commits.
+func (a *app) importV2GitQuarantineRefs(ctx context.Context, repository *v2GitRepository, scratch, digest string, names []string) (func(), error) {
+	importPrefix := "refs/dud/import/" + digest
+	fetchArgs := []string{"fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", scratch}
+	for _, name := range names {
+		target := importPrefix + "/" + strings.TrimPrefix(name, "refs/")
+		fetchArgs = append(fetchArgs, "+"+name+":"+target)
+	}
+	if _, fetchErr := a.runV2Git(ctx, repository, nil, fetchArgs...); fetchErr != nil {
+		return nil, fetchErr
+	}
+	return func() {
+		for _, name := range names {
+			target := importPrefix + "/" + strings.TrimPrefix(name, "refs/")
+			_, _ = a.runV2Git(context.Background(), repository, nil, "update-ref", "-d", target)
+		}
+	}, nil
+}
+
+// commitV2GitRefTransaction moves every remote-tracking ref this checkpoint
+// affects in a single Git ref transaction, so the peer's refs never show half
+// of a checkpoint: either all of them advance or none does.
+func (a *app) commitV2GitRefTransaction(ctx context.Context, repository *v2GitRepository, remote string, names []string, metadata *v2GitMetadata, dropped []v2GitDroppedBranch) error {
+	var transaction strings.Builder
+	transaction.WriteString("start\n")
+	for _, name := range names {
+		target, err := v2GitRemoteRef(remote, name)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&transaction, "update %s %s\n", target, hex.EncodeToString(metadata.Refs[name]))
+	}
+	for _, branch := range dropped {
+		_, exists, err := a.v2GitRefOID(repository, branch.target)
+		if err != nil {
+			return err
+		}
+		if exists {
+			fmt.Fprintf(&transaction, "delete %s\n", branch.target)
+		}
+	}
+	transaction.WriteString("prepare\ncommit\n")
+	_, err := a.runV2Git(ctx, repository, []byte(transaction.String()), "update-ref", "--stdin")
+	return err
+}
+
+// recordV2GitManagedRefs records which refs DUD now owns in this repository.
+// The record lets 'dud erase' remove exactly the refs a peer put here and leave
+// every other ref in the repository alone.
+func recordV2GitManagedRefs(repository *v2GitRepository, remote string, metadata *v2GitMetadata, dropped []v2GitDroppedBranch) error {
+	managedUpdates := make(map[string]string, len(metadata.Refs))
+	for name, oid := range metadata.Refs {
+		target, err := v2GitRemoteRef(remote, name)
+		if err != nil {
+			return err
+		}
+		managedUpdates[target] = hex.EncodeToString(oid)
+	}
+	managedDeletes := make([]string, 0, len(dropped))
+	for _, branch := range dropped {
+		managedDeletes = append(managedDeletes, branch.target)
+	}
+	if err := repository.updateManagedRefs(managedUpdates, managedDeletes); err != nil {
+		return fmt.Errorf("record managed Git refs after commit: %w", err)
+	}
+	return nil
+}
+
+// promoteV2GitQuarantine moves a verified checkpoint from its quarantine
+// repository into this peer's remote-tracking refs. Every refusal is decided
+// before a single object is imported, so a checkpoint this repository will not
+// accept leaves nothing behind.
 func (a *app) promoteV2GitQuarantine(repository *v2GitRepository, state *v2GitPeerState, scratch, digest, remote string, metadata *v2GitMetadata, allowRewrite bool) (map[string][]byte, error) {
 	if err := validateGitRemoteName(remote); err != nil {
 		return nil, err
@@ -1998,130 +2233,29 @@ func (a *app) promoteV2GitQuarantine(repository *v2GitRepository, state *v2GitPe
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		if !strings.HasPrefix(name, "refs/tags/") {
-			continue
-		}
-		target, _ := v2GitRemoteRef(remote, name)
-		oldOID, exists, err := a.v2GitRefOID(repository, target)
-		if err != nil {
-			return nil, err
-		}
-		newOID := hex.EncodeToString(metadata.Refs[name])
-		if exists && oldOID != newOID {
-			return nil, fmt.Errorf("incoming tag %s conflicts with the isolated peer tag; tags are never force-updated", name)
-		}
-	}
-	for _, name := range names {
-		if !strings.HasPrefix(name, "refs/heads/") {
-			continue
-		}
-		target, _ := v2GitRemoteRef(remote, name)
-		oldOID, exists, err := a.v2GitRefOID(repository, target)
-		if err != nil || !exists {
-			if err != nil {
-				return nil, err
-			}
-			continue
-		}
-		newOID := hex.EncodeToString(metadata.Refs[name])
-		if oldOID == newOID {
-			continue
-		}
-		fastForward, err := a.v2GitIsAncestor(repository, oldOID, newOID, scratch)
-		if err != nil {
-			return nil, err
-		}
-		if !fastForward && !allowRewrite {
-			return nil, fmt.Errorf("peer branch %s rewrites accepted history; rerun with --allow-rewrite after verifying the peer", name)
-		}
-	}
-	for prior := range state.LastReceivedRefs {
-		if !strings.HasPrefix(prior, "refs/heads/") {
-			continue
-		}
-		if _, retained := metadata.Refs[prior]; retained {
-			continue
-		}
-		target, err := v2GitRemoteRef(remote, prior)
-		if err != nil {
-			return nil, err
-		}
-		if _, exists, err := a.v2GitRefOID(repository, target); err != nil {
-			return nil, err
-		} else if exists && !allowRewrite {
-			return nil, fmt.Errorf("checkpoint deletes accepted peer branch %s; rerun with --allow-rewrite after verifying the peer", prior)
-		}
-	}
-	importPrefix := "refs/dud/import/" + digest
-	fetchArgs := []string{"fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", scratch}
-	for _, name := range names {
-		target := importPrefix + "/" + strings.TrimPrefix(name, "refs/")
-		fetchArgs = append(fetchArgs, "+"+name+":"+target)
-	}
-	if _, fetchErr := a.runV2Git(ctx, repository, nil, fetchArgs...); fetchErr != nil {
-		return nil, fetchErr
-	}
-	defer func() {
-		for _, name := range names {
-			target := importPrefix + "/" + strings.TrimPrefix(name, "refs/")
-			_, _ = a.runV2Git(context.Background(), repository, nil, "update-ref", "-d", target)
-		}
-	}()
-	var transaction strings.Builder
-	transaction.WriteString("start\n")
-	for _, name := range names {
-		target, err := v2GitRemoteRef(remote, name)
-		if err != nil {
-			return nil, err
-		}
-		fmt.Fprintf(&transaction, "update %s %s\n", target, hex.EncodeToString(metadata.Refs[name]))
-	}
-	for prior := range state.LastReceivedRefs {
-		if !strings.HasPrefix(prior, "refs/heads/") {
-			continue
-		}
-		if _, retained := metadata.Refs[prior]; retained {
-			continue
-		}
-		target, err := v2GitRemoteRef(remote, prior)
-		if err != nil {
-			return nil, err
-		}
-		if _, exists, err := a.v2GitRefOID(repository, target); err != nil {
-			return nil, err
-		} else if exists {
-			fmt.Fprintf(&transaction, "delete %s\n", target)
-		}
-	}
-	transaction.WriteString("prepare\ncommit\n")
-	if _, err := a.runV2Git(ctx, repository, []byte(transaction.String()), "update-ref", "--stdin"); err != nil {
+	dropped, err := v2GitDroppedBranches(state, remote, metadata)
+	if err != nil {
 		return nil, err
 	}
-	managedUpdates := make(map[string]string, len(metadata.Refs))
-	for name, oid := range metadata.Refs {
-		target, err := v2GitRemoteRef(remote, name)
-		if err != nil {
-			return nil, err
-		}
-		managedUpdates[target] = hex.EncodeToString(oid)
+	if err := a.checkV2GitTagPromotion(repository, remote, names, metadata); err != nil {
+		return nil, err
 	}
-	managedDeletes := []string{}
-	for prior := range state.LastReceivedRefs {
-		if !strings.HasPrefix(prior, "refs/heads/") {
-			continue
-		}
-		if _, retained := metadata.Refs[prior]; retained {
-			continue
-		}
-		target, err := v2GitRemoteRef(remote, prior)
-		if err != nil {
-			return nil, err
-		}
-		managedDeletes = append(managedDeletes, target)
+	if err := a.checkV2GitBranchPromotion(repository, remote, scratch, names, metadata, allowRewrite); err != nil {
+		return nil, err
 	}
-	if err := repository.updateManagedRefs(managedUpdates, managedDeletes); err != nil {
-		return nil, fmt.Errorf("record managed Git refs after commit: %w", err)
+	if err := a.checkV2GitBranchRemoval(repository, dropped, allowRewrite); err != nil {
+		return nil, err
+	}
+	removeImportRefs, err := a.importV2GitQuarantineRefs(ctx, repository, scratch, digest, names)
+	if err != nil {
+		return nil, err
+	}
+	defer removeImportRefs()
+	if err := a.commitV2GitRefTransaction(ctx, repository, remote, names, metadata, dropped); err != nil {
+		return nil, err
+	}
+	if err := recordV2GitManagedRefs(repository, remote, metadata, dropped); err != nil {
+		return nil, err
 	}
 	return metadata.Refs, nil
 }
@@ -2405,93 +2539,93 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 	return true, nil
 }
 
-func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, repository *v2GitRepository, opts v2GitFetchOptions, delivery *v2GranularInboxDelivery, sourceSlotEpoch uint64) (bool, error) {
-	descriptorCiphertext := delivery.EncryptedDescriptor
+// v2GitDeliveryHeader records what a Git checkpoint's signed descriptor fixes
+// about the delivery before its bundle is decrypted: where it sits on the
+// inbound data chain, which policy it was delivered under, and how long its
+// payload may be retained.
+type v2GitDeliveryHeader struct {
+	envelope     *validatedV2Envelope
+	sequence     uint64
+	digest       string
+	policyDigest []byte
+	expiresAt    uint64
+}
+
+// readV2GitDeliveryHeader validates the descriptor of a Git checkpoint. Chain
+// position and policy are settled before the payload is judged, because a
+// refusal applies only to a delivery at the head of this chain and must bind
+// to the policy it arrived under.
+func (runtime *v2PeerRuntime) readV2GitDeliveryHeader(opts v2GitFetchOptions, delivery *v2GranularInboxDelivery) (v2GitDeliveryHeader, error) {
+	var header v2GitDeliveryHeader
 	expectation, err := runtime.descriptorExpectation()
 	if err != nil {
-		return false, err
+		return header, err
 	}
-	envelope, err := decryptAndValidateV2Envelope(descriptorCiphertext, runtime.identity, expectation)
+	envelope, err := decryptAndValidateV2Envelope(delivery.EncryptedDescriptor, runtime.identity, expectation)
 	if err != nil {
-		return false, err
+		return header, err
 	}
 	chainID, err := descriptorUint(envelope.Descriptor, kChain, "chain")
 	if err != nil || chainID != 0 {
-		return false, errors.New("data slot contains a non-data descriptor")
+		return header, errors.New("data slot contains a non-data descriptor")
 	}
 	payloadType, err := descriptorUint(envelope.Descriptor, kPayloadType, "payload type")
 	if err != nil {
-		return false, err
+		return header, err
 	}
 	if payloadType != 4 {
-		return false, fmt.Errorf("next delivery is payload type %d; receive it with dud receive %s before fetching Git", payloadType, opts.Alias)
+		return header, fmt.Errorf("next delivery is payload type %d; receive it with dud receive %s before fetching Git", payloadType, opts.Alias)
 	}
-	// Validate chain position and policy before judging the payload. A refusal
-	// applies only to a delivery at this chain's head and must bind to its policy.
 	next, err := runtime.validateNextDescriptor(runtime.state.Chains["in:data"], envelope)
 	if err != nil {
 		_ = writeV2PeerDeliveryState(runtime.paths, runtime.state)
-		return false, err
+		return header, err
 	}
 	policy, err := descriptorPolicy(envelope.Descriptor)
 	if err != nil {
-		return false, err
+		return header, err
 	}
 	if err := validateV2EffectivePolicy(policy, delivery.EffectivePolicy); err != nil {
-		return false, err
+		return header, err
 	}
 	// The validation above excludes zero, which the pruner reserves for
 	// "retain indefinitely".
 	expiresAt, _ := asV2Uint(delivery.EffectivePolicy[1])
 	policyDigest, err := v2PolicyDigest(policy)
 	if err != nil {
-		return false, err
+		return header, err
 	}
 	if !next {
-		return false, errors.New("Git delivery is already committed but lacks a durable completion")
+		return header, errors.New("Git delivery is already committed but lacks a durable completion")
 	}
 	sequence, _ := descriptorUint(envelope.Descriptor, kSequence, "sequence")
-	digest := hex.EncodeToString(envelope.DescriptorDigest[:])
-	reject := func(cause error) (bool, error) {
-		return runtime.rejectV2GitDelivery(ctx, a, opts, envelope, delivery, sourceSlotEpoch, policyDigest, sequence, digest, cause)
-	}
-	metadata, err := decodeV2GitMetadata(envelope.Descriptor[kTypeMetadata])
-	if err != nil {
-		return reject(err)
-	}
-	if err := a.validateV2GitMetadata(repository, metadata); err != nil {
-		return reject(err)
-	}
-	repositoryID, repositoryIDErr := repository.loadRepositoryID()
-	switch {
-	case repositoryIDErr == nil && !bytes.Equal(repositoryID, metadata.RepositoryID):
-		return false, errors.New("Git delivery belongs to a different repository")
-	case errors.Is(repositoryIDErr, os.ErrNotExist) && !opts.Associate:
-		return false, errors.New("repository is not associated with this checkpoint; inspect the peer and rerun with --associate")
-	case repositoryIDErr != nil && !errors.Is(repositoryIDErr, os.ErrNotExist):
-		return false, repositoryIDErr
-	}
-	if _, exists := runtime.state.InboundTransfers[digest]; !exists {
-		runtime.state.InboundTransfers[digest] = v2InboundTransfer{
-			EntryID: hex.EncodeToString(delivery.ID), Slot: hex.EncodeToString(delivery.Slot),
-			DescriptorDigest: digest, Sequence: sequence, Phase: "descriptor-verified",
-			PolicyDigest:         hex.EncodeToString(policyDigest),
-			DescriptorCiphertext: v2Base64URL(descriptorCiphertext),
-			ExpiresAt:            expiresAt,
-		}
-		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-			return false, err
-		}
-	}
+	return v2GitDeliveryHeader{
+		envelope:     envelope,
+		sequence:     sequence,
+		digest:       hex.EncodeToString(envelope.DescriptorDigest[:]),
+		policyDigest: policyDigest,
+		expiresAt:    expiresAt,
+	}, nil
+}
+
+// storeV2GitCheckpointBundle decrypts a checkpoint's payload and writes it to
+// the repository's transfer directory as a Git bundle. Both the ciphertext and
+// the plaintext are checked against the signed descriptor first, so the bundle
+// on disk is only ever what the peer signed. A bundle already at that path is
+// an interrupted run of this delivery; one holding different bytes belongs to a
+// different checkpoint claiming this digest and is never overwritten.
+func (runtime *v2PeerRuntime) storeV2GitCheckpointBundle(repository *v2GitRepository, delivery *v2GranularInboxDelivery, header v2GitDeliveryHeader) (string, [32]byte, error) {
+	var plainDigest [32]byte
+	envelope := header.envelope
 	payloadCiphertext := delivery.Payload
 	chunks, ok := envelope.Descriptor[kChunkHashes].([]any)
 	if !ok || len(chunks) != 1 {
-		return false, errors.New("Git descriptor ciphertext hash list is invalid")
+		return "", plainDigest, errors.New("Git descriptor ciphertext hash list is invalid")
 	}
 	expectedCipherDigest, _ := chunks[0].([]byte)
 	actualCipherDigest := sha256.Sum256(payloadCiphertext)
 	if !bytes.Equal(expectedCipherDigest, actualCipherDigest[:]) {
-		return false, errors.New("Git payload ciphertext does not match the signed descriptor")
+		return "", plainDigest, errors.New("Git payload ciphertext does not match the signed descriptor")
 	}
 	plaintextTotal := int64(0)
 	if size, exists := envelope.Descriptor[kPlaintextSize]; exists {
@@ -2499,179 +2633,186 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 			plaintextTotal = int64(value)
 		}
 	}
-	if runtime.progress != nil {
-		runtime.progress.Phase("decrypting and verifying Git checkpoint", plaintextTotal)
-	}
 	var observe func(int64, int64)
 	if runtime.progress != nil {
+		runtime.progress.Phase("decrypting and verifying Git checkpoint", plaintextTotal)
 		observe = runtime.progress.Set
 	}
 	plaintext, err := decryptV2PayloadObserved(payloadCiphertext, runtime.identity, v2MaximumObjectBytes, plaintextTotal, observe)
 	if err != nil {
-		return false, err
+		return "", plainDigest, err
 	}
-	plainDigest := sha256.Sum256(plaintext)
+	plainDigest = sha256.Sum256(plaintext)
 	expectedPlainDigest, _ := envelope.Descriptor[kPayloadHash].([]byte)
 	if !bytes.Equal(expectedPlainDigest, plainDigest[:]) {
-		return false, errors.New("Git bundle does not match the signed descriptor")
+		return "", plainDigest, errors.New("Git bundle does not match the signed descriptor")
 	}
 	if size, exists := envelope.Descriptor[kPlaintextSize]; exists {
 		value, ok := asV2Uint(size)
 		if !ok || value != uint64(len(plaintext)) {
-			return false, errors.New("Git bundle size does not match the signed descriptor")
+			return "", plainDigest, errors.New("Git bundle size does not match the signed descriptor")
 		}
 	}
-	bundlePath := filepath.Join(repository.DUDDir, "transfers", digest+".bundle")
-	if existing, readErr := os.ReadFile(bundlePath); readErr == nil {
+	bundlePath := filepath.Join(repository.DUDDir, "transfers", header.digest+".bundle")
+	existing, readErr := os.ReadFile(bundlePath)
+	if readErr == nil {
 		existingDigest := sha256.Sum256(existing)
 		if !bytes.Equal(existingDigest[:], plainDigest[:]) {
-			return false, errors.New("durable Git bundle conflicts with the signed delivery")
+			return "", plainDigest, errors.New("durable Git bundle conflicts with the signed delivery")
 		}
-	} else {
-		if !errors.Is(readErr, os.ErrNotExist) {
-			return false, readErr
-		}
-		if err := atomicWriteV2File(bundlePath, plaintext, 0o600); err != nil {
-			return false, err
-		}
+		return bundlePath, plainDigest, nil
 	}
-	headerVersion, headerRefs, headerPrerequisites, err := parseV2GitBundleHeader(bundlePath, repository.ObjectHexLen/2)
-	if err != nil {
-		return false, err
+	if !errors.Is(readErr, os.ErrNotExist) {
+		return "", plainDigest, readErr
 	}
-	if headerVersion != metadata.BundleVersion || !equalV2GitPrerequisites(headerPrerequisites, metadata.Prerequisites) ||
-		!equalV2GitRefs(headerRefs, metadata.Refs) {
-		return reject(errors.New("Git bundle header does not match the signed encrypted metadata"))
+	if err := atomicWriteV2File(bundlePath, plaintext, 0o600); err != nil {
+		return "", plainDigest, err
 	}
-	globalTransfer := v2InboundTransfer{
+	return bundlePath, plainDigest, nil
+}
+
+// recordV2GitPayloadVerified writes the transfer record for a checkpoint whose
+// bundle is on disk and verified. A record left by an interrupted run must
+// agree with the descriptor on every field that identifies the delivery; one
+// that already reached its output is kept as it is, because the refs it names
+// have been promoted.
+func (runtime *v2PeerRuntime) recordV2GitPayloadVerified(delivery *v2GranularInboxDelivery, header v2GitDeliveryHeader, bundlePath string, plainDigest [32]byte) (v2InboundTransfer, error) {
+	transfer := v2InboundTransfer{
 		EntryID: hex.EncodeToString(delivery.ID), Slot: hex.EncodeToString(delivery.Slot),
-		DescriptorDigest: digest, Sequence: sequence, Phase: "payload-verified",
+		DescriptorDigest: header.digest, Sequence: header.sequence, Phase: "payload-verified",
 		TemporaryOutput: bundlePath, OutputDigest: hex.EncodeToString(plainDigest[:]),
-		PolicyDigest:         hex.EncodeToString(policyDigest),
-		DescriptorCiphertext: v2Base64URL(descriptorCiphertext),
-		PlaintextPayload:     bundlePath, ExpiresAt: expiresAt,
+		PolicyDigest:         hex.EncodeToString(header.policyDigest),
+		DescriptorCiphertext: v2Base64URL(delivery.EncryptedDescriptor),
+		PlaintextPayload:     bundlePath, ExpiresAt: header.expiresAt,
 	}
-	if existing, exists := runtime.state.InboundTransfers[digest]; exists {
-		if existing.Sequence != sequence ||
-			(existing.OutputDigest != "" && existing.OutputDigest != globalTransfer.OutputDigest) ||
-			existing.PolicyDigest != globalTransfer.PolicyDigest {
-			return false, errors.New("durable Git transfer state conflicts with the signed descriptor")
+	if existing, exists := runtime.state.InboundTransfers[header.digest]; exists {
+		if existing.Sequence != header.sequence ||
+			(existing.OutputDigest != "" && existing.OutputDigest != transfer.OutputDigest) ||
+			existing.PolicyDigest != transfer.PolicyDigest {
+			return transfer, errors.New("durable Git transfer state conflicts with the signed descriptor")
 		}
 		if existing.Phase == "output-committed" {
-			globalTransfer = existing
+			transfer = existing
 		}
 	}
-	runtime.state.InboundTransfers[digest] = globalTransfer
+	runtime.state.InboundTransfers[header.digest] = transfer
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-		return false, err
+		return transfer, err
 	}
-	if repositoryIDErr != nil {
-		if err := repository.associateRepositoryID(metadata.RepositoryID); err != nil {
-			return false, err
+	return transfer, nil
+}
+
+// applyV2GitCheckpointBundle verifies a checkpoint's objects in a quarantine
+// repository and promotes them into this peer's remote-tracking refs. The
+// per-peer state advances one phase at a time and is written at each one, so an
+// interrupted fetch resumes at the phase it reached instead of re-promoting
+// refs that are already in place.
+//
+// The second return reports that the error rejects this delivery permanently.
+// Only durable-limit and signed-content failures in quarantine verification do:
+// full disks, wall-time limits, and failed fsck checks leave the delivery
+// available for another attempt.
+func (a *app) applyV2GitCheckpointBundle(runtime *v2PeerRuntime, repository *v2GitRepository, opts v2GitFetchOptions, state *v2GitPeerState, metadata *v2GitMetadata, header v2GitDeliveryHeader, inbound v2GitInboundState, bundlePath string, deliveryID []byte) (v2GitInboundState, bool, error) {
+	if inbound.Phase == "" {
+		inbound = v2GitInboundState{
+			Sequence: header.sequence, DescriptorDigest: header.digest, Phase: "payload-verified",
+			BundlePath: bundlePath, Refs: stringGitRefs(metadata.Refs),
+			Prerequisites: stringGitPrerequisites(metadata.Prerequisites), BaseSequence: metadata.BaseSequence,
 		}
-		repositoryID = append([]byte(nil), metadata.RepositoryID...)
-	}
-	state, err := repository.loadPeerState(repositoryID, runtime.peer.PeerPseudonymousID)
-	if err != nil {
-		return false, err
-	}
-	if err := a.validateV2GitIncrementalBase(repository, state, metadata, sequence); err != nil {
-		return reject(err)
-	}
-	inbound := state.Inbound[digest]
-	if inbound.Phase != "output-committed" {
-		if inbound.Phase == "" {
-			inbound = v2GitInboundState{
-				Sequence: sequence, DescriptorDigest: digest, Phase: "payload-verified",
-				BundlePath: bundlePath, Refs: stringGitRefs(metadata.Refs),
-				Prerequisites: stringGitPrerequisites(metadata.Prerequisites), BaseSequence: metadata.BaseSequence,
-			}
-			state.Inbound[digest] = inbound
-			appendV2GitHistory(state, "inbound", sequence, digest, "payload-verified")
-			if err := repository.writePeerState(state); err != nil {
-				return false, err
-			}
-		}
-		scratch, err := a.verifyV2GitQuarantine(repository, bundlePath, digest, metadata)
-		if err != nil {
-			// Only durable-limit and signed-content failures in quarantine
-			// verification reject a delivery permanently. Full disks, wall-time
-			// limits, and failed fsck checks leave it available for another attempt.
-			if isV2GitPermanentRejection(err) {
-				return reject(err)
-			}
-			return false, err
-		}
-		inbound.Phase = "verified"
-		state.Inbound[digest] = inbound
-		appendV2GitHistory(state, "inbound", sequence, digest, "verified")
+		state.Inbound[header.digest] = inbound
+		appendV2GitHistory(state, "inbound", header.sequence, header.digest, "payload-verified")
 		if err := repository.writePeerState(state); err != nil {
-			_ = os.RemoveAll(scratch)
-			return false, err
-		}
-		remote := runtime.peer.GitRemote
-		if remote == "" {
-			remote = opts.Alias
-		}
-		fetchedRefs, err := a.promoteV2GitQuarantine(repository, state, scratch, digest, remote, metadata, opts.AllowRewrite)
-		if err != nil {
-			return false, err
-		}
-		resultMetadata := map[int]any{
-			1: metadata.RepositoryID,
-			2: fetchedRefs,
-			3: metadata.Prerequisites,
-		}
-		resultBytes, err := v2EncMode.Marshal(resultMetadata)
-		if err != nil {
-			return false, err
-		}
-		resultDigest := sha256.Sum256(resultBytes)
-		inbound.Phase = "output-committed"
-		inbound.FetchedRefs = stringGitRefs(fetchedRefs)
-		inbound.OutputDigest = hex.EncodeToString(resultDigest[:])
-		state.Inbound[digest] = inbound
-		state.LastReceivedSequence = sequence
-		state.LastReceivedDescriptorDigest = digest
-		state.LastReceivedDeliveryID = hex.EncodeToString(delivery.ID)
-		state.LastReceivedRefs = stringGitRefs(fetchedRefs)
-		appendV2GitHistory(state, "inbound", sequence, digest, "output-committed")
-		if err := repository.writePeerState(state); err != nil {
-			return false, err
+			return inbound, false, err
 		}
 	}
-	fetchedRefs, err := byteGitRefs(inbound.FetchedRefs, repository.ObjectHexLen/2)
+	scratch, err := a.verifyV2GitQuarantine(repository, bundlePath, header.digest, metadata)
 	if err != nil {
-		return false, err
+		return inbound, isV2GitPermanentRejection(err), err
 	}
-	resultMetadata := map[int]any{
+	inbound.Phase = "verified"
+	state.Inbound[header.digest] = inbound
+	appendV2GitHistory(state, "inbound", header.sequence, header.digest, "verified")
+	if err := repository.writePeerState(state); err != nil {
+		_ = os.RemoveAll(scratch)
+		return inbound, false, err
+	}
+	remote := runtime.peer.GitRemote
+	if remote == "" {
+		remote = opts.Alias
+	}
+	fetchedRefs, err := a.promoteV2GitQuarantine(repository, state, scratch, header.digest, remote, metadata, opts.AllowRewrite)
+	if err != nil {
+		return inbound, false, err
+	}
+	resultDigest, err := v2GitResultDigest(metadata, fetchedRefs)
+	if err != nil {
+		return inbound, false, err
+	}
+	inbound.Phase = "output-committed"
+	inbound.FetchedRefs = stringGitRefs(fetchedRefs)
+	inbound.OutputDigest = hex.EncodeToString(resultDigest[:])
+	state.Inbound[header.digest] = inbound
+	state.LastReceivedSequence = header.sequence
+	state.LastReceivedDescriptorDigest = header.digest
+	state.LastReceivedDeliveryID = hex.EncodeToString(deliveryID)
+	state.LastReceivedRefs = stringGitRefs(fetchedRefs)
+	appendV2GitHistory(state, "inbound", header.sequence, header.digest, "output-committed")
+	if err := repository.writePeerState(state); err != nil {
+		return inbound, false, err
+	}
+	return inbound, false, nil
+}
+
+// v2GitResultMetadata builds what a Git checkpoint's acknowledgement reports
+// back: the repository it was applied to, the refs it moved, and the
+// prerequisites it was built against. The sender matches it against what it
+// sent.
+func v2GitResultMetadata(metadata *v2GitMetadata, fetchedRefs map[string][]byte) map[int]any {
+	return map[int]any{
 		1: metadata.RepositoryID,
 		2: fetchedRefs,
 		3: metadata.Prerequisites,
 	}
-	resultBytes, err := v2EncMode.Marshal(resultMetadata)
+}
+
+// v2GitResultDigest is the digest the acknowledgement carries over that result,
+// taken over its deterministic encoding so both peers compute the same bytes.
+func v2GitResultDigest(metadata *v2GitMetadata, fetchedRefs map[string][]byte) ([32]byte, error) {
+	resultBytes, err := v2EncMode.Marshal(v2GitResultMetadata(metadata, fetchedRefs))
 	if err != nil {
-		return false, err
+		return [32]byte{}, err
 	}
-	resultDigest := sha256.Sum256(resultBytes)
-	globalTransfer.Phase = "output-committed"
-	globalTransfer.CommittedOutput = repository.CommonDir
-	globalTransfer.OutputDigest = hex.EncodeToString(resultDigest[:])
-	runtime.state.InboundTransfers[digest] = globalTransfer
-	if err := runtime.queueV2GranularCompletion(envelope, delivery.ID, delivery.Slot, sourceSlotEpoch, policyDigest, resultDigest[:], resultMetadata); err != nil {
-		return false, err
+	return sha256.Sum256(resultBytes), nil
+}
+
+// commitV2GitDelivery records the applied checkpoint and acknowledges it. The
+// transfer record names the repository as the committed output, and the chain
+// watermark moves past this sequence only once the completion is queued, so an
+// interrupted fetch re-runs the acknowledgement rather than skipping it.
+func (runtime *v2PeerRuntime) commitV2GitDelivery(ctx context.Context, a *app, repository *v2GitRepository, delivery *v2GranularInboxDelivery, header v2GitDeliveryHeader, sourceSlotEpoch uint64, transfer v2InboundTransfer, metadata *v2GitMetadata, fetchedRefs map[string][]byte) error {
+	resultMetadata := v2GitResultMetadata(metadata, fetchedRefs)
+	resultDigest, err := v2GitResultDigest(metadata, fetchedRefs)
+	if err != nil {
+		return err
+	}
+	transfer.Phase = "output-committed"
+	transfer.CommittedOutput = repository.CommonDir
+	transfer.OutputDigest = hex.EncodeToString(resultDigest[:])
+	runtime.state.InboundTransfers[header.digest] = transfer
+	if err := runtime.queueV2GranularCompletion(header.envelope, delivery.ID, delivery.Slot, sourceSlotEpoch, header.policyDigest, resultDigest[:], resultMetadata); err != nil {
+		return err
 	}
 	dataChain := runtime.state.Chains["in:data"]
-	dataChain.ReceiveWatermark = sequence
-	dataChain.ReceiveDigest = digest
-	dataChain.Replay[sequence] = v2ReplayEntry{
-		Sequence: sequence, DescriptorDigest: digest,
+	dataChain.ReceiveWatermark = header.sequence
+	dataChain.ReceiveDigest = header.digest
+	dataChain.Replay[header.sequence] = v2ReplayEntry{
+		Sequence: header.sequence, DescriptorDigest: header.digest,
 		ExpiresAt:    uint64(time.Now().Unix()) + v2MaximumTTLSeconds,
 		OutputDigest: hex.EncodeToString(resultDigest[:]),
 	}
 	pruneV2ReplayHistory(runtime.state, uint64(time.Now().Unix()))
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-		return false, err
+		return err
 	}
 	if err := runtime.flushPendingCompletions(ctx); err != nil {
 		if runtime.progress != nil {
@@ -2679,6 +2820,13 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 		}
 		fmt.Fprintf(a.errOut, "WARNING: Git refs committed; atomic completion queued for automatic retry: %v\n", err)
 	}
+	return nil
+}
+
+// reportV2GitFetch renders a committed checkpoint. The refs it moved are
+// remote-tracking refs, so the report ends with the commands that would bring
+// them into a local branch: the fetch itself never touches one.
+func (a *app) reportV2GitFetch(runtime *v2PeerRuntime, repository *v2GitRepository, opts v2GitFetchOptions, state *v2GitPeerState, metadata *v2GitMetadata, header v2GitDeliveryHeader, repositoryID []byte, fetchedRefs map[string][]byte) error {
 	remote := runtime.peer.GitRemote
 	if remote == "" {
 		remote = opts.Alias
@@ -2692,7 +2840,7 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	if opts.JSON {
 		result := status.merge(map[string]any{
 			"peer": opts.Alias, "received": true, "repository_id": hex.EncodeToString(repositoryID),
-			"sequence": sequence, "descriptor_digest": digest,
+			"sequence": header.sequence, "descriptor_digest": header.digest,
 			"remote": remote, "refs": stringGitRefs(fetchedRefs),
 			"checkpoint_mode":            checkpointModeV2Git(metadata),
 			"acknowledgement":            len(runtime.state.PendingCompletions) == 0,
@@ -2701,11 +2849,11 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 		if metadata.BaseSequence != 0 {
 			result["base_sequence"] = metadata.BaseSequence
 		}
-		return true, writeJSON(a.out, result)
+		return writeJSON(a.out, result)
 	}
 	fmt.Fprintf(a.out, "Fetched %s Git checkpoint into refs/remotes/%s/*.\n", checkpointLabelV2Git(checkpointModeV2Git(metadata)), remote)
 	if err := v2GitStatusReport(opts.Verbose, status, quarantined, rejectedV2GitDeliveries(runtime.state)).write(a.out); err != nil {
-		return false, err
+		return err
 	}
 	fmt.Fprintln(a.out, "Local branches and the working tree were not changed.")
 	fmt.Fprintln(a.out, "Inspect with: git log --oneline --decorate --graph --all")
@@ -2722,6 +2870,111 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 			fmt.Fprintf(a.out, "  git merge --ff-only %s/%s\n", remote, branch)
 			fmt.Fprintf(a.out, "  git rebase %s/%s  # only after inspection\n", remote, branch)
 		}
+	}
+	return nil
+}
+
+// checkV2GitDeliveryRepository decides whether a checkpoint may be applied to
+// this repository at all, from the repository identity the local tree carries
+// and the one the checkpoint names. It runs before the payload is decrypted,
+// so a checkpoint made from a different repository never reaches the disk. A
+// tree with no identity yet adopts the checkpoint's only on --associate,
+// because every later checkpoint is matched against that identity.
+func checkV2GitDeliveryRepository(repositoryID []byte, loadErr error, opts v2GitFetchOptions, metadata *v2GitMetadata) error {
+	switch {
+	case loadErr == nil && !bytes.Equal(repositoryID, metadata.RepositoryID):
+		return errors.New("Git delivery belongs to a different repository")
+	case errors.Is(loadErr, os.ErrNotExist) && !opts.Associate:
+		return errors.New("repository is not associated with this checkpoint; inspect the peer and rerun with --associate")
+	case loadErr != nil && !errors.Is(loadErr, os.ErrNotExist):
+		return loadErr
+	}
+	return nil
+}
+
+func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, repository *v2GitRepository, opts v2GitFetchOptions, delivery *v2GranularInboxDelivery, sourceSlotEpoch uint64) (bool, error) {
+	header, err := runtime.readV2GitDeliveryHeader(opts, delivery)
+	if err != nil {
+		return false, err
+	}
+	reject := func(cause error) (bool, error) {
+		return runtime.rejectV2GitDelivery(ctx, a, opts, header.envelope, delivery, sourceSlotEpoch, header.policyDigest, header.sequence, header.digest, cause)
+	}
+	metadata, err := decodeV2GitMetadata(header.envelope.Descriptor[kTypeMetadata])
+	if err != nil {
+		return reject(err)
+	}
+	if err := a.validateV2GitMetadata(repository, metadata); err != nil {
+		return reject(err)
+	}
+	repositoryID, repositoryIDErr := repository.loadRepositoryID()
+	if err := checkV2GitDeliveryRepository(repositoryID, repositoryIDErr, opts, metadata); err != nil {
+		return false, err
+	}
+	if _, exists := runtime.state.InboundTransfers[header.digest]; !exists {
+		runtime.state.InboundTransfers[header.digest] = v2InboundTransfer{
+			EntryID: hex.EncodeToString(delivery.ID), Slot: hex.EncodeToString(delivery.Slot),
+			DescriptorDigest: header.digest, Sequence: header.sequence, Phase: "descriptor-verified",
+			PolicyDigest:         hex.EncodeToString(header.policyDigest),
+			DescriptorCiphertext: v2Base64URL(delivery.EncryptedDescriptor),
+			ExpiresAt:            header.expiresAt,
+		}
+		if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+			return false, err
+		}
+	}
+	bundlePath, plainDigest, err := runtime.storeV2GitCheckpointBundle(repository, delivery, header)
+	if err != nil {
+		return false, err
+	}
+	headerVersion, headerRefs, headerPrerequisites, err := parseV2GitBundleHeader(bundlePath, repository.ObjectHexLen/2)
+	if err != nil {
+		return false, err
+	}
+	if headerVersion != metadata.BundleVersion || !equalV2GitPrerequisites(headerPrerequisites, metadata.Prerequisites) ||
+		!equalV2GitRefs(headerRefs, metadata.Refs) {
+		return reject(errors.New("Git bundle header does not match the signed encrypted metadata"))
+	}
+	transfer, err := runtime.recordV2GitPayloadVerified(delivery, header, bundlePath, plainDigest)
+	if err != nil {
+		return false, err
+	}
+	// A tree with no identity adopts the checkpoint's only once its bundle is
+	// verified, so a checkpoint that fails verification leaves the repository
+	// unassociated and open to the next one.
+	if repositoryIDErr != nil {
+		if err := repository.associateRepositoryID(metadata.RepositoryID); err != nil {
+			return false, err
+		}
+		repositoryID = append([]byte(nil), metadata.RepositoryID...)
+	}
+	state, err := repository.loadPeerState(repositoryID, runtime.peer.PeerPseudonymousID)
+	if err != nil {
+		return false, err
+	}
+	if err := a.validateV2GitIncrementalBase(repository, state, metadata, header.sequence); err != nil {
+		return reject(err)
+	}
+	inbound := state.Inbound[header.digest]
+	if inbound.Phase != "output-committed" {
+		var permanent bool
+		inbound, permanent, err = a.applyV2GitCheckpointBundle(runtime, repository, opts, state, metadata, header, inbound, bundlePath, delivery.ID)
+		if err != nil {
+			if permanent {
+				return reject(err)
+			}
+			return false, err
+		}
+	}
+	fetchedRefs, err := byteGitRefs(inbound.FetchedRefs, repository.ObjectHexLen/2)
+	if err != nil {
+		return false, err
+	}
+	if err := runtime.commitV2GitDelivery(ctx, a, repository, delivery, header, sourceSlotEpoch, transfer, metadata, fetchedRefs); err != nil {
+		return false, err
+	}
+	if err := a.reportV2GitFetch(runtime, repository, opts, state, metadata, header, repositoryID, fetchedRefs); err != nil {
+		return false, err
 	}
 	return true, nil
 }

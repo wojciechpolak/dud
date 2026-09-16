@@ -6,9 +6,10 @@
 #
 # An analyzer belongs to one of two sets. A gating analyzer reports nothing on
 # this tree and fails the run on any new finding. `npm run check` calls that
-# set through --gate. A pending analyzer still has findings left to fix, so it
+# set through --gate. A pending analyzer has findings left to fix, so it
 # reports without failing. To promote an analyzer, move its name from
-# PENDING_TOOLS to GATING_TOOLS. The two lists say which set each one is in.
+# PENDING_TOOLS to GATING_TOOLS. The two lists say which set each one is in,
+# and an empty PENDING_TOOLS means every analyzer blocks.
 #
 # Every analyzer runs even after an earlier one reports, so a single run
 # reports every problem instead of stopping at the first.
@@ -32,19 +33,18 @@ MODULES="client tests/vectors/protocol-v2 tools"
 # platform, and a run on the developer's GOOS alone would skip the rest.
 PLATFORMS="linux darwin windows"
 
-# The most complex function in the tree is validateV2PeerDeliveryState at 184
-# (client/cmd/dud/v2_peer_state.go). 30 is the limit this repository intends to
-# hold, not the limit it meets, so the report lists every function above 30.
-# Split those functions to bring the number down.
+# The cyclomatic complexity ceiling every function in this repository holds to.
+# A function that exceeds it carries several independent stages in one body;
+# split it into one function per stage rather than raising this number.
 GOCYCLO_OVER="${GOCYCLO_OVER:-30}"
 
 # Analyzers that report nothing on this tree. They block, so a change that
 # introduces a finding fails instead of adding to a backlog.
-GATING_TOOLS="analyze deadcode errcheck govulncheck staticcheck"
+GATING_TOOLS="analyze deadcode errcheck gocyclo govulncheck staticcheck"
 
 # Analyzers with findings left to fix. Once one reports nothing, move it into
 # GATING_TOOLS.
-PENDING_TOOLS="gocyclo"
+PENDING_TOOLS=""
 
 ALL_TOOLS="$GATING_TOOLS $PENDING_TOOLS"
 

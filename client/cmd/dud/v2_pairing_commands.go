@@ -41,64 +41,69 @@ func loadV2AdminCapability(paths v2Paths) ([]byte, error) {
 	return capability, nil
 }
 
-func (a *app) cmdPeerInvite(args []string) error {
+// v2PeerInviteOptions is one invocation of 'dud peer invite'.
+type v2PeerInviteOptions struct {
+	alias   string
+	expires time.Duration
+	json    bool
+}
+
+func parseV2PeerInviteOptions(args []string) (v2PeerInviteOptions, error) {
+	opts := v2PeerInviteOptions{expires: 15 * time.Minute}
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return fatalError("dud peer invite requires NAME")
+		return opts, fatalError("dud peer invite requires NAME")
 	}
-	alias := args[0]
-	args = args[1:]
-	expires := 15 * time.Minute
-	jsonOutput := false
-	for len(args) != 0 {
+	opts.alias = args[0]
+	for args = args[1:]; len(args) != 0; {
 		switch args[0] {
 		case "--expires":
 			if err := needValue(args, "--expires"); err != nil {
-				return err
+				return opts, err
 			}
 			value, err := time.ParseDuration(args[1])
 			if err != nil || value <= 0 || value > v2PairingMaximumLifetime {
-				return fatalError("--expires must be a duration from 1ns through 1h")
+				return opts, fatalError("--expires must be a duration from 1ns through 1h")
 			}
-			expires, args = value, args[2:]
+			opts.expires, args = value, args[2:]
 		case "--json":
-			if err := markJSONOption(&jsonOutput); err != nil {
-				return err
+			if err := markJSONOption(&opts.json); err != nil {
+				return opts, err
 			}
 			args = args[1:]
 		default:
-			return fatalError("Unknown peer invite option: " + args[0])
+			return opts, fatalError("Unknown peer invite option: " + args[0])
 		}
 	}
-	if err := validateV2PeerAlias(alias); err != nil {
-		return err
-	}
-	cfg, paths, err := loadV2Config()
-	if err != nil {
-		return err
-	}
+	return opts, validateV2PeerAlias(opts.alias)
+}
+
+// v2InvitingPeerProfile resolves the profile an invitation is issued under. An
+// alias with no relationship pins nothing: copying the configuration into the
+// peer layer here would make it outrank DUD_PEER_BASE_URL and DUD_ECH_MODE,
+// which are the only way to invite against a deployment other than the one this
+// configuration names.
+func v2InvitingPeerProfile(cfg *v2LocalConfig, alias string) (v2PeerProfile, error) {
 	peer, exists := cfg.Peers[alias]
 	if !exists {
-		// An alias with no relationship pins nothing: copying the configuration
-		// into the peer layer here would make it outrank DUD_PEER_BASE_URL and
-		// DUD_ECH_MODE, which are the only way to invite against a deployment
-		// other than the one this configuration names.
-		peer = v2PeerProfile{
+		return v2PeerProfile{
 			Status:    "unpaired",
 			KeyEpoch:  0,
 			GitRemote: alias,
-		}
+		}, nil
 	}
 	if peer.Status == "active" {
-		return fmt.Errorf("peer %q is already active; revoke it before replacing its identity", alias)
+		return peer, fmt.Errorf("peer %q is already active; revoke it before replacing its identity", alias)
 	}
-	origin, _, echMode, err := effectiveV2NetworkConfig(cfg, &peer)
-	if err != nil {
-		return err
-	}
-	transport, err := newV2PeerTransport(a, cfg, &peer, 30*time.Second)
-	if err != nil {
-		return err
-	}
+	return peer, nil
+}
+
+// requireV2InviteCapabilities checks that the deployment supports pairing and
+// that this device may enroll on it. Enforcement ID 3 reports whether the
+// deployment gates enrollment; reading it here turns a missing credential into
+// one sentence before any state is created, instead of a refusal after the
+// invitation was already written.
+func (a *app) requireV2InviteCapabilities(transport v2Transport, origin string) (v2ServerContract, error) {
+	var contract v2ServerContract
 	serverCapabilities, err := requireV2Features(
 		context.Background(),
 		transport,
@@ -110,49 +115,85 @@ func (a *app) cmdPeerInvite(args []string) error {
 		11,
 	)
 	if err != nil {
-		return err
+		return contract, err
 	}
-	serverContract, err := newV2ServerContract(serverCapabilities)
+	contract, err = newV2ServerContract(serverCapabilities)
 	if err != nil {
-		return err
+		return contract, err
 	}
-	// Enforcement ID 3 reports whether this deployment gates enrollment. Reading
-	// it here turns a missing credential into one sentence before any state is
-	// created, instead of a refusal after the invitation was already written.
 	if serverCapabilities.Enforcement[3] == 1 && a.cfg.V2Secret == "" {
-		return fatalError(v2EnrollmentRequiredMessage)
+		return contract, fatalError(v2EnrollmentRequiredMessage)
 	}
-	if pending, pendingErr := loadV2PendingPairing(paths, alias); pendingErr == nil && pending.Role == 0 && pending.ExpiresAt > uint64(time.Now().Unix()) {
-		if err := a.createV2Rendezvous(pending, transport); err != nil {
-			return err
-		}
-		if err := ensureV2InviterPendingProfile(alias, pending, echMode); err != nil {
-			return err
-		}
-		return a.displayAndWaitV2Invitation(cfg, paths, pending, transport, jsonOutput)
-	}
-	pending, code, _, err := a.newV2Invitation(cfg, paths, alias, origin, expires)
+	return contract, nil
+}
+
+// issueV2Invitation creates a new invitation for an alias and records it before
+// the rendezvous is opened. The pending record holds the only copy of the keys
+// this device derived for the relationship, so a rendezvous an invitee can
+// reach always has a local counterpart that can complete the pairing.
+func (a *app) issueV2Invitation(cfg *v2LocalConfig, paths v2Paths, opts v2PeerInviteOptions, origin string, contract v2ServerContract, transport v2Transport) (*v2PendingPairing, error) {
+	pending, code, _, err := a.newV2Invitation(cfg, paths, opts.alias, origin, opts.expires)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	pending.ServerContract = serverContract
+	pending.ServerContract = contract
 	unlock, err := acquireV2ConfigLock(paths)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := writeV2PendingPairing(paths, pending); err != nil {
 		unlock()
-		return err
+		return nil, err
 	}
 	unlock()
 	if err := a.createV2Rendezvous(pending, transport); err != nil {
-		return err
-	}
-	if err := ensureV2InviterPendingProfile(alias, pending, echMode); err != nil {
-		return err
+		return nil, err
 	}
 	pending.PairingCode = code
-	return a.displayAndWaitV2Invitation(cfg, paths, pending, transport, jsonOutput)
+	return pending, nil
+}
+
+func (a *app) cmdPeerInvite(args []string) error {
+	opts, err := parseV2PeerInviteOptions(args)
+	if err != nil {
+		return err
+	}
+	cfg, paths, err := loadV2Config()
+	if err != nil {
+		return err
+	}
+	peer, err := v2InvitingPeerProfile(cfg, opts.alias)
+	if err != nil {
+		return err
+	}
+	origin, _, echMode, err := effectiveV2NetworkConfig(cfg, &peer)
+	if err != nil {
+		return err
+	}
+	transport, err := newV2PeerTransport(a, cfg, &peer, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	serverContract, err := a.requireV2InviteCapabilities(transport, origin)
+	if err != nil {
+		return err
+	}
+	// An invitation that has not expired is shown again rather than replaced,
+	// so a second run of this command does not invalidate a code the operator
+	// has already passed to the other device.
+	pending, pendingErr := loadV2PendingPairing(paths, opts.alias)
+	reusable := pendingErr == nil && pending.Role == 0 && pending.ExpiresAt > uint64(time.Now().Unix())
+	if reusable {
+		if err := a.createV2Rendezvous(pending, transport); err != nil {
+			return err
+		}
+	} else if pending, err = a.issueV2Invitation(cfg, paths, opts, origin, serverContract, transport); err != nil {
+		return err
+	}
+	if err := ensureV2InviterPendingProfile(opts.alias, pending, echMode); err != nil {
+		return err
+	}
+	return a.displayAndWaitV2Invitation(cfg, paths, pending, transport, opts.json)
 }
 
 // ensureV2InviterPendingProfile records the profile of a peer whose pairing is
@@ -395,6 +436,210 @@ func (a *app) createV2Rendezvous(pending *v2PendingPairing, transport v2Transpor
 	return nil
 }
 
+// fetchV2PairingInvitation retrieves the inviter's invitation from the
+// rendezvous the pairing code names and opens it. Only a holder of the code can
+// decrypt what the rendezvous stores, so the server learns neither device's
+// keys. Every failure here reports the same thing: a code that does not open an
+// invitation is indistinguishable from one that was never valid, and saying
+// which would tell a guesser that a locator exists.
+func fetchV2PairingInvitation(transport v2Transport, origin string, code, locator []byte) (map[int]any, []byte, error) {
+	retrievalPath := "/v2/pairing/rendezvous/" + hex.EncodeToString(locator)
+	retrieval, err := doV2CBORRequest(context.Background(), transport, "GET", origin, retrievalPath, nil, nil, v2MaxDescriptorBytes)
+	if err != nil {
+		return nil, nil, errors.New(v2PairingInvalidCodeMessage)
+	}
+	var envelope map[int]any
+	if err := v2DecMode.Unmarshal(retrieval.Body, &envelope); err != nil {
+		return nil, nil, errors.New(v2PairingInvalidCodeMessage)
+	}
+	nonce, nonceOK := envelope[2].([]byte)
+	ciphertext, ciphertextOK := envelope[3].([]byte)
+	expiresAt, expiresOK := asV2Uint(envelope[4])
+	if !v2UintEquals(envelope[1], 2) || !nonceOK || !ciphertextOK || !expiresOK || expiresAt <= uint64(time.Now().Unix()) {
+		return nil, nil, errors.New(v2PairingInvalidCodeMessage)
+	}
+	invitationCBOR, err := decryptV2PairingInvitation(code, locator, nonce, ciphertext, origin, expiresAt)
+	if err != nil {
+		return nil, nil, err
+	}
+	invitation, err := decodeV2Invitation(invitationCBOR)
+	if err != nil || invitation[9] != origin || invitation[12] != expiresAt {
+		return nil, nil, errors.New(v2PairingInvalidCodeMessage)
+	}
+	return invitation, invitationCBOR, nil
+}
+
+// v2InviteeIdentity holds what this device brings to a new relationship. The
+// keys are derived from the master seed and the relationship ID rather than
+// stored, so the same relationship always yields the same identity and no
+// per-peer private key is written to disk. The status capability is the bearer
+// token that lets this device read the pairing's progress.
+type v2InviteeIdentity struct {
+	hpke             hpke.PrivateKey
+	signing          ed25519.PrivateKey
+	pairingID        []byte
+	nonce            []byte
+	statusCapability []byte
+}
+
+func deriveV2InviteeIdentity(seed, relationshipID []byte) (v2InviteeIdentity, error) {
+	var identity v2InviteeIdentity
+	localHPKE, err := v2HPKEPrivateKey(seed, relationshipID)
+	if err != nil {
+		return identity, err
+	}
+	localSigning, err := deriveV2SigningKey(seed, relationshipID, 0)
+	if err != nil {
+		return identity, err
+	}
+	localPairingID, err := deriveV2DeviceID(seed, relationshipID, 0)
+	if err != nil {
+		return identity, err
+	}
+	localNonce, err := randomV2Bytes(32)
+	if err != nil {
+		return identity, err
+	}
+	statusCapability, err := randomV2Bytes(32)
+	if err != nil {
+		return identity, err
+	}
+	return v2InviteeIdentity{
+		hpke:             localHPKE,
+		signing:          localSigning,
+		pairingID:        localPairingID,
+		nonce:            localNonce,
+		statusCapability: statusCapability,
+	}, nil
+}
+
+// v2PairingAcceptance is this device's half of the pairing: the acceptance map
+// the inviter reads, its signature, and the HPKE encapsulation and exported
+// secret that half of the relationship secret is derived from.
+type v2PairingAcceptance struct {
+	acceptance map[int]any
+	signature  []byte
+	encoded    []byte
+	encB       []byte
+	secretB    []byte
+}
+
+// buildV2PairingAcceptance assembles and signs the acceptance. The binder
+// proves the acceptance was written by a holder of the pairing code, which is
+// what keeps a party that only relays the rendezvous traffic from substituting
+// its own keys. The HPKE info covers every acceptance field except enc_B, which
+// cannot be known before the encapsulation it names: a fixed-width placeholder
+// stands in its place so both devices derive the same info from the same
+// transcript.
+func buildV2PairingAcceptance(code, locator []byte, invitation map[int]any, invitationCBOR []byte, identity v2InviteeIdentity) (v2PairingAcceptance, error) {
+	var result v2PairingAcceptance
+	statusHash := sha256.Sum256(identity.statusCapability)
+	invitationDigest := sha256.Sum256(invitationCBOR)
+	acceptanceForBinder := map[int]any{
+		1:             uint64(2),
+		2:             uint64(1),
+		3:             uint64(1),
+		4:             cloneV2Bytes(invitation[4]),
+		5:             cloneV2Bytes(invitation[5]),
+		6:             identity.pairingID,
+		7:             identity.hpke.PublicKey().Bytes(),
+		8:             append([]byte(nil), identity.signing.Public().(ed25519.PublicKey)...),
+		9:             identity.nonce,
+		10:            invitationDigest[:],
+		12:            statusHash[:],
+		14:            locator,
+		kPeerFeatures: v2LocalPeerFeatureList(),
+	}
+	binderBytes, err := v2EncMode.Marshal(acceptanceForBinder)
+	if err != nil {
+		return result, err
+	}
+	binderDigest := sha256.Sum256(binderBytes)
+	binder, err := v2PairingBinder(code, locator, "invitee", binderDigest[:])
+	if err != nil {
+		return result, err
+	}
+	acceptance := make(map[int]any, len(acceptanceForBinder)+2)
+	for key, value := range acceptanceForBinder {
+		acceptance[key] = value
+	}
+	acceptance[13] = binder
+	placeholder := make(map[int]any, len(acceptance)+1)
+	for key, value := range acceptance {
+		placeholder[key] = value
+	}
+	placeholder[11] = make([]byte, 1120)
+	pre, err := v2PreTranscript(invitation, placeholder)
+	if err != nil {
+		return result, err
+	}
+	preCBOR, err := v2EncMode.Marshal(pre)
+	if err != nil {
+		return result, err
+	}
+	info := sha256.Sum256(preCBOR)
+	peerPublic, err := hpke.MLKEM768X25519().NewPublicKey(invitation[7].([]byte))
+	if err != nil {
+		return result, err
+	}
+	encB, senderB, err := hpke.NewSender(peerPublic, hpke.HKDFSHA256(), hpke.ExportOnly(), info[:])
+	if err != nil {
+		return result, err
+	}
+	secretB, err := senderB.Export(v2PairingExporterContext, 32)
+	if err != nil {
+		return result, err
+	}
+	acceptance[11] = encB
+	signature, err := v2PairingSign("acceptance", acceptance, identity.signing)
+	if err != nil {
+		return result, err
+	}
+	encoded, err := v2EncMode.Marshal(acceptance)
+	if err != nil {
+		return result, err
+	}
+	return v2PairingAcceptance{
+		acceptance: acceptance,
+		signature:  signature,
+		encoded:    encoded,
+		encB:       encB,
+		secretB:    secretB,
+	}, nil
+}
+
+// submitV2PairingAcceptance records the pending pairing and posts the
+// acceptance to the rendezvous. The record is written first: it holds the only
+// copy of the exported secret this device's half of the relationship is derived
+// from, so an acceptance the inviter receives always has a local counterpart to
+// finish the pairing against.
+func submitV2PairingAcceptance(transport v2Transport, paths v2Paths, origin string, pending *v2PendingPairing, invitation map[int]any, accepted v2PairingAcceptance, statusCapability []byte) error {
+	unlock, err := acquireV2ConfigLock(paths)
+	if err != nil {
+		return err
+	}
+	if err := writeV2PendingPairing(paths, pending); err != nil {
+		unlock()
+		return err
+	}
+	unlock()
+	bootstrap := invitation[10].([]byte)
+	body, err := v2EncMode.Marshal(map[int]any{
+		1: invitation,
+		2: accepted.acceptance,
+		3: accepted.signature,
+		4: statusCapability,
+	})
+	if err != nil {
+		return err
+	}
+	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/accept"
+	if _, err := doV2CBORRequest(context.Background(), transport, "POST", origin, path, bootstrap, body, v2MaxDescriptorBytes); err != nil {
+		return fmt.Errorf("accept pairing invitation: %w", err)
+	}
+	return nil
+}
+
 func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) error {
 	cfg, paths, err := loadV2Config()
 	if err != nil {
@@ -441,119 +686,20 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 	if err != nil {
 		return err
 	}
-	retrievalPath := "/v2/pairing/rendezvous/" + hex.EncodeToString(locator)
-	retrieval, err := doV2CBORRequest(context.Background(), transport, "GET", origin, retrievalPath, nil, nil, v2MaxDescriptorBytes)
-	if err != nil {
-		return errors.New(v2PairingInvalidCodeMessage)
-	}
-	var envelope map[int]any
-	if err := v2DecMode.Unmarshal(retrieval.Body, &envelope); err != nil {
-		return errors.New(v2PairingInvalidCodeMessage)
-	}
-	nonce, nonceOK := envelope[2].([]byte)
-	ciphertext, ciphertextOK := envelope[3].([]byte)
-	expiresAt, expiresOK := asV2Uint(envelope[4])
-	if !v2UintEquals(envelope[1], 2) || !nonceOK || !ciphertextOK || !expiresOK || expiresAt <= uint64(time.Now().Unix()) {
-		return errors.New(v2PairingInvalidCodeMessage)
-	}
-	invitationCBOR, err := decryptV2PairingInvitation(code, locator, nonce, ciphertext, origin, expiresAt)
+	invitation, invitationCBOR, err := fetchV2PairingInvitation(transport, origin, code, locator)
 	if err != nil {
 		return err
-	}
-	invitation, err := decodeV2Invitation(invitationCBOR)
-	if err != nil || invitation[9] != origin || invitation[12] != expiresAt {
-		return errors.New(v2PairingInvalidCodeMessage)
 	}
 	seed, err := loadV2MasterSeed(paths)
 	if err != nil {
 		return err
 	}
 	relationshipID := invitation[5].([]byte)
-	localHPKE, err := v2HPKEPrivateKey(seed, relationshipID)
+	identity, err := deriveV2InviteeIdentity(seed, relationshipID)
 	if err != nil {
 		return err
 	}
-	localSigning, err := deriveV2SigningKey(seed, relationshipID, 0)
-	if err != nil {
-		return err
-	}
-	localPairingID, err := deriveV2DeviceID(seed, relationshipID, 0)
-	if err != nil {
-		return err
-	}
-	localNonce, err := randomV2Bytes(32)
-	if err != nil {
-		return err
-	}
-	statusCapability, err := randomV2Bytes(32)
-	if err != nil {
-		return err
-	}
-	statusHash := sha256.Sum256(statusCapability)
-	invitationDigest := sha256.Sum256(invitationCBOR)
-	acceptanceForBinder := map[int]any{
-		1:             uint64(2),
-		2:             uint64(1),
-		3:             uint64(1),
-		4:             cloneV2Bytes(invitation[4]),
-		5:             cloneV2Bytes(invitation[5]),
-		6:             localPairingID,
-		7:             localHPKE.PublicKey().Bytes(),
-		8:             append([]byte(nil), localSigning.Public().(ed25519.PublicKey)...),
-		9:             localNonce,
-		10:            invitationDigest[:],
-		12:            statusHash[:],
-		14:            locator,
-		kPeerFeatures: v2LocalPeerFeatureList(),
-	}
-	binderBytes, err := v2EncMode.Marshal(acceptanceForBinder)
-	if err != nil {
-		return err
-	}
-	binderDigest := sha256.Sum256(binderBytes)
-	binder, err := v2PairingBinder(code, locator, "invitee", binderDigest[:])
-	if err != nil {
-		return err
-	}
-	acceptanceWithoutEnc := make(map[int]any, len(acceptanceForBinder)+1)
-	for key, value := range acceptanceForBinder {
-		acceptanceWithoutEnc[key] = value
-	}
-	acceptanceWithoutEnc[13] = binder
-	// The HPKE info excludes enc_B but includes every other acceptance field.
-	placeholder := make(map[int]any, len(acceptanceWithoutEnc)+1)
-	for key, value := range acceptanceWithoutEnc {
-		placeholder[key] = value
-	}
-	placeholder[11] = make([]byte, 1120)
-	pre, err := v2PreTranscript(invitation, placeholder)
-	if err != nil {
-		return err
-	}
-	preCBOR, err := v2EncMode.Marshal(pre)
-	if err != nil {
-		return err
-	}
-	info := sha256.Sum256(preCBOR)
-	peerPublic, err := hpke.MLKEM768X25519().NewPublicKey(invitation[7].([]byte))
-	if err != nil {
-		return err
-	}
-	encB, senderB, err := hpke.NewSender(peerPublic, hpke.HKDFSHA256(), hpke.ExportOnly(), info[:])
-	if err != nil {
-		return err
-	}
-	secretB, err := senderB.Export(v2PairingExporterContext, 32)
-	if err != nil {
-		return err
-	}
-	acceptance := acceptanceWithoutEnc
-	acceptance[11] = encB
-	signature, err := v2PairingSign("acceptance", acceptance, localSigning)
-	if err != nil {
-		return err
-	}
-	acceptanceCBOR, err := v2EncMode.Marshal(acceptance)
+	accepted, err := buildV2PairingAcceptance(code, locator, invitation, invitationCBOR, identity)
 	if err != nil {
 		return err
 	}
@@ -568,41 +714,21 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 		CanonicalOrigin:      origin,
 		ExpiresAt:            invitation[12].(uint64),
 		InvitationMap:        v2Base64URL(invitationCBOR),
-		AcceptanceMap:        v2Base64URL(acceptanceCBOR),
-		StatusCapability:     v2Base64URL(statusCapability),
-		LocalPairingID:       v2Base64URL(localPairingID),
+		AcceptanceMap:        v2Base64URL(accepted.encoded),
+		StatusCapability:     v2Base64URL(identity.statusCapability),
+		LocalPairingID:       v2Base64URL(identity.pairingID),
 		PeerPairingID:        v2Base64URL(invitation[6].([]byte)),
-		LocalNonce:           v2Base64URL(localNonce),
+		LocalNonce:           v2Base64URL(identity.nonce),
 		PeerNonce:            v2Base64URL(invitation[11].([]byte)),
 		PeerAgeRecipient:     v2Base64URL(invitation[7].([]byte)),
 		PeerSigningPublicKey: v2Base64URL(invitation[8].([]byte)),
 		PeerFeatures:         v2MetadataFeatures(invitation),
-		EncB:                 v2Base64URL(encB),
-		SecretB:              v2Base64URL(secretB),
+		EncB:                 v2Base64URL(accepted.encB),
+		SecretB:              v2Base64URL(accepted.secretB),
 		ServerContract:       serverContract,
 	}
-	unlock, err := acquireV2ConfigLock(paths)
-	if err != nil {
+	if err := submitV2PairingAcceptance(transport, paths, origin, pending, invitation, accepted, identity.statusCapability); err != nil {
 		return err
-	}
-	if err := writeV2PendingPairing(paths, pending); err != nil {
-		unlock()
-		return err
-	}
-	unlock()
-	bootstrap := invitation[10].([]byte)
-	body, err := v2EncMode.Marshal(map[int]any{
-		1: invitation,
-		2: acceptance,
-		3: signature,
-		4: statusCapability,
-	})
-	if err != nil {
-		return err
-	}
-	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/accept"
-	if _, err := doV2CBORRequest(context.Background(), transport, "POST", origin, path, bootstrap, body, v2MaxDescriptorBytes); err != nil {
-		return fmt.Errorf("accept pairing invitation: %w", err)
 	}
 	if err := ensureV2InviteePendingProfile(alias, pending, echMode); err != nil {
 		return err
@@ -753,35 +879,55 @@ func (a *app) progressV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2Pe
 	return phase, nil
 }
 
-func (a *app) completeInviterKeyConfirmation(paths v2Paths, pending *v2PendingPairing, rawEnvelope any, transport v2Transport) error {
+// v2VerifiedAcceptance is an invitee's acceptance once it has been
+// authenticated: the invitation it answers, the acceptance itself, the signing
+// key it claims, and the pairing code and locator both halves are bound to.
+type v2VerifiedAcceptance struct {
+	invitation  map[int]any
+	acceptance  map[int]any
+	peerSigning []byte
+	code        []byte
+	locator     []byte
+}
+
+// verifyV2PairingAcceptance authenticates the acceptance the rendezvous
+// returned. The binder proves it was written by a holder of the pairing code,
+// and the signature proves it was written by the holder of the signing key it
+// carries. Both are required: the binder alone would let the peer swap in
+// another device's key, and the signature alone would accept a device that
+// never saw the code.
+func verifyV2PairingAcceptance(pending *v2PendingPairing, rawEnvelope any) (v2VerifiedAcceptance, error) {
+	var verified v2VerifiedAcceptance
 	envelope, err := normalizeV2Map(rawEnvelope)
 	if err != nil {
-		return err
+		return verified, err
 	}
 	acceptance, err := normalizeV2Map(envelope[1])
 	if err != nil {
-		return err
+		return verified, err
 	}
 	signature, ok := envelope[2].([]byte)
 	if !ok {
-		return errors.New("acceptance signature is invalid")
+		return verified, errors.New("acceptance signature is invalid")
 	}
 	invitation, err := decodeV2StoredMap(pending.InvitationMap)
 	if err != nil {
-		return err
+		return verified, err
 	}
 	if err := validateV2AcceptanceMap(invitation, acceptance); err != nil {
-		return err
+		return verified, err
 	}
 	code, err := parseV2PairingCode(pending.PairingCode)
 	if err != nil {
-		return err
+		return verified, err
 	}
 	locator, err := hex.DecodeString(pending.RendezvousLocator)
 	if err != nil || len(locator) != 32 {
-		return errors.New("pending pairing locator is invalid")
+		return verified, errors.New("pending pairing locator is invalid")
 	}
-	binderInput := make(map[int]any, 12)
+	// The binder covers every acceptance field except the encapsulation and the
+	// binder itself, matching what the invitee computed before it had either.
+	binderInput := make(map[int]any, len(acceptance))
 	for key, value := range acceptance {
 		if key != 11 && key != 13 {
 			binderInput[key] = value
@@ -789,110 +935,138 @@ func (a *app) completeInviterKeyConfirmation(paths v2Paths, pending *v2PendingPa
 	}
 	binderBytes, err := v2EncMode.Marshal(binderInput)
 	if err != nil {
-		return err
+		return verified, err
 	}
 	binderDigest := sha256.Sum256(binderBytes)
 	expectedBinder, err := v2PairingBinder(code, locator, "invitee", binderDigest[:])
 	if err != nil || !bytes.Equal(expectedBinder, acceptance[13].([]byte)) {
-		return errors.New("pairing acceptance authentication failed")
+		return verified, errors.New("pairing acceptance authentication failed")
 	}
 	peerSigning, ok := acceptance[8].([]byte)
 	if !ok || !v2PairingVerify("acceptance", acceptance, signature, ed25519.PublicKey(peerSigning)) {
-		return errors.New("acceptance signature verification failed")
+		return verified, errors.New("acceptance signature verification failed")
 	}
-	pre, err := v2PreTranscript(invitation, acceptance)
+	return v2VerifiedAcceptance{
+		invitation:  invitation,
+		acceptance:  acceptance,
+		peerSigning: peerSigning,
+		code:        code,
+		locator:     locator,
+	}, nil
+}
+
+// v2InviterPairingSecrets is the key material the inviter derives once it holds
+// the invitee's acceptance: both HPKE encapsulations, both exported secrets,
+// the hash over the full transcript, and the two directional relationship
+// secrets every later delivery is keyed from.
+type v2InviterPairingSecrets struct {
+	encA           []byte
+	encB           []byte
+	secretA        []byte
+	secretB        []byte
+	transcriptHash []byte
+	outbound       []byte
+	inbound        []byte
+}
+
+// deriveV2InviterPairingSecrets completes the key agreement from the inviter's
+// side. Each direction has its own encapsulation, so neither device's secret
+// alone determines the relationship, and both are combined with a key derived
+// from the pairing code: a party that relayed the rendezvous traffic without
+// holding the code cannot produce the same outputs. The transcript hash binds
+// the result to the exact invitation and acceptance that were exchanged, so a
+// substituted field yields different secrets rather than a working pairing.
+func deriveV2InviterPairingSecrets(seed, relationshipID []byte, verified v2VerifiedAcceptance) (v2InviterPairingSecrets, error) {
+	var secrets v2InviterPairingSecrets
+	pre, err := v2PreTranscript(verified.invitation, verified.acceptance)
 	if err != nil {
-		return err
+		return secrets, err
 	}
 	preBytes, err := v2EncMode.Marshal(pre)
 	if err != nil {
-		return err
+		return secrets, err
 	}
 	info := sha256.Sum256(preBytes)
-	relationshipID, _ := hex.DecodeString(pending.RelationshipID)
-	cfg, _, err := loadV2Config()
-	if err != nil {
-		return err
-	}
-	seed, err := loadV2MasterSeed(paths)
-	if err != nil {
-		return err
-	}
 	localPrivate, err := v2HPKEPrivateKey(seed, relationshipID)
 	if err != nil {
-		return err
+		return secrets, err
 	}
-	encB := acceptance[11].([]byte)
+	encB := verified.acceptance[11].([]byte)
 	recipientB, err := hpke.NewRecipient(encB, localPrivate, hpke.HKDFSHA256(), hpke.ExportOnly(), info[:])
 	if err != nil {
-		return err
+		return secrets, err
 	}
 	secretB, err := recipientB.Export(v2PairingExporterContext, 32)
 	if err != nil {
-		return err
+		return secrets, err
 	}
-	peerPublic, err := hpke.MLKEM768X25519().NewPublicKey(acceptance[7].([]byte))
+	peerPublic, err := hpke.MLKEM768X25519().NewPublicKey(verified.acceptance[7].([]byte))
 	if err != nil {
-		return err
+		return secrets, err
 	}
 	encA, senderA, err := hpke.NewSender(peerPublic, hpke.HKDFSHA256(), hpke.ExportOnly(), info[:])
 	if err != nil {
-		return err
+		return secrets, err
 	}
 	secretA, err := senderA.Export(v2PairingExporterContext, 32)
 	if err != nil {
-		return err
+		return secrets, err
 	}
 	_, transcriptHash, err := v2FullTranscript(pre, encA, encB)
 	if err != nil {
-		return err
+		return secrets, err
 	}
-	pairingPSK, err := deriveV2PairingKey(code, locator, "relationship-psk")
+	pairingPSK, err := deriveV2PairingKey(verified.code, verified.locator, "relationship-psk")
 	if err != nil {
-		return err
+		return secrets, err
 	}
 	outbound, inbound, err := deriveV2PairingOutputs(secretA, secretB, pairingPSK, transcriptHash)
 	if err != nil {
-		return err
+		return secrets, err
 	}
-	acceptanceBytes, _ := v2EncMode.Marshal(acceptance)
-	acceptanceDigest := sha256.Sum256(acceptanceBytes)
+	return v2InviterPairingSecrets{
+		encA: encA, encB: encB,
+		secretA: secretA, secretB: secretB,
+		transcriptHash: transcriptHash,
+		outbound:       outbound, inbound: inbound,
+	}, nil
+}
+
+// buildV2KeyConfirmation assembles and signs the inviter's key confirmation.
+// It names the acceptance it answers by digest and carries the transcript hash,
+// so the invitee can check that both devices derived their secrets from the
+// same exchange before it treats the relationship as established.
+func buildV2KeyConfirmation(seed, relationshipID []byte, verified v2VerifiedAcceptance, secrets v2InviterPairingSecrets, acceptanceDigest [32]byte) (map[int]any, []byte, error) {
 	confirmation := map[int]any{
 		1: uint64(2),
-		2: cloneV2Bytes(invitation[4]),
-		3: cloneV2Bytes(invitation[5]),
+		2: cloneV2Bytes(verified.invitation[4]),
+		3: cloneV2Bytes(verified.invitation[5]),
 		4: acceptanceDigest[:],
-		5: encA,
-		6: transcriptHash,
+		5: secrets.encA,
+		6: secrets.transcriptHash,
 	}
-	confirmationBinder, err := v2PairingBinder(code, locator, "inviter", transcriptHash)
+	confirmationBinder, err := v2PairingBinder(verified.code, verified.locator, "inviter", secrets.transcriptHash)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	confirmation[7] = confirmationBinder
 	signingKey, err := deriveV2SigningKey(seed, relationshipID, 0)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	confirmationSignature, err := v2PairingSign("key-confirmation", confirmation, signingKey)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	confirmationEncoded, _ := v2EncMode.Marshal(confirmation)
-	pending.AcceptanceMap = v2Base64URL(acceptanceBytes)
-	pending.KeyConfirmationMap = v2Base64URL(confirmationEncoded)
-	pending.PeerPairingID = v2Base64URL(acceptance[6].([]byte))
-	pending.PeerNonce = v2Base64URL(acceptance[9].([]byte))
-	pending.PeerAgeRecipient = v2Base64URL(acceptance[7].([]byte))
-	pending.PeerSigningPublicKey = v2Base64URL(peerSigning)
-	pending.PeerFeatures = v2MetadataFeatures(acceptance)
-	pending.EncA = v2Base64URL(encA)
-	pending.EncB = v2Base64URL(encB)
-	pending.SecretA = v2Base64URL(secretA)
-	pending.SecretB = v2Base64URL(secretB)
-	pending.OutboundRelationshipSecret = v2Base64URL(outbound)
-	pending.InboundRelationshipSecret = v2Base64URL(inbound)
-	pending.FullTranscriptHash = hex.EncodeToString(transcriptHash)
+	return confirmation, confirmationSignature, nil
+}
+
+// sendV2KeyConfirmation records the completed pairing and posts the
+// confirmation to the rendezvous. The record is written first, because it holds
+// the only copy of the relationship secrets: a confirmation the invitee acts on
+// must always have a local counterpart that can decrypt what the invitee sends
+// next.
+func sendV2KeyConfirmation(paths v2Paths, pending *v2PendingPairing, transport v2Transport, confirmation map[int]any, confirmationSignature []byte) error {
 	unlock, err := acquireV2ConfigLock(paths)
 	if err != nil {
 		return err
@@ -908,11 +1082,52 @@ func (a *app) completeInviterKeyConfirmation(paths v2Paths, pending *v2PendingPa
 	}
 	bearer, _ := decodeV2Base64URL(pending.StatusCapability, 32)
 	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/key-confirm"
-	if _, err := doV2CBORRequest(context.Background(), transport, "POST", pending.CanonicalOrigin, path, bearer, body, v2MaxDescriptorBytes); err != nil {
+	_, err = doV2CBORRequest(context.Background(), transport, "POST", pending.CanonicalOrigin, path, bearer, body, v2MaxDescriptorBytes)
+	return err
+}
+
+// completeInviterKeyConfirmation finishes the pairing from the inviter's side:
+// it authenticates the invitee's acceptance, derives the relationship secrets
+// from it, and confirms the result back to the invitee.
+func (a *app) completeInviterKeyConfirmation(paths v2Paths, pending *v2PendingPairing, rawEnvelope any, transport v2Transport) error {
+	verified, err := verifyV2PairingAcceptance(pending, rawEnvelope)
+	if err != nil {
 		return err
 	}
-	_ = cfg
-	return nil
+	if _, _, err := loadV2Config(); err != nil {
+		return err
+	}
+	seed, err := loadV2MasterSeed(paths)
+	if err != nil {
+		return err
+	}
+	relationshipID, _ := hex.DecodeString(pending.RelationshipID)
+	secrets, err := deriveV2InviterPairingSecrets(seed, relationshipID, verified)
+	if err != nil {
+		return err
+	}
+	acceptanceBytes, _ := v2EncMode.Marshal(verified.acceptance)
+	acceptanceDigest := sha256.Sum256(acceptanceBytes)
+	confirmation, confirmationSignature, err := buildV2KeyConfirmation(seed, relationshipID, verified, secrets, acceptanceDigest)
+	if err != nil {
+		return err
+	}
+	confirmationEncoded, _ := v2EncMode.Marshal(confirmation)
+	pending.AcceptanceMap = v2Base64URL(acceptanceBytes)
+	pending.KeyConfirmationMap = v2Base64URL(confirmationEncoded)
+	pending.PeerPairingID = v2Base64URL(verified.acceptance[6].([]byte))
+	pending.PeerNonce = v2Base64URL(verified.acceptance[9].([]byte))
+	pending.PeerAgeRecipient = v2Base64URL(verified.acceptance[7].([]byte))
+	pending.PeerSigningPublicKey = v2Base64URL(verified.peerSigning)
+	pending.PeerFeatures = v2MetadataFeatures(verified.acceptance)
+	pending.EncA = v2Base64URL(secrets.encA)
+	pending.EncB = v2Base64URL(secrets.encB)
+	pending.SecretA = v2Base64URL(secrets.secretA)
+	pending.SecretB = v2Base64URL(secrets.secretB)
+	pending.OutboundRelationshipSecret = v2Base64URL(secrets.outbound)
+	pending.InboundRelationshipSecret = v2Base64URL(secrets.inbound)
+	pending.FullTranscriptHash = hex.EncodeToString(secrets.transcriptHash)
+	return sendV2KeyConfirmation(paths, pending, transport, confirmation, confirmationSignature)
 }
 
 func completeInviteeKeyConfirmation(paths v2Paths, pending *v2PendingPairing, rawEnvelope any) error {
@@ -1364,112 +1579,161 @@ func (a *app) cmdPeerResume(args []string) error {
 	})
 }
 
-func (a *app) cmdPeerAbandon(args []string) error {
+// v2PeerAbandonOptions is one invocation of 'dud peer abandon'.
+type v2PeerAbandonOptions struct {
+	alias  string
+	digest string
+	json   bool
+}
+
+func parseV2PeerAbandonOptions(args []string) (v2PeerAbandonOptions, error) {
+	var opts v2PeerAbandonOptions
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return fatalError("dud peer abandon requires NAME --id DIGEST --yes")
+		return opts, fatalError("dud peer abandon requires NAME --id DIGEST --yes")
 	}
-	alias := args[0]
-	digest := ""
+	opts.alias = args[0]
 	confirmed := false
-	jsonOutput := false
 	for args = args[1:]; len(args) != 0; {
 		switch args[0] {
 		case "--id":
 			if len(args) < 2 {
-				return fatalError("--id requires a descriptor digest")
+				return opts, fatalError("--id requires a descriptor digest")
 			}
-			digest, args = strings.ToLower(args[1]), args[2:]
+			opts.digest, args = strings.ToLower(args[1]), args[2:]
 		case "--yes":
 			confirmed, args = true, args[1:]
 		case "--json":
-			if err := markJSONOption(&jsonOutput); err != nil {
-				return err
+			if err := markJSONOption(&opts.json); err != nil {
+				return opts, err
 			}
 			args = args[1:]
 		default:
-			return fatalError("Unknown peer abandon option: " + args[0])
+			return opts, fatalError("Unknown peer abandon option: " + args[0])
 		}
 	}
-	decodedDigest, err := hex.DecodeString(digest)
+	decodedDigest, err := hex.DecodeString(opts.digest)
 	if err != nil || len(decodedDigest) != 32 {
-		return errors.New("--id must be a 64-character descriptor digest")
+		return opts, errors.New("--id must be a 64-character descriptor digest")
 	}
 	if !confirmed {
-		return fatalError("dud peer abandon is destructive; rerun with --yes")
+		return opts, fatalError("dud peer abandon is destructive; rerun with --yes")
 	}
-	return a.withV2Peer(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
+	return opts, nil
+}
+
+// releaseV2AbandonedUpload tells the server to drop the upload a resumable send
+// holds, so its parts stop occupying the peer's quota. An upload the server no
+// longer knows about, or one it has already committed, is not an error here:
+// this device is giving the upload up either way.
+func (runtime *v2PeerRuntime) releaseV2AbandonedUpload(queued v2PendingChunkDelivery) error {
+	uploadID, uploadErr := hex.DecodeString(queued.UploadID)
+	slot, slotErr := hex.DecodeString(queued.DataSlot)
+	if uploadErr != nil || slotErr != nil {
+		return errors.New("resumable upload state is invalid")
+	}
+	proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
+	if proofErr != nil {
+		return proofErr
+	}
+	if abandonErr := abandonV2ChunkUpload(context.Background(), runtime.transport, runtime.origin, uploadID, proof); abandonErr != nil {
+		var protocolErr *v2ProtocolError
+		if !errors.As(abandonErr, &protocolErr) || (protocolErr.Code != 2 && protocolErr.Code != 4) {
+			return abandonErr
+		}
+	}
+	return nil
+}
+
+// abandonV2ResumableUpload drops a queued chunked send and reports whether its
+// sequence on the outbound data chain was kept.
+//
+// Only the newest queued delivery can be abandoned: the chain is a hash chain,
+// so releasing a sequence that a later delivery already builds on would leave
+// the peer unable to validate anything after it. A delivery whose commit
+// outcome is unknown keeps its sequence for the same reason in the other
+// direction: the server may have published it, and the peer would then hold a
+// delivery at a sequence this device had handed to something else.
+func (runtime *v2PeerRuntime) abandonV2ResumableUpload(index int) (bool, error) {
+	queued := runtime.state.PendingChunkDeliveries[index]
+	chain := runtime.state.Chains["out:data"]
+	if index != len(runtime.state.PendingChunkDeliveries)-1 || chain.SendSequence != queued.Sequence || chain.SendDigest != queued.DescriptorDigest {
+		return false, errors.New("resumable upload cannot be abandoned after a later data sequence")
+	}
+	sequenceRetained := queued.CommitState == v2ChunkCommitAmbiguous
+	if !sequenceRetained && queued.UploadID != "" && queued.LeaseExpiresAt > uint64(time.Now().Unix()) {
+		if err := runtime.releaseV2AbandonedUpload(queued); err != nil {
+			return sequenceRetained, err
+		}
+	}
+	runtime.state.PendingChunkDeliveries = append(runtime.state.PendingChunkDeliveries[:index], runtime.state.PendingChunkDeliveries[index+1:]...)
+	if !sequenceRetained {
+		delete(runtime.state.Sent, queued.DescriptorDigest)
+		chain.SendSequence = queued.Sequence - 1
+		chain.SendDigest = queued.PreviousDigest
+	}
+	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
+		return sequenceRetained, err
+	}
+	// The spooled ciphertext is removed only after the state no longer refers
+	// to it, so an interrupted abandon leaves files without a record rather
+	// than a record naming files that are gone.
+	for _, part := range queued.Parts {
+		if err := os.Remove(part.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return sequenceRetained, err
+		}
+	}
+	if len(queued.Parts) != 0 {
+		_ = os.Remove(filepath.Dir(queued.Parts[0].Path))
+	}
+	return sequenceRetained, nil
+}
+
+// abandonV2ResumableDownload discards the parts of a partly received chunked
+// delivery and the record that tracks it.
+func (runtime *v2PeerRuntime) abandonV2ResumableDownload(digest string, inbound v2InboundTransfer) error {
+	if err := discardV2InboundChunks(inbound); err != nil {
+		return err
+	}
+	delete(runtime.state.InboundTransfers, digest)
+	return writeV2PeerDeliveryState(runtime.paths, runtime.state)
+}
+
+func (a *app) cmdPeerAbandon(args []string) error {
+	opts, err := parseV2PeerAbandonOptions(args)
+	if err != nil {
+		return err
+	}
+	return a.withV2Peer(opts.alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
 		outboundIndex := -1
 		for index, transfer := range runtime.state.PendingChunkDeliveries {
-			if transfer.DescriptorDigest == digest {
+			if transfer.DescriptorDigest == opts.digest {
 				outboundIndex = index
 				break
 			}
 		}
-		inbound, inboundExists := runtime.state.InboundTransfers[digest]
+		inbound, inboundExists := runtime.state.InboundTransfers[opts.digest]
 		if outboundIndex < 0 && (!inboundExists || len(inbound.Chunks) == 0) {
-			return fmt.Errorf("peer %q has no resumable transfer %s", alias, digest)
+			return fmt.Errorf("peer %q has no resumable transfer %s", opts.alias, opts.digest)
 		}
 		kind := "download"
 		sequenceRetained := false
 		if outboundIndex >= 0 {
 			kind = "upload"
-			queued := runtime.state.PendingChunkDeliveries[outboundIndex]
-			chain := runtime.state.Chains["out:data"]
-			if outboundIndex != len(runtime.state.PendingChunkDeliveries)-1 || chain.SendSequence != queued.Sequence || chain.SendDigest != queued.DescriptorDigest {
-				return errors.New("resumable upload cannot be abandoned after a later data sequence")
-			}
-			sequenceRetained = queued.CommitState == v2ChunkCommitAmbiguous
-			if !sequenceRetained && queued.UploadID != "" && queued.LeaseExpiresAt > uint64(time.Now().Unix()) {
-				uploadID, uploadErr := hex.DecodeString(queued.UploadID)
-				slot, slotErr := hex.DecodeString(queued.DataSlot)
-				if uploadErr != nil || slotErr != nil {
-					return errors.New("resumable upload state is invalid")
-				}
-				proof, proofErr := runtime.newV2ChunkWriteProof(slot, queued.SlotEpoch, time.Now())
-				if proofErr != nil {
-					return proofErr
-				}
-				if abandonErr := abandonV2ChunkUpload(context.Background(), runtime.transport, runtime.origin, uploadID, proof); abandonErr != nil {
-					var protocolErr *v2ProtocolError
-					if !errors.As(abandonErr, &protocolErr) || (protocolErr.Code != 2 && protocolErr.Code != 4) {
-						return abandonErr
-					}
-				}
-			}
-			runtime.state.PendingChunkDeliveries = append(runtime.state.PendingChunkDeliveries[:outboundIndex], runtime.state.PendingChunkDeliveries[outboundIndex+1:]...)
-			if !sequenceRetained {
-				delete(runtime.state.Sent, digest)
-				chain.SendSequence = queued.Sequence - 1
-				chain.SendDigest = queued.PreviousDigest
-			}
-			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-				return err
-			}
-			for _, part := range queued.Parts {
-				if err := os.Remove(part.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-			}
-			if len(queued.Parts) != 0 {
-				_ = os.Remove(filepath.Dir(queued.Parts[0].Path))
-			}
+			sequenceRetained, err = runtime.abandonV2ResumableUpload(outboundIndex)
 		} else {
-			if err := discardV2InboundChunks(inbound); err != nil {
-				return err
-			}
-			delete(runtime.state.InboundTransfers, digest)
-			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
-				return err
-			}
+			err = runtime.abandonV2ResumableDownload(opts.digest, inbound)
 		}
-		if jsonOutput {
-			return writeJSON(a.out, map[string]any{"peer": alias, "descriptor_digest": digest, "abandoned": true, "direction": kind, "sequence_retained": sequenceRetained})
+		if err != nil {
+			return err
+		}
+		if opts.json {
+			return writeJSON(a.out, map[string]any{"peer": opts.alias, "descriptor_digest": opts.digest, "abandoned": true, "direction": kind, "sequence_retained": sequenceRetained})
 		}
 		if sequenceRetained {
-			fmt.Fprintf(a.out, "Abandoned resumable %s %s for peer %q; retained its signed sequence because publication may have succeeded.\n", kind, digest, alias)
+			fmt.Fprintf(a.out, "Abandoned resumable %s %s for peer %q; retained its signed sequence because publication may have succeeded.\n", kind, opts.digest, opts.alias)
 			return nil
 		}
-		fmt.Fprintf(a.out, "Abandoned resumable %s %s for peer %q.\n", kind, digest, alias)
+		fmt.Fprintf(a.out, "Abandoned resumable %s %s for peer %q.\n", kind, opts.digest, opts.alias)
 		return nil
 	})
 }

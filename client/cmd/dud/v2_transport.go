@@ -355,30 +355,30 @@ func (transport *productionV2Transport) targetClient(origin string, resolution *
 	return client, nil
 }
 
-func (transport *productionV2Transport) doTarget(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	request v2Request,
-	origin string,
-	resolution *v2Resolution,
-) (*v2Response, error) {
-	// Headers are checked before anything is constructed, so a rejected header
-	// cannot leave a client, a guard, or a partly consumed body behind.
-	for name, values := range request.Headers {
+// validateV2RequestHeaders rejects headers a caller must not set. Host is
+// derived from the origin this request was resolved for, and a header value
+// carrying a newline could inject a header or a request of its own.
+func validateV2RequestHeaders(headers http.Header) error {
+	for name, values := range headers {
 		if strings.EqualFold(name, "Host") {
-			return nil, errors.New("v2 requests cannot override the Host header")
+			return errors.New("v2 requests cannot override the Host header")
 		}
 		for _, value := range values {
 			if strings.ContainsAny(value, "\r\n") {
-				return nil, fmt.Errorf("invalid newline in v2 header %q", name)
+				return fmt.Errorf("invalid newline in v2 header %q", name)
 			}
 		}
 	}
-	client, err := transport.targetClient(origin, resolution)
-	if err != nil {
-		return nil, err
-	}
+	return nil
+}
 
+// newV2RequestBody wraps a request's body in the readers that report progress
+// and detect a stalled transfer, and returns the guard that watches it. A
+// streamed request or response gets a guard because it can outlive any single
+// timeout: the guard cancels the request when no bytes move for long enough,
+// which a whole-request deadline cannot distinguish from a slow large transfer.
+// A guard is returned only when one was created, and the caller stops it.
+func newV2RequestBody(request v2Request, cancel context.CancelFunc) (io.Reader, *v2ProgressGuard) {
 	var guard *v2ProgressGuard
 	body := io.Reader(bytes.NewReader(request.Body))
 	uploadTotal := int64(len(request.Body))
@@ -402,12 +402,16 @@ func (transport *productionV2Transport) doTarget(
 	} else if request.BodyStream != nil {
 		body = &v2ProgressReader{reader: body, guard: guard}
 	}
+	return body, guard
+}
 
+// newV2HTTPRequest builds the HTTP request for one resolved target. The content
+// length is set explicitly so a streamed body is sent with a known length
+// rather than chunked, which keeps the request's size on the wire a function of
+// the payload alone.
+func newV2HTTPRequest(ctx context.Context, request v2Request, origin string, body io.Reader) (*http.Request, error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, request.Method, origin+request.Path, body)
 	if err != nil {
-		if guard != nil {
-			guard.stop()
-		}
 		return nil, err
 	}
 	if request.BodyStream != nil {
@@ -423,54 +427,13 @@ func (transport *productionV2Transport) doTarget(
 			httpRequest.Header.Add(name, value)
 		}
 	}
+	return httpRequest, nil
+}
 
-	response, err := client.Do(httpRequest)
-	if err != nil {
-		if guard != nil {
-			guard.stop()
-			transport.retireTargetClient(origin)
-		}
-		return nil, fmt.Errorf("v2 request failed: %w", err)
-	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		_ = response.Body.Close()
-		if guard != nil {
-			guard.stop()
-		}
-		return nil, fmt.Errorf("v2 transport rejected HTTP redirect status %d", response.StatusCode)
-	}
-
-	result := &v2Response{
-		StatusCode:  response.StatusCode,
-		ContentType: response.Header.Get("Content-Type"),
-		Headers:     response.Header.Clone(),
-		TLS:         v2ConnectionInfoFrom(response.TLS, resolution.ECHConfig),
-	}
-	if request.StreamResponse {
-		downloadTotal := response.ContentLength
-		if downloadTotal < 0 {
-			downloadTotal = 0
-		}
-		if request.ObserveDownload != nil {
-			request.ObserveDownload(0, downloadTotal)
-		}
-		result.Stream = &v2StreamBody{
-			reader:  response.Body,
-			guard:   guard,
-			cancel:  cancel,
-			total:   downloadTotal,
-			observe: request.ObserveDownload,
-			onFailure: func() {
-				transport.retireTargetClient(origin)
-			},
-		}
-		return result, nil
-	}
-
-	defer func() { _ = response.Body.Close() }()
-	if guard != nil {
-		defer guard.stop()
-	}
+// readV2ResponseBody reads a buffered response under its size limit. One byte
+// beyond the limit is read so that a body exactly at the limit is accepted and
+// anything larger is refused, rather than silently truncated.
+func (transport *productionV2Transport) readV2ResponseBody(request v2Request, response *http.Response, guard *v2ProgressGuard, origin string) ([]byte, error) {
 	limit := request.MaxResponseBytes
 	if limit == 0 {
 		limit = v2DefaultBodyLimit
@@ -484,15 +447,100 @@ func (transport *productionV2Transport) doTarget(
 		request.ObserveDownload(0, downloadTotal)
 		responseReader = &v2ObservedReader{reader: responseReader, total: downloadTotal, observe: request.ObserveDownload}
 	}
-	result.Body, err = io.ReadAll(io.LimitReader(responseReader, limit+1))
+	body, err := io.ReadAll(io.LimitReader(responseReader, limit+1))
 	if err != nil {
 		if guard != nil {
 			transport.retireTargetClient(origin)
 		}
 		return nil, err
 	}
-	if int64(len(result.Body)) > limit {
+	if int64(len(body)) > limit {
 		return nil, errors.New("v2 response exceeds the configured limit")
+	}
+	return body, nil
+}
+
+// v2StreamResponseBody hands the response body to the caller to read. The
+// stream owns the guard and the cancellation from here on, because the transfer
+// continues after this function returns.
+func (transport *productionV2Transport) v2StreamResponseBody(request v2Request, response *http.Response, guard *v2ProgressGuard, cancel context.CancelFunc, origin string) *v2StreamBody {
+	downloadTotal := response.ContentLength
+	if downloadTotal < 0 {
+		downloadTotal = 0
+	}
+	if request.ObserveDownload != nil {
+		request.ObserveDownload(0, downloadTotal)
+	}
+	return &v2StreamBody{
+		reader:  response.Body,
+		guard:   guard,
+		cancel:  cancel,
+		total:   downloadTotal,
+		observe: request.ObserveDownload,
+		onFailure: func() {
+			transport.retireTargetClient(origin)
+		},
+	}
+}
+
+func (transport *productionV2Transport) doTarget(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	request v2Request,
+	origin string,
+	resolution *v2Resolution,
+) (*v2Response, error) {
+	// Headers are checked before anything is constructed, so a rejected header
+	// cannot leave a client, a guard, or a partly consumed body behind.
+	if err := validateV2RequestHeaders(request.Headers); err != nil {
+		return nil, err
+	}
+	client, err := transport.targetClient(origin, resolution)
+	if err != nil {
+		return nil, err
+	}
+	body, guard := newV2RequestBody(request, cancel)
+	httpRequest, err := newV2HTTPRequest(ctx, request, origin, body)
+	if err != nil {
+		if guard != nil {
+			guard.stop()
+		}
+		return nil, err
+	}
+	response, err := client.Do(httpRequest)
+	if err != nil {
+		if guard != nil {
+			guard.stop()
+			transport.retireTargetClient(origin)
+		}
+		return nil, fmt.Errorf("v2 request failed: %w", err)
+	}
+	// A redirect would move the request to an origin this resolution never
+	// checked, so it is refused rather than followed.
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		_ = response.Body.Close()
+		if guard != nil {
+			guard.stop()
+		}
+		return nil, fmt.Errorf("v2 transport rejected HTTP redirect status %d", response.StatusCode)
+	}
+	result := &v2Response{
+		StatusCode:  response.StatusCode,
+		ContentType: response.Header.Get("Content-Type"),
+		Headers:     response.Header.Clone(),
+		TLS:         v2ConnectionInfoFrom(response.TLS, resolution.ECHConfig),
+	}
+	if request.StreamResponse {
+		result.Stream = transport.v2StreamResponseBody(request, response, guard, cancel, origin)
+		return result, nil
+	}
+	defer func() { _ = response.Body.Close() }()
+	if guard != nil {
+		defer guard.stop()
+	}
+	result.Body, err = transport.readV2ResponseBody(request, response, guard, origin)
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }

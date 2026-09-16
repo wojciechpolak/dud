@@ -502,7 +502,12 @@ func validateV2Expectation(desc map[int]any, expected v2DescriptorExpectation) e
 	return nil
 }
 
-func validateV2DescriptorMap(desc map[int]any) error {
+// validateV2DescriptorKeys checks that a descriptor carries every core key the
+// protocol requires and nothing this version cannot interpret. An extension
+// key the sender marked critical is refused rather than ignored, so a later
+// version can add a key that changes the meaning of a descriptor without this
+// version silently accepting a weaker reading of it.
+func validateV2DescriptorKeys(desc map[int]any) error {
 	required := []int{
 		kV, kKEMAlg, kSigAlg, kDescriptorID, kPayloadType, kRelationshipID,
 		kDirection, kChain, kKeyEpoch, kSequence, kPreviousDigest,
@@ -531,17 +536,27 @@ func validateV2DescriptorMap(desc map[int]any) error {
 			return fmt.Errorf("descriptor uses unsupported critical extension key %d", key)
 		}
 	}
-	if !v2UintEquals(desc[kV], v2ProtocolVersion) {
-		return errors.New("descriptor protocol version is not 2")
-	}
-	if !v2UintEquals(desc[kKEMAlg], v2KEMAlgorithm) {
-		return errors.New("descriptor recipient algorithm is unsupported")
-	}
-	if !v2UintEquals(desc[kSigAlg], v2SignatureAlgorithm) {
-		return errors.New("descriptor signature algorithm is unsupported")
-	}
-	if !v2UintEquals(desc[kKeyEpoch], 0) {
-		return errors.New("descriptor key epoch is unsupported in DUD 2.0")
+	return nil
+}
+
+// validateV2DescriptorIdentity checks the algorithm agreement a descriptor
+// asserts and the fixed-width identifiers it routes by. Each identifier has
+// one length, so a value of any other length is rejected before anything
+// compares it against local state.
+func validateV2DescriptorIdentity(desc map[int]any) error {
+	for _, item := range []struct {
+		key      int
+		expected uint64
+		message  string
+	}{
+		{kV, v2ProtocolVersion, "descriptor protocol version is not 2"},
+		{kKEMAlg, v2KEMAlgorithm, "descriptor recipient algorithm is unsupported"},
+		{kSigAlg, v2SignatureAlgorithm, "descriptor signature algorithm is unsupported"},
+		{kKeyEpoch, 0, "descriptor key epoch is unsupported in DUD 2.0"},
+	} {
+		if !v2UintEquals(desc[item.key], item.expected) {
+			return errors.New(item.message)
+		}
 	}
 	for _, item := range []struct {
 		key    int
@@ -561,6 +576,14 @@ func validateV2DescriptorMap(desc map[int]any) error {
 			return fmt.Errorf("descriptor %s must be exactly %d bytes", item.name, item.length)
 		}
 	}
+	return nil
+}
+
+// validateV2DescriptorRouting checks what the descriptor says about where it
+// belongs: its payload type, its direction, and the chain it is ordered on.
+// Data payloads and control payloads have separate chains, and a payload type
+// carried on the other one would be ordered against the wrong watermark.
+func validateV2DescriptorRouting(desc map[int]any) error {
 	payloadType, ok := asV2Uint(desc[kPayloadType])
 	if !ok || payloadType < 1 || payloadType > 6 {
 		return errors.New("descriptor payload type is unsupported")
@@ -599,26 +622,80 @@ func validateV2DescriptorMap(desc map[int]any) error {
 	if err != nil || normalized != origin {
 		return errors.New("descriptor canonical origin is not canonical")
 	}
-	if err := validateV2TransportPolicy(desc[kTransportPolicy]); err != nil {
-		return err
-	}
-	chunks, ok := desc[kChunkHashes].([]any)
+	return validateV2TransportPolicy(desc[kTransportPolicy])
+}
+
+// v2DescriptorChunkHashes reads the per-chunk ciphertext digests a descriptor
+// commits to. Values constructed in Go are often [][]byte until a round trip.
+func v2DescriptorChunkHashes(value any) ([]any, error) {
+	chunks, ok := value.([]any)
 	if !ok {
-		// Values constructed in Go are often [][]byte until a round trip.
-		if typed, typedOK := desc[kChunkHashes].([][]byte); typedOK {
-			chunks = make([]any, len(typed))
-			for i := range typed {
-				chunks[i] = typed[i]
-			}
-		} else {
-			return errors.New("descriptor chunk_hashes must be an array")
+		typed, typedOK := value.([][]byte)
+		if !typedOK {
+			return nil, errors.New("descriptor chunk_hashes must be an array")
+		}
+		chunks = make([]any, len(typed))
+		for i := range typed {
+			chunks[i] = typed[i]
 		}
 	}
 	for _, rawHash := range chunks {
 		hash, valid := rawHash.([]byte)
 		if !valid || len(hash) != 32 {
-			return errors.New("descriptor chunk hash must be exactly 32 bytes")
+			return nil, errors.New("descriptor chunk hash must be exactly 32 bytes")
 		}
+	}
+	return chunks, nil
+}
+
+// validateV2ChunkedLayout checks the chunk size, chunk IDs, and plaintext size
+// of a chunked descriptor against each other. The size bounds pin the payload
+// to a layout the chunk count and chunk size can produce, so the receiver knows
+// how many parts to expect before a single one arrives, and the IDs must be
+// distinct so that one part cannot stand in for another.
+func validateV2ChunkedLayout(desc map[int]any, chunks []any, chunkSizeRaw, chunkIDsRaw any) error {
+	payloadType, _ := asV2Uint(desc[kPayloadType])
+	chain, _ := asV2Uint(desc[kChain])
+	if payloadType > 4 || chain != 0 {
+		return errors.New("chunked descriptor must be on the data chain")
+	}
+	chunkSize, valid := asV2Uint(chunkSizeRaw)
+	if !valid || !validV2ChunkSize(chunkSize) {
+		return errors.New("descriptor chunk size is not registered")
+	}
+	chunkIDs, valid := v2ByteArray(chunkIDsRaw)
+	if !valid || len(chunkIDs) < 2 || len(chunkIDs) > v2MaximumChunkCount || len(chunkIDs) != len(chunks) {
+		return errors.New("descriptor chunk IDs must match 2..1024 chunk hashes")
+	}
+	seen := make(map[string]struct{}, len(chunkIDs))
+	for _, id := range chunkIDs {
+		if len(id) != 16 {
+			return errors.New("descriptor chunk ID must be exactly 16 bytes")
+		}
+		key := string(id)
+		if _, exists := seen[key]; exists {
+			return errors.New("descriptor chunk IDs must be unique")
+		}
+		seen[key] = struct{}{}
+	}
+	plaintextSize, valid := asV2Uint(desc[kPlaintextSize])
+	minimum := uint64(len(chunkIDs)-1)*chunkSize + 1
+	maximum := uint64(len(chunkIDs)) * chunkSize
+	if !valid || plaintextSize < minimum || plaintextSize > maximum || plaintextSize > v2MaximumChunkedBytes {
+		return errors.New("descriptor chunk layout does not match plaintext size")
+	}
+	return nil
+}
+
+// validateV2DescriptorChunking checks how a descriptor's payload is divided.
+// The chunk size and the chunk ID list describe one layout together, so a
+// descriptor carrying one without the other says nothing about the transfer it
+// belongs to; a descriptor carrying neither is a single-request delivery and
+// commits to exactly one ciphertext digest.
+func validateV2DescriptorChunking(desc map[int]any) error {
+	chunks, err := v2DescriptorChunkHashes(desc[kChunkHashes])
+	if err != nil {
+		return err
 	}
 	chunkSizeRaw, hasChunkSize := desc[kChunkSize]
 	chunkIDsRaw, hasChunkIDs := desc[kChunkIDs]
@@ -629,34 +706,25 @@ func validateV2DescriptorMap(desc map[int]any) error {
 		if len(chunks) != 1 {
 			return errors.New("baseline descriptors must contain exactly one chunk hash")
 		}
-	} else {
-		if payloadType > 4 || chain != 0 {
-			return errors.New("chunked descriptor must be on the data chain")
-		}
-		chunkSize, valid := asV2Uint(chunkSizeRaw)
-		if !valid || !validV2ChunkSize(chunkSize) {
-			return errors.New("descriptor chunk size is not registered")
-		}
-		chunkIDs, valid := v2ByteArray(chunkIDsRaw)
-		if !valid || len(chunkIDs) < 2 || len(chunkIDs) > v2MaximumChunkCount || len(chunkIDs) != len(chunks) {
-			return errors.New("descriptor chunk IDs must match 2..1024 chunk hashes")
-		}
-		seen := make(map[string]struct{}, len(chunkIDs))
-		for _, id := range chunkIDs {
-			if len(id) != 16 {
-				return errors.New("descriptor chunk ID must be exactly 16 bytes")
-			}
-			key := string(id)
-			if _, exists := seen[key]; exists {
-				return errors.New("descriptor chunk IDs must be unique")
-			}
-			seen[key] = struct{}{}
-		}
-		plaintextSize, valid := asV2Uint(desc[kPlaintextSize])
-		minimum := uint64(len(chunkIDs)-1)*chunkSize + 1
-		maximum := uint64(len(chunkIDs)) * chunkSize
-		if !valid || plaintextSize < minimum || plaintextSize > maximum || plaintextSize > v2MaximumChunkedBytes {
-			return errors.New("descriptor chunk layout does not match plaintext size")
+		return nil
+	}
+	return validateV2ChunkedLayout(desc, chunks, chunkSizeRaw, chunkIDsRaw)
+}
+
+// validateV2DescriptorMap checks a decoded descriptor against everything the
+// protocol fixes about its contents. It runs on both sides: the sender builds a
+// descriptor through it, and the receiver validates one before its signature
+// buys it any trust, so a descriptor that reaches either side's chain state has
+// passed every section below.
+func validateV2DescriptorMap(desc map[int]any) error {
+	for _, validate := range []func(map[int]any) error{
+		validateV2DescriptorKeys,
+		validateV2DescriptorIdentity,
+		validateV2DescriptorRouting,
+		validateV2DescriptorChunking,
+	} {
+		if err := validate(desc); err != nil {
+			return err
 		}
 	}
 	if value, ok := desc[kDisplayName]; ok {

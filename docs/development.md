@@ -72,7 +72,7 @@ them.
 | `govulncheck` | known vulnerabilities in the modules the client calls       | yes    |
 | `errcheck`    | unchecked error returns                                     | yes    |
 | `staticcheck` | correctness, simplification, and style checks               | yes    |
-| `gocyclo`     | functions above the cyclomatic complexity ceiling           | no     |
+| `gocyclo`     | functions above the cyclomatic complexity ceiling           | yes    |
 
 How the scripts invoke them decides whether their output means anything:
 
@@ -86,14 +86,18 @@ How the scripts invoke them decides whether their output means anything:
   repository marks a discard the author chose, and a bare type assertion reads a
   field whose type a validator has already checked or whose type the standard
   library documents, so both flags would report code that states its intent.
-- `gocyclo` reports against the limit this repository intends to hold, not the
-  limit it currently meets. Set `GOCYCLO_OVER` to try a different one.
+- `gocyclo` reports every function above complexity 30, which is the ceiling
+  this repository holds to. A function that exceeds it carries several
+  independent stages in one body; split it into one function per stage rather
+  than raising the ceiling. Set `GOCYCLO_OVER` to survey a different one.
 
 An analyzer that reports nothing on this tree blocks. `npm run check` calls
-`analyze:go:gate`, which fails on any new finding. The rest still have findings
-left to fix, so `npm run analyze:go:pending` reports them and exits 0. To
-promote an analyzer, move its name from `PENDING_TOOLS` to `GATING_TOOLS` in
-`scripts/go-analyze.sh`. The two lists say which set each one is in.
+`analyze:go:gate`, which fails on any new finding. Every analyzer listed above
+is in that set, so `npm run analyze:go:pending` has nothing to report. An
+analyzer added with findings left to fix goes in `PENDING_TOOLS` in
+`scripts/go-analyze.sh`, where it reports without failing, and moves to
+`GATING_TOOLS` once it reports nothing. The two lists say which set each one is
+in.
 
 `npm run analyze:go` runs every analyzer without failing, which is what to use
 while fixing findings. `npm run analyze:go:strict` fails on any finding from any
