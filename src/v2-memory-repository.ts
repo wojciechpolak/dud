@@ -8,12 +8,16 @@ import {
   v2StagedChunkKey,
   validateV2BodyPartDeclarations,
 } from './v2-body-keys.js';
-import { V2OperationConflictError } from './v2-repository.js';
+import {
+  isV2ChunkUploadLeaseWellFormed,
+  V2OperationConflictError,
+} from './v2-repository.js';
 import type {
   V2CapabilityRegistration,
   V2ChunkUpload,
   V2DeliveryReservation,
   V2Repository,
+  V2RepositoryAuthorization,
   V2RepositoryCapability,
   V2RepositoryControlEvent,
   V2RepositoryDelivery,
@@ -40,6 +44,88 @@ function operationKey(operationId: Uint8Array): string {
 }
 
 type ReserveDeliveryInput = Parameters<V2Repository['reserveDelivery']>[0];
+
+/**
+ * Whether an unexpired record belongs to the inbox's relationship and direction
+ * and sits in one of the slots it queried, keyed `epoch|slot`.
+ */
+function isInInbox(
+  record: {
+    expiresAt: number;
+    relationshipId: string;
+    direction: V2RepositoryDelivery['direction'];
+    epoch: number;
+    slot: Uint8Array;
+  },
+  query: Pick<
+    Parameters<V2Repository['queryInbox']>[0],
+    'now' | 'relationshipId' | 'direction'
+  >,
+  slots: ReadonlySet<string>,
+): boolean {
+  return (
+    record.expiresAt > query.now &&
+    record.relationshipId === query.relationshipId &&
+    record.direction === query.direction &&
+    slots.has(`${record.epoch}|${hex(record.slot)}`)
+  );
+}
+
+/**
+ * Body keys an upload still holds: each received part's body and, while the
+ * upload is uncommitted, the staged key of a part being written or, when
+ * `protectUnwritten` is set, of any unwritten part.
+ */
+function chunkUploadBodyKeys(
+  upload: V2ChunkUpload,
+  protectUnwritten: boolean,
+): string[] {
+  const uncommitted = upload.committedAt === undefined;
+  return upload.parts.flatMap((part) =>
+    partBodyKeys(
+      upload.id,
+      part,
+      uncommitted && (protectUnwritten || part.writeToken !== undefined),
+    ),
+  );
+}
+
+function partBodyKeys(
+  uploadId: string,
+  part: V2ChunkUpload['parts'][number],
+  protectStaged: boolean,
+): string[] {
+  if (part.bodyKey !== undefined) {
+    return [part.bodyKey];
+  }
+  return protectStaged ? [v2StagedChunkKey(uploadId, part.id)] : [];
+}
+
+/**
+ * A chunked publication must name its upload's parts in order, each with the
+ * declared length and digest and stored under this delivery's chunk key.
+ */
+function chunkPublicationMatches(
+  deliveryId: string,
+  parts: Parameters<V2Repository['publishDelivery']>[0]['parts'],
+  upload: V2ChunkUpload | undefined,
+): boolean {
+  return (
+    upload !== undefined &&
+    upload.deliveryId === deliveryId &&
+    parts !== undefined &&
+    parts.length === upload.parts.length &&
+    parts.every((committed, index) => {
+      const part = upload.parts[index]!;
+      return (
+        committed.id === part.id &&
+        committed.length === part.length &&
+        bytesEqual(committed.digest, part.digest) &&
+        committed.key === v2DeliveryChunkKey(deliveryId, part.id)
+      );
+    })
+  );
+}
 type ReserveDeliveryResult =
   | V2DeliveryReservation
   | { existing: V2RepositoryDelivery };
@@ -277,17 +363,8 @@ export class MemoryV2Repository
       throw new Error('Chunk upload capability is invalid.');
     }
     if (
-      input.expiresAt <= input.now ||
       input.expiresAt > capability.expiresAt ||
-      !Number.isSafeInteger(input.chain) ||
-      input.chain < 0 ||
-      input.slot.byteLength !== 16 ||
-      !Number.isSafeInteger(input.epoch) ||
-      input.epoch < 0 ||
-      !Number.isSafeInteger(input.maximumConcurrentUploads) ||
-      input.maximumConcurrentUploads < 1 ||
-      !Number.isSafeInteger(input.maximumStagedBytes) ||
-      input.maximumStagedBytes < input.totalLength
+      !isV2ChunkUploadLeaseWellFormed(input)
     ) {
       throw new Error('Chunk upload lease is invalid.');
     }
@@ -412,18 +489,8 @@ export class MemoryV2Repository
   async authorizeChunkUpload(
     input: Parameters<V2Repository['authorizeChunkUpload']>[0],
   ): Promise<V2ChunkUpload> {
-    const capability = this.activeDeliveryCapability(
-      input.capabilityId,
-      input.now,
-    );
-    const upload = this.chunkUploads.get(input.id);
-    if (
-      capability.scope !== 'write' ||
-      !upload ||
-      upload.committedAt !== undefined ||
-      upload.capabilityId !== input.capabilityId ||
-      upload.expiresAt <= input.now
-    ) {
+    const { upload } = this.openChunkUpload(input);
+    if (!upload) {
       throw new Error('Chunk upload is unavailable.');
     }
     const claims = this.validateDeliveryAuthorization(
@@ -451,22 +518,11 @@ export class MemoryV2Repository
     ) {
       throw new Error('Chunk upload part write lease is invalid.');
     }
-    const capability = this.activeDeliveryCapability(
-      input.capabilityId,
-      input.now,
-    );
-    const upload = this.chunkUploads.get(input.id);
+    const { upload } = this.openChunkUpload(input);
     const part = upload?.parts.find(
       (candidate) => candidate.id === input.partId,
     );
-    if (
-      capability.scope !== 'write' ||
-      !upload ||
-      upload.committedAt !== undefined ||
-      upload.capabilityId !== input.capabilityId ||
-      upload.expiresAt <= input.now ||
-      !part
-    ) {
+    if (!upload || !part) {
       throw new Error('Chunk upload part is unavailable.');
     }
     const claims = this.validateDeliveryAuthorization(
@@ -585,19 +641,8 @@ export class MemoryV2Repository
     if (input.operationDigest.byteLength !== 32) {
       throw new Error('Chunk upload operation is invalid.');
     }
-    const capability = this.activeDeliveryCapability(
-      input.capabilityId,
-      input.now,
-    );
-    const upload = this.chunkUploads.get(input.id);
-    if (
-      capability.scope !== 'write' ||
-      !upload ||
-      upload.committedAt !== undefined ||
-      upload.capabilityId !== input.capabilityId ||
-      upload.expiresAt <= input.now ||
-      input.expiresAt > capability.expiresAt
-    ) {
+    const { capability, upload } = this.openChunkUpload(input);
+    if (!upload || input.expiresAt > capability.expiresAt) {
       throw new Error('Chunk upload lease cannot be renewed.');
     }
     const claims = this.validateDeliveryAuthorization(
@@ -639,18 +684,8 @@ export class MemoryV2Repository
   async abandonChunkUpload(
     input: Parameters<V2Repository['abandonChunkUpload']>[0],
   ): Promise<void> {
-    const capability = this.activeDeliveryCapability(
-      input.capabilityId,
-      input.now,
-    );
-    const upload = this.chunkUploads.get(input.id);
-    if (
-      capability.scope !== 'write' ||
-      !upload ||
-      upload.committedAt !== undefined ||
-      upload.capabilityId !== input.capabilityId ||
-      upload.expiresAt <= input.now
-    ) {
+    const { upload } = this.openChunkUpload(input);
+    if (!upload) {
       throw new Error('Chunk upload is unavailable.');
     }
     const claims = this.validateDeliveryAuthorization(
@@ -681,10 +716,59 @@ export class MemoryV2Repository
     return capability;
   }
 
+  /**
+   * Resolves an upload that is still open to its capability: uncommitted,
+   * unexpired, and owned by the active write capability named in the request.
+   * `upload` is undefined for any other upload, while a missing or inactive
+   * capability raises.
+   */
+  private openChunkUpload(input: {
+    id: string;
+    capabilityId: string;
+    now: number;
+  }): { capability: V2RepositoryCapability; upload?: V2ChunkUpload } {
+    const capability = this.activeDeliveryCapability(
+      input.capabilityId,
+      input.now,
+    );
+    const upload = this.chunkUploads.get(input.id);
+    if (
+      capability.scope !== 'write' ||
+      !upload ||
+      upload.committedAt !== undefined ||
+      upload.capabilityId !== input.capabilityId ||
+      upload.expiresAt <= input.now
+    ) {
+      return { capability };
+    }
+    return { capability, upload };
+  }
+
   private validateDeliveryAuthorization(
     authorization: ReserveDeliveryInput['authorization'],
     now: number,
   ): DeliveryAuthorizationClaims {
+    const claims = this.inspectClaims(authorization, now);
+    if (claims === 'inactive') {
+      throw new Error('Request capability is not active.');
+    }
+    if (claims === 'unavailable') {
+      throw new Error('Request authorization is unavailable.');
+    }
+    return claims;
+  }
+
+  /**
+   * Checks a request's proofs without recording them. A claim naming a
+   * missing, revoked, or expired capability makes the request `inactive`; a
+   * repeated or already-spent nonce, or a rate window the claims would
+   * overflow, makes it `unavailable`. Otherwise the result is what
+   * {@link commitDeliveryAuthorization} records once the request is admitted.
+   */
+  private inspectClaims(
+    authorization: V2RepositoryAuthorization | undefined,
+    now: number,
+  ): DeliveryAuthorizationClaims | 'inactive' | 'unavailable' {
     const nonceKeys =
       authorization?.claims.map(
         (claim) => `${claim.capabilityId}|${hex(claim.nonce)}`,
@@ -700,7 +784,7 @@ export class MemoryV2Repository
         authorized.revokedAt !== undefined ||
         authorized.expiresAt <= now
       ) {
-        throw new Error('Request capability is not active.');
+        return 'inactive';
       }
       rateCounts.set(
         claim.capabilityId,
@@ -718,10 +802,7 @@ export class MemoryV2Repository
           authorization.maximumRequestsPerMinute
         );
       });
-    if (unavailable) {
-      throw new Error('Request authorization is unavailable.');
-    }
-    return { nonceKeys, rateCounts };
+    return unavailable ? 'unavailable' : { nonceKeys, rateCounts };
   }
 
   private resolveExistingReservation(
@@ -925,19 +1006,7 @@ export class MemoryV2Repository
       : undefined;
     if (
       input.chunkUploadId &&
-      (!chunkUpload ||
-        chunkUpload.deliveryId !== input.id ||
-        !input.parts ||
-        input.parts.length !== chunkUpload.parts.length ||
-        input.parts.some((committed, index) => {
-          const part = chunkUpload.parts[index]!;
-          return (
-            committed.id !== part.id ||
-            committed.length !== part.length ||
-            !bytesEqual(committed.digest, part.digest) ||
-            committed.key !== v2DeliveryChunkKey(input.id, part.id)
-          );
-        }))
+      !chunkPublicationMatches(input.id, input.parts, chunkUpload)
     ) {
       throw new Error('Chunk delivery publication is invalid.');
     }
@@ -947,21 +1016,7 @@ export class MemoryV2Repository
     const delivery = { ...clone(input), state: 'published' as const, sequence };
     delete (delivery as Partial<typeof delivery>).chunkUploadId;
     this.deliveries.set(delivery.id, delivery);
-    this.reservations.delete(delivery.id);
-    this.reservationRelationships.delete(delivery.id);
-    this.reservationDirections.delete(delivery.id);
-    if (this.reservationObjects.delete(delivery.id)) {
-      this.deliveryObjects.add(delivery.id);
-    }
-    const reservedBytes = this.reservationBytes.get(delivery.id);
-    if (reservedBytes !== undefined) {
-      const account = this.quotaAccounts.get(delivery.relationshipId);
-      if (account) {
-        account.reservedBytes -= reservedBytes;
-        account.committedBytes += reservedBytes;
-      }
-      this.reservationBytes.delete(delivery.id);
-    }
+    this.settleReservation(delivery.id, delivery.relationshipId);
     if (chunkUpload) {
       chunkUpload.committedAt = input.createdAt;
       chunkUpload.expiresAt = input.expiresAt;
@@ -972,45 +1027,41 @@ export class MemoryV2Repository
     return { delivery: clone(delivery), idempotent: false };
   }
 
+  /**
+   * Converts a published delivery's reservation into committed accounting: the
+   * reserved bytes become committed bytes, and its reserved object becomes a
+   * retained delivery object.
+   */
+  private settleReservation(deliveryId: string, relationshipId: string): void {
+    this.reservations.delete(deliveryId);
+    this.reservationRelationships.delete(deliveryId);
+    this.reservationDirections.delete(deliveryId);
+    if (this.reservationObjects.delete(deliveryId)) {
+      this.deliveryObjects.add(deliveryId);
+    }
+    const reservedBytes = this.reservationBytes.get(deliveryId);
+    if (reservedBytes === undefined) {
+      return;
+    }
+    const account = this.quotaAccounts.get(relationshipId);
+    if (account) {
+      account.reservedBytes -= reservedBytes;
+      account.committedBytes += reservedBytes;
+    }
+    this.reservationBytes.delete(deliveryId);
+  }
+
   async queryInbox(input: Parameters<V2Repository['queryInbox']>[0]) {
     const authorization = input.authorization;
     if (authorization) {
-      const nonceKeys = authorization.claims.map(
-        ({ capabilityId, nonce }) => `${capabilityId}|${hex(nonce)}`,
-      );
-      const rateCounts = new Map<string, number>();
-      for (const claim of authorization.claims) {
-        const capability = this.capabilities.get(claim.capabilityId);
-        if (
-          !capability ||
-          capability.revokedAt !== undefined ||
-          capability.expiresAt <= input.now
-        ) {
-          return this.rejectedInbox();
-        }
-        rateCounts.set(
-          claim.capabilityId,
-          (rateCounts.get(claim.capabilityId) ?? 0) + 1,
-        );
-      }
-      const minute = Math.floor(input.now / 60);
-      if (
-        new Set(nonceKeys).size !== nonceKeys.length ||
-        nonceKeys.some((key) => (this.nonces.get(key) ?? -1) >= input.now) ||
-        Array.from(rateCounts).some(([capabilityId, count]) => {
-          const window = this.rateWindows.get(capabilityId);
-          return (
-            (window?.minute === minute ? window.count : 0) + count >
-            authorization.maximumRequestsPerMinute
-          );
-        })
-      ) {
+      const claims = this.inspectClaims(authorization, input.now);
+      if (typeof claims === 'string') {
         return this.rejectedInbox();
       }
       this.commitDeliveryAuthorization(
         authorization,
-        nonceKeys,
-        rateCounts,
+        claims.nonceKeys,
+        claims.rateCounts,
         input.now,
       );
       this.markControlEventsConsumed({
@@ -1030,10 +1081,7 @@ export class MemoryV2Repository
       .filter(
         (delivery) =>
           delivery.state === 'published' &&
-          delivery.expiresAt > input.now &&
-          delivery.relationshipId === input.relationshipId &&
-          delivery.direction === input.direction &&
-          dataSlots.has(`${delivery.epoch}|${hex(delivery.slot)}`),
+          isInInbox(delivery, input, dataSlots),
       )
       .sort(
         (a, b) =>
@@ -1043,12 +1091,7 @@ export class MemoryV2Repository
       );
     const events = Array.from(this.controlEvents.values())
       .filter(
-        (event) =>
-          !event.consumedAt &&
-          event.expiresAt > input.now &&
-          event.relationshipId === input.relationshipId &&
-          event.direction === input.direction &&
-          controlSlots.has(`${event.epoch}|${hex(event.slot)}`),
+        (event) => !event.consumedAt && isInInbox(event, input, controlSlots),
       )
       .sort((a, b) => a.sequence - b.sequence);
     const boundedEvents: V2RepositoryControlEvent[] = [];
@@ -1109,43 +1152,9 @@ export class MemoryV2Repository
     event: V2RepositoryControlEvent,
     authorization?: Parameters<V2Repository['publishControlEvent']>[1],
   ) {
-    const nonceKeys = authorization
-      ? authorization.claims.map(
-          ({ capabilityId, nonce }) => `${capabilityId}|${hex(nonce)}`,
-        )
-      : [];
-    const rateCounts = new Map<string, number>();
-    if (authorization) {
-      for (const claim of authorization.claims) {
-        const capability = this.capabilities.get(claim.capabilityId);
-        if (
-          !capability ||
-          capability.revokedAt !== undefined ||
-          capability.expiresAt <= event.createdAt
-        ) {
-          return { authorizationAccepted: false as const };
-        }
-        rateCounts.set(
-          claim.capabilityId,
-          (rateCounts.get(claim.capabilityId) ?? 0) + 1,
-        );
-      }
-      const minute = Math.floor(event.createdAt / 60);
-      if (
-        new Set(nonceKeys).size !== nonceKeys.length ||
-        nonceKeys.some(
-          (key) => (this.nonces.get(key) ?? -1) >= event.createdAt,
-        ) ||
-        Array.from(rateCounts).some(([capabilityId, count]) => {
-          const window = this.rateWindows.get(capabilityId);
-          return (
-            (window?.minute === minute ? window.count : 0) + count >
-            authorization.maximumRequestsPerMinute
-          );
-        })
-      ) {
-        return { authorizationAccepted: false as const };
-      }
+    const claims = this.inspectClaims(authorization, event.createdAt);
+    if (typeof claims === 'string') {
+      return { authorizationAccepted: false as const };
     }
     this.assertControlEventCompatible(event);
     const operation = operationKey(event.operationId);
@@ -1193,8 +1202,8 @@ export class MemoryV2Repository
     }
     this.commitDeliveryAuthorization(
       authorization,
-      nonceKeys,
-      rateCounts,
+      claims.nonceKeys,
+      claims.rateCounts,
       event.createdAt,
     );
     const sequenceKey = `${event.relationshipId}|${event.direction}`;
@@ -1218,50 +1227,16 @@ export class MemoryV2Repository
     >[0]['authorization'];
   }) {
     const authorization = input.authorization;
-    const nonceKeys = authorization
-      ? authorization.claims.map(
-          ({ capabilityId, nonce }) => `${capabilityId}|${hex(nonce)}`,
-        )
-      : [];
-    const rateCounts = new Map<string, number>();
-    if (authorization) {
-      for (const claim of authorization.claims) {
-        const capability = this.capabilities.get(claim.capabilityId);
-        if (
-          !capability ||
-          capability.revokedAt !== undefined ||
-          capability.expiresAt <= input.completion.now
-        ) {
-          return { authorizationAccepted: false as const };
-        }
-        rateCounts.set(
-          claim.capabilityId,
-          (rateCounts.get(claim.capabilityId) ?? 0) + 1,
-        );
-      }
-      const minute = Math.floor(input.completion.now / 60);
-      if (
-        new Set(nonceKeys).size !== nonceKeys.length ||
-        nonceKeys.some(
-          (key) => (this.nonces.get(key) ?? -1) >= input.completion.now,
-        ) ||
-        Array.from(rateCounts).some(([capabilityId, count]) => {
-          const window = this.rateWindows.get(capabilityId);
-          return (
-            (window?.minute === minute ? window.count : 0) + count >
-            authorization.maximumRequestsPerMinute
-          );
-        })
-      ) {
-        return { authorizationAccepted: false as const };
-      }
+    const claims = this.inspectClaims(authorization, input.completion.now);
+    if (typeof claims === 'string') {
+      return { authorizationAccepted: false as const };
     }
     this.assertCompletionCompatible(input.completion);
     this.assertControlEventCompatible(input.event);
     this.commitDeliveryAuthorization(
       authorization,
-      nonceKeys,
-      rateCounts,
+      claims.nonceKeys,
+      claims.rateCounts,
       input.completion.now,
     );
     const completion = await this.completeDelivery(input.completion);
@@ -1433,18 +1408,7 @@ export class MemoryV2Repository
       ),
       ...Array.from(this.reservations.values(), (value) => value.payloadKey),
       ...Array.from(this.chunkUploads.values()).flatMap((upload) =>
-        upload.parts.flatMap((part) => {
-          if (part.bodyKey !== undefined) {
-            return [part.bodyKey];
-          }
-          if (
-            upload.committedAt === undefined &&
-            (protectUnwrittenChunkParts || part.writeToken !== undefined)
-          ) {
-            return [v2StagedChunkKey(upload.id, part.id)];
-          }
-          return [];
-        }),
+        chunkUploadBodyKeys(upload, protectUnwrittenChunkParts),
       ),
     ];
   }

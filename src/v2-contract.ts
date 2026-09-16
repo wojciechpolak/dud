@@ -4,7 +4,7 @@
 /** Immutable V2 wire-contract constants. */
 export const V2_WIRE_PROTOCOL = 2;
 
-export const V2_FEATURE = {
+const V2_FEATURE = {
   scopedAuth: 2,
   pairing: 3,
   gitFull: 5,

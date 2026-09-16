@@ -134,14 +134,14 @@ export function planRelease(
   return changes;
 }
 
-function run(mode, env = process.env) {
+export function run(mode, env = process.env, root = ROOT) {
   if (mode !== 'check' && mode !== 'update') {
     throw new Error('usage: prepare-release.mjs check|update');
   }
   const oldVersion = stableVersion(env.npm_old_version, 'npm_old_version');
   const newVersion = stableVersion(env.npm_new_version, 'npm_new_version');
-  checkManifestVersions(ROOT, mode === 'check' ? oldVersion : newVersion);
-  const changes = planRelease(ROOT, oldVersion, newVersion);
+  checkManifestVersions(root, mode === 'check' ? oldVersion : newVersion);
+  const changes = planRelease(root, oldVersion, newVersion);
 
   if (mode === 'check') {
     console.log(`release: ${oldVersion} -> ${newVersion} is ready`);
@@ -149,11 +149,11 @@ function run(mode, env = process.env) {
   }
 
   for (const change of changes) {
-    fs.writeFileSync(path.join(ROOT, change.file), change.contents);
+    fs.writeFileSync(path.join(root, change.file), change.contents);
   }
   if (env.npm_config_git_tag_version !== 'false') {
     execFileSync('git', ['add', '--', ...RELEASE_FILES], {
-      cwd: ROOT,
+      cwd: root,
       stdio: 'inherit',
     });
   }

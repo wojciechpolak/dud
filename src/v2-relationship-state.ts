@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { openV2AesGcm, sealV2AesGcm } from './v2-aes-gcm.js';
 import {
   decodeCbor,
   encodeCbor,
@@ -10,22 +11,6 @@ import {
 import type { V2RelationshipRecord } from './v2-types.js';
 
 const encoder = new TextEncoder();
-
-function arrayBuffer(value: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(value).buffer;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(
-    parts.reduce((length, part) => length + part.byteLength, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.byteLength;
-  }
-  return result;
-}
 
 function additionalData(relationshipId: string): Uint8Array {
   return encoder.encode(`dud/v2/relationship-state|${relationshipId}`);
@@ -66,25 +51,12 @@ export async function encryptV2RelationshipState(
   if (nonce.byteLength !== 12) {
     throw new Error('V2 random source returned an invalid nonce.');
   }
-  const key = await crypto.subtle.importKey(
-    'raw',
-    arrayBuffer(deploymentKey),
-    'AES-GCM',
-    false,
-    ['encrypt'],
+  return sealV2AesGcm(
+    deploymentKey,
+    nonce,
+    additionalData(record.relationshipId),
+    value(record),
   );
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: 'AES-GCM',
-        iv: arrayBuffer(nonce),
-        additionalData: arrayBuffer(additionalData(record.relationshipId)),
-      },
-      key,
-      arrayBuffer(value(record)),
-    ),
-  );
-  return concat(nonce, ciphertext);
 }
 
 export async function decryptV2RelationshipState(
@@ -95,25 +67,12 @@ export async function decryptV2RelationshipState(
   if (deploymentKey.byteLength !== 32 || encryptedState.byteLength < 29) {
     throw new Error('Encrypted relationship state is invalid.');
   }
-  const key = await crypto.subtle.importKey(
-    'raw',
-    arrayBuffer(deploymentKey),
-    'AES-GCM',
-    false,
-    ['decrypt'],
-  );
   let decoded: Map<number, CborValue>;
   try {
-    const plaintext = new Uint8Array(
-      await crypto.subtle.decrypt(
-        {
-          name: 'AES-GCM',
-          iv: arrayBuffer(encryptedState.subarray(0, 12)),
-          additionalData: arrayBuffer(additionalData(relationshipId)),
-        },
-        key,
-        arrayBuffer(encryptedState.subarray(12)),
-      ),
+    const plaintext = await openV2AesGcm(
+      deploymentKey,
+      encryptedState,
+      additionalData(relationshipId),
     );
     const raw = decodeCbor(plaintext);
     if (!(raw instanceof Map)) {

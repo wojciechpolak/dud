@@ -67,6 +67,37 @@ function deleteOperationForDelivery(
   }
 }
 
+/**
+ * Moves chunk body keys into `expiredBodyKeys` until it reaches `limit`.
+ * Reports whether every part was drained; a partly drained delivery resumes
+ * on the next pass.
+ */
+function drainBodyKeys(
+  parts: { key: string }[],
+  limit: number,
+  expiredBodyKeys: string[],
+): boolean {
+  while (parts.length > 0 && expiredBodyKeys.length < limit) {
+    expiredBodyKeys.push(parts.shift()!.key);
+  }
+  return parts.length === 0;
+}
+
+function releaseDeliveryQuota(
+  state: MemoryV2MaintenanceState,
+  id: string,
+  delivery: { relationshipId: string; payloadLength: number },
+): void {
+  const account = state.quotaAccounts.get(delivery.relationshipId);
+  if (!account) {
+    return;
+  }
+  account.committedBytes -= delivery.payloadLength;
+  if (state.deliveryObjects.delete(id)) {
+    account.objectCount--;
+  }
+}
+
 function expireDeliveries(
   state: MemoryV2MaintenanceState,
   now: number,
@@ -82,20 +113,11 @@ function expireDeliveries(
       continue;
     }
     const chunked = delivery.parts !== undefined;
-    while (delivery.parts?.length && expiredBodyKeys.length < limit) {
-      expiredBodyKeys.push(delivery.parts.shift()!.key);
-    }
-    if (delivery.parts?.length) {
+    if (!drainBodyKeys(delivery.parts ?? [], limit, expiredBodyKeys)) {
       break;
     }
     state.deliveries.delete(id);
-    const account = state.quotaAccounts.get(delivery.relationshipId);
-    if (account) {
-      account.committedBytes -= delivery.payloadLength;
-      if (state.deliveryObjects.delete(id)) {
-        account.objectCount--;
-      }
-    }
+    releaseDeliveryQuota(state, id, delivery);
     deleteOperationForDelivery(state.operations, id);
     expiredDeliveryIds.push(id);
     if (!chunked) {
@@ -163,6 +185,34 @@ function expireStagedBodies(
   }
 }
 
+/**
+ * Releases an expired upload's parts in order: a received part's body, or the
+ * staged chunk of an uncommitted upload. It stops before a key that would
+ * overflow `limit` and reports whether every part was released.
+ */
+function drainChunkUploadParts(
+  upload: V2ChunkUpload,
+  limit: number,
+  expiredBodyKeys: string[],
+): boolean {
+  while (upload.parts.length > 0) {
+    const part = upload.parts[0]!;
+    const bodyKey =
+      part.bodyKey ??
+      (upload.committedAt === undefined
+        ? v2StagedChunkKey(upload.id, part.id)
+        : undefined);
+    if (bodyKey !== undefined) {
+      if (expiredBodyKeys.length >= limit) {
+        return false;
+      }
+      expiredBodyKeys.push(bodyKey);
+    }
+    upload.parts.shift();
+  }
+  return true;
+}
+
 function expireChunkUploads(
   state: MemoryV2MaintenanceState,
   now: number,
@@ -177,20 +227,8 @@ function expireChunkUploads(
     if (upload.expiresAt > now) {
       continue;
     }
-    while (upload.parts.length > 0) {
-      const part = upload.parts[0]!;
-      const bodyKey =
-        part.bodyKey ??
-        (upload.committedAt === undefined
-          ? v2StagedChunkKey(upload.id, part.id)
-          : undefined);
-      if (bodyKey !== undefined && expiredBodyKeys.length >= limit) {
-        return expired;
-      }
-      upload.parts.shift();
-      if (bodyKey !== undefined) {
-        expiredBodyKeys.push(bodyKey);
-      }
+    if (!drainChunkUploadParts(upload, limit, expiredBodyKeys)) {
+      return expired;
     }
     state.chunkUploads.delete(id);
     state.chunkRenewals.delete(id);

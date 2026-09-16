@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { concatBytes, toArrayBuffer } from './bytes.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { Chacha20Poly1305 } from '@hpke/chacha20poly1305';
 import { CipherSuite, HkdfSha256 } from '@hpke/core';
@@ -11,22 +12,6 @@ const AGE_HYBRID_LABEL = textEncoder.encode(
   'age-encryption.org/mlkem768x25519',
 );
 const AGE_CHUNK_SIZE = 64 * 1024;
-
-function arrayBuffer(value: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(value).buffer;
-}
-
-function concat(...parts: Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(
-    parts.reduce((length, part) => length + part.byteLength, 0),
-  );
-  let offset = 0;
-  for (const part of parts) {
-    output.set(part, offset);
-    offset += part.byteLength;
-  }
-  return output;
-}
 
 function base64Raw(value: Uint8Array): string {
   let binary = '';
@@ -43,7 +28,7 @@ async function hkdf(
 ): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     'raw',
-    arrayBuffer(input),
+    toArrayBuffer(input),
     'HKDF',
     false,
     ['deriveBits'],
@@ -53,8 +38,8 @@ async function hkdf(
       {
         name: 'HKDF',
         hash: 'SHA-256',
-        salt: arrayBuffer(salt),
-        info: arrayBuffer(textEncoder.encode(info)),
+        salt: toArrayBuffer(salt),
+        info: toArrayBuffer(textEncoder.encode(info)),
       },
       key,
       256,
@@ -65,13 +50,13 @@ async function hkdf(
 async function hmac(keyBytes: Uint8Array, body: Uint8Array) {
   const key = await crypto.subtle.importKey(
     'raw',
-    arrayBuffer(keyBytes),
+    toArrayBuffer(keyBytes),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign'],
   );
   return new Uint8Array(
-    await crypto.subtle.sign('HMAC', key, arrayBuffer(body)),
+    await crypto.subtle.sign('HMAC', key, toArrayBuffer(body)),
   );
 }
 
@@ -97,7 +82,7 @@ function encryptAgePayload(
         new Uint8Array(),
       ),
     );
-    return concat(...chunks);
+    return concatBytes(...chunks);
   }
   for (let offset = 0, index = 0; offset < plaintext.byteLength; index++) {
     const end = Math.min(offset + AGE_CHUNK_SIZE, plaintext.byteLength);
@@ -109,7 +94,7 @@ function encryptAgePayload(
     );
     offset = end;
   }
-  return concat(...chunks);
+  return concatBytes(...chunks);
 }
 
 /**
@@ -141,7 +126,7 @@ export async function encryptV2AgeGrant(
   });
   const publicKey = await suite.kem.importKey(
     'raw',
-    arrayBuffer(recipient),
+    toArrayBuffer(recipient),
     true,
   );
   const sender = await suite.createSenderContext({
@@ -159,10 +144,10 @@ export async function encryptV2AgeGrant(
   );
   const headerKey = await hkdf(fileKey, new Uint8Array(), 'header');
   const mac = await hmac(headerKey, headerWithoutMac);
-  const header = concat(
+  const header = concatBytes(
     headerWithoutMac,
     textEncoder.encode(` ${base64Raw(mac)}\n`),
   );
   const streamKey = await hkdf(fileKey, nonce, 'payload');
-  return concat(header, nonce, encryptAgePayload(plaintext, streamKey));
+  return concatBytes(header, nonce, encryptAgePayload(plaintext, streamKey));
 }

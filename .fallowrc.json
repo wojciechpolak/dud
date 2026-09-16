@@ -163,5 +163,15 @@
   "duplicates": {
     "minOccurrences": 3
   },
+  "health": {
+    "coverage": "coverage/fallow/coverage-final.json",
+    "thresholdOverrides": [
+      {
+        "files": ["tests/**"],
+        "maxCrap": 1000000,
+        "reason": "Test code is what exercises the rest of the tree; no suite measures coverage of the tests themselves, so a CRAP score there has no coverage to weigh. Complexity limits still apply."
+      }
+    ]
+  },
   "rules": {}
 }

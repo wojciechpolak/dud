@@ -18,8 +18,16 @@ import {
 import { createV2PairingHandlers } from './v2-pairing.js';
 import type { V2PairingRepository } from './v2-d1-pairing-repository.js';
 import { createV2ReissueHandler } from './v2-reissue.js';
+import {
+  sortV2RelationshipTuples,
+  type V2RelationshipStatus,
+} from './v2-relationship-status.js';
 import { createV2ResetHandler } from './v2-reset.js';
-import { V2_CHUNK_LIMITS, V2_SERVER_FEATURES } from './v2-contract.js';
+import {
+  V2_CHUNK_LIMITS,
+  V2_LIMIT,
+  V2_SERVER_FEATURES,
+} from './v2-contract.js';
 import {
   createV2DeliveryHandler,
   type V2RejectionObserver,
@@ -215,19 +223,25 @@ function v2Capabilities(
   enrollmentGated: boolean,
 ): Response {
   const limitMap = new Map<number, CborValue>([
-    [1, limits.maxObjectBytes],
-    [2, limits.maxDescriptorBytes],
-    [3, limits.maxTtlSeconds],
-    [4, limits.maxPendingDeliveries],
-    [5, limits.maxObjectsPerCapability],
-    [6, limits.maxConcurrentUploads],
-    [7, limits.maxRequestsPerMinute],
-    [8, limits.maxStagedBytes],
-    [9, limits.maxPairingEnvelopeBytes],
-    [10, V2_CHUNK_LIMITS.maxChunkCiphertextBytes],
-    [11, V2_CHUNK_LIMITS.maxChunksPerDelivery],
-    [12, V2_CHUNK_LIMITS.maxChunkedPlaintextBytes],
-    [13, V2_CHUNK_LIMITS.maxUploadLeaseSeconds],
+    [V2_LIMIT.maxPayloadBytes, limits.maxObjectBytes],
+    [V2_LIMIT.maxDescriptorBytes, limits.maxDescriptorBytes],
+    [V2_LIMIT.maxTtlSeconds, limits.maxTtlSeconds],
+    [V2_LIMIT.maxPendingDeliveries, limits.maxPendingDeliveries],
+    [V2_LIMIT.maxDeliveriesPerCapability, limits.maxObjectsPerCapability],
+    [V2_LIMIT.maxConcurrentDeliveries, limits.maxConcurrentUploads],
+    [V2_LIMIT.maxProofsPerMinute, limits.maxRequestsPerMinute],
+    [V2_LIMIT.maxStagedBytes, limits.maxStagedBytes],
+    [V2_LIMIT.maxPairingEnvelopeBytes, limits.maxPairingEnvelopeBytes],
+    [V2_LIMIT.maxChunkCiphertextBytes, V2_CHUNK_LIMITS.maxChunkCiphertextBytes],
+    [V2_LIMIT.maxChunksPerDelivery, V2_CHUNK_LIMITS.maxChunksPerDelivery],
+    [
+      V2_LIMIT.maxChunkedPlaintextBytes,
+      V2_CHUNK_LIMITS.maxChunkedPlaintextBytes,
+    ],
+    [
+      V2_LIMIT.maxChunkUploadLeaseSeconds,
+      V2_CHUNK_LIMITS.maxUploadLeaseSeconds,
+    ],
   ]);
   return v2CborResponse(
     new Map<number, CborValue>([
@@ -246,6 +260,169 @@ function v2Capabilities(
           [2, 0],
           [3, enrollmentGated ? 1 : 0],
         ]),
+      ],
+    ]),
+  );
+}
+
+type WholeState = Awaited<ReturnType<V2Store['readState']>>;
+
+function requestErrorResponse(error: unknown, fallback: string): Response {
+  return v2ErrorResponse(
+    error instanceof V2RequestError ? error.code : 1,
+    error instanceof Error ? error.message : fallback,
+  );
+}
+
+/** The 16-byte relationship ID at key 1 as hex, or undefined when malformed. */
+function relationshipIdField(map: Map<number, CborValue>): string | undefined {
+  const relationship = map.get(1);
+  return relationship instanceof Uint8Array && relationship.byteLength === 16
+    ? bytesToHex(relationship)
+    : undefined;
+}
+
+/**
+ * The optional direction (key 2) and scope (key 3) that narrow a revocation.
+ * Only the keys present in the request appear in the result.
+ */
+function revocationTarget(map: Map<number, CborValue>): {
+  direction?: V2Direction;
+  scope?: V2Scope;
+} {
+  const target: { direction?: V2Direction; scope?: V2Scope } = {};
+  if (map.has(2)) {
+    target.direction = parseDirection(map.get(2));
+  }
+  if (map.has(3)) {
+    const scope = map.get(3);
+    if (!isV2Scope(scope)) {
+      throw new V2RequestError(1, 'Capability scope is invalid.');
+    }
+    target.scope = scope;
+  }
+  return target;
+}
+
+/**
+ * Records a revocation for the relationship, narrowed by any direction and
+ * scope, and revokes every stored capability it covers.
+ */
+function revokeInWholeState(
+  state: WholeState,
+  relationshipId: string,
+  target: { direction?: V2Direction; scope?: V2Scope },
+  current: number,
+): void {
+  state.revocations[
+    revocationKey(relationshipId, target.direction, target.scope)
+  ] = {
+    relationshipId,
+    ...target,
+    revoked: true,
+    rotatedAt: current,
+  };
+  for (const capability of Object.values(state.capabilities)) {
+    if (
+      capability.relationshipId === relationshipId &&
+      (!target.direction || capability.direction === target.direction) &&
+      (!target.scope || capability.scope === target.scope)
+    ) {
+      capability.revoked = true;
+      capability.rotatedAt = current;
+    }
+  }
+}
+
+/**
+ * Revokes the capabilities of one exact tuple and leaves the tuple itself
+ * unrevoked, so the peers can pair a fresh capability for it. Reports whether
+ * any capability matched.
+ */
+function rotateInWholeState(
+  state: WholeState,
+  relationshipId: string,
+  direction: V2Direction,
+  scope: V2Scope,
+  current: number,
+): boolean {
+  let found = false;
+  for (const capability of Object.values(state.capabilities)) {
+    if (
+      capability.relationshipId === relationshipId &&
+      capability.direction === direction &&
+      capability.scope === scope
+    ) {
+      capability.revoked = true;
+      capability.rotatedAt = current;
+      found = true;
+    }
+  }
+  state.revocations[revocationKey(relationshipId, direction, scope)] = {
+    relationshipId,
+    direction,
+    scope,
+    revoked: false,
+    rotatedAt: current,
+  };
+  return found;
+}
+
+/**
+ * Status of every tuple the whole-state store knows for a relationship, from
+ * its capabilities and then its tuple revocations, ordered by tuple.
+ */
+function wholeStateRelationshipStatus(
+  state: WholeState,
+  relationshipId: string,
+): V2RelationshipStatus {
+  const fullyRevoked =
+    state.revocations[revocationKey(relationshipId)]?.revoked === true;
+  const tuples = new Map<string, V2RelationshipStatus['tuples'][number]>();
+  for (const capability of Object.values(state.capabilities)) {
+    if (capability.relationshipId !== relationshipId) {
+      continue;
+    }
+    tuples.set(`${capability.direction}|${capability.scope}`, {
+      direction: capability.direction,
+      scope: capability.scope,
+      revoked:
+        fullyRevoked || capabilityIsRevoked(capability, state.revocations),
+      rotatedAt: capability.rotatedAt,
+    });
+  }
+  for (const revocation of Object.values(state.revocations)) {
+    if (
+      revocation.relationshipId === relationshipId &&
+      revocation.direction &&
+      revocation.scope
+    ) {
+      tuples.set(`${revocation.direction}|${revocation.scope}`, {
+        direction: revocation.direction,
+        scope: revocation.scope,
+        revoked: revocation.revoked,
+        rotatedAt: revocation.rotatedAt,
+      });
+    }
+  }
+  return { fullyRevoked, tuples: sortV2RelationshipTuples(tuples.values()) };
+}
+
+function relationshipStatusResponse(status: V2RelationshipStatus): Response {
+  return v2CborResponse(
+    new Map<number, CborValue>([
+      [1, status.fullyRevoked],
+      [
+        2,
+        status.tuples.map(
+          (tuple) =>
+            new Map<number, CborValue>([
+              [1, directionNumber(tuple.direction)],
+              [2, tuple.scope],
+              [3, tuple.revoked],
+              [4, tuple.rotatedAt],
+            ]),
+        ),
       ],
     ]),
   );
@@ -372,78 +549,65 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
     }
   }
 
-  async function revokeRelationship(request: Request): Promise<Response> {
+  /**
+   * Authorizes an administrative request and decodes its CBOR map, or returns
+   * the response that refuses it.
+   */
+  async function adminRequestMap(
+    request: Request,
+    allowedKeys: readonly number[],
+    requiredKeys: readonly number[],
+    fallback: string,
+  ): Promise<Map<number, CborValue> | Response> {
     const authorizationFailure = await requireAdminAuthorization(request);
     if (authorizationFailure) {
       return authorizationFailure;
     }
-    let map: Map<number, CborValue>;
     try {
-      map = requireCborMap(await adminBody(request), [1, 2, 3], [1]);
-    } catch (error) {
-      return v2ErrorResponse(
-        error instanceof V2RequestError ? error.code : 1,
-        error instanceof Error ? error.message : 'Invalid revocation request.',
+      return requireCborMap(
+        await adminBody(request),
+        allowedKeys,
+        requiredKeys,
       );
+    } catch (error) {
+      return requestErrorResponse(error, fallback);
     }
-    const relationship = map.get(1);
-    if (
-      !(relationship instanceof Uint8Array) ||
-      relationship.byteLength !== 16
-    ) {
+  }
+
+  async function revokeRelationship(request: Request): Promise<Response> {
+    const map = await adminRequestMap(
+      request,
+      [1, 2, 3],
+      [1],
+      'Invalid revocation request.',
+    );
+    if (map instanceof Response) {
+      return map;
+    }
+    const relationshipId = relationshipIdField(map);
+    if (!relationshipId) {
       return v2ErrorResponse(1, 'Relationship ID is invalid.');
     }
-    let direction: V2Direction | undefined;
-    let scope: V2Scope | undefined;
+    let target: { direction?: V2Direction; scope?: V2Scope };
     try {
-      if (map.has(2)) {
-        direction = parseDirection(map.get(2));
-      }
-      if (map.has(3)) {
-        const rawScope = map.get(3);
-        if (!isV2Scope(rawScope)) {
-          throw new V2RequestError(1, 'Capability scope is invalid.');
-        }
-        scope = rawScope;
-      }
+      target = revocationTarget(map);
     } catch (error) {
-      return v2ErrorResponse(
-        error instanceof V2RequestError ? error.code : 1,
-        error instanceof Error ? error.message : 'Invalid revocation request.',
-      );
+      return requestErrorResponse(error, 'Invalid revocation request.');
     }
-    const relationshipId = bytesToHex(relationship);
     const current = seconds(now());
     const administrator = administrativeRepository(dependencies.repository);
     if (administrator) {
       await administrator.revokeRelationship({
         relationshipId,
-        ...(direction ? { direction } : {}),
-        ...(scope ? { scope } : {}),
+        ...target,
         now: current,
       });
       return v2EmptyResponse();
     }
     try {
-      await dependencies.store.transaction((state) => {
-        state.revocations[revocationKey(relationshipId, direction, scope)] = {
-          relationshipId,
-          ...(direction ? { direction } : {}),
-          ...(scope ? { scope } : {}),
-          revoked: true,
-          rotatedAt: current,
-        };
-        for (const capability of Object.values(state.capabilities)) {
-          if (
-            capability.relationshipId === relationshipId &&
-            (!direction || capability.direction === direction) &&
-            (!scope || capability.scope === scope)
-          ) {
-            capability.revoked = true;
-            capability.rotatedAt = current;
-          }
-        }
-      });
+      await dependencies.store.transaction((state) =>
+        revokeInWholeState(state, relationshipId, target, current),
+      );
     } catch {
       return v2ErrorResponse(4, 'Capability scope is not available.');
     }
@@ -451,26 +615,18 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
   }
 
   async function rotateCapability(request: Request): Promise<Response> {
-    const authorizationFailure = await requireAdminAuthorization(request);
-    if (authorizationFailure) {
-      return authorizationFailure;
+    const map = await adminRequestMap(
+      request,
+      [1, 2, 3],
+      [1, 2, 3],
+      'Invalid rotation request.',
+    );
+    if (map instanceof Response) {
+      return map;
     }
-    let map: Map<number, CborValue>;
-    try {
-      map = requireCborMap(await adminBody(request), [1, 2, 3], [1, 2, 3]);
-    } catch (error) {
-      return v2ErrorResponse(
-        error instanceof V2RequestError ? error.code : 1,
-        error instanceof Error ? error.message : 'Invalid rotation request.',
-      );
-    }
-    const relationship = map.get(1);
-    const rawScope = map.get(3);
-    if (
-      !(relationship instanceof Uint8Array) ||
-      relationship.byteLength !== 16 ||
-      !isV2Scope(rawScope)
-    ) {
+    const relationshipId = relationshipIdField(map);
+    const scope = map.get(3);
+    if (!relationshipId || !isV2Scope(scope)) {
       return v2ErrorResponse(1, 'Rotation target is invalid.');
     }
     let direction: V2Direction;
@@ -482,44 +638,24 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
         error instanceof Error ? error.message : 'Direction is invalid.',
       );
     }
-    const relationshipId = bytesToHex(relationship);
     const current = seconds(now());
     const administrator = administrativeRepository(dependencies.repository);
+    let found: boolean;
     if (administrator) {
-      return (await administrator.rotateCapability({
+      found = await administrator.rotateCapability({
         relationshipId,
         direction,
-        scope: rawScope,
+        scope,
         now: current,
-      }))
-        ? v2EmptyResponse()
-        : v2ErrorResponse(4, 'Capability tuple is not available.');
-    }
-    let found = false;
-    try {
-      await dependencies.store.transaction((state) => {
-        for (const capability of Object.values(state.capabilities)) {
-          if (
-            capability.relationshipId === relationshipId &&
-            capability.direction === direction &&
-            capability.scope === rawScope
-          ) {
-            capability.revoked = true;
-            capability.rotatedAt = current;
-            found = true;
-          }
-        }
-        state.revocations[revocationKey(relationshipId, direction, rawScope)] =
-          {
-            relationshipId,
-            direction,
-            scope: rawScope,
-            revoked: false,
-            rotatedAt: current,
-          };
       });
-    } catch {
-      return v2ErrorResponse(4, 'Capability scope is not available.');
+    } else {
+      try {
+        found = await dependencies.store.transaction((state) =>
+          rotateInWholeState(state, relationshipId, direction, scope, current),
+        );
+      } catch {
+        return v2ErrorResponse(4, 'Capability scope is not available.');
+      }
     }
     return found
       ? v2EmptyResponse()
@@ -527,94 +663,35 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
   }
 
   async function relationshipStatus(request: Request): Promise<Response> {
-    const authorizationFailure = await requireAdminAuthorization(request);
-    if (authorizationFailure) {
-      return authorizationFailure;
+    const map = await adminRequestMap(
+      request,
+      [1],
+      [1],
+      'Invalid status request.',
+    );
+    if (map instanceof Response) {
+      return map;
     }
-    let map: Map<number, CborValue>;
-    try {
-      map = requireCborMap(await adminBody(request), [1], [1]);
-    } catch (error) {
-      return v2ErrorResponse(
-        error instanceof V2RequestError ? error.code : 1,
-        error instanceof Error ? error.message : 'Invalid status request.',
-      );
-    }
-    const relationship = map.get(1);
-    if (
-      !(relationship instanceof Uint8Array) ||
-      relationship.byteLength !== 16
-    ) {
+    const relationshipId = relationshipIdField(map);
+    if (!relationshipId) {
       return v2ErrorResponse(1, 'Relationship ID is invalid.');
     }
-    const relationshipId = bytesToHex(relationship);
     const administrator = administrativeRepository(dependencies.repository);
-    if (administrator) {
-      const status = await administrator.relationshipStatus(relationshipId);
-      return v2CborResponse(
-        new Map<number, CborValue>([
-          [1, status.fullyRevoked],
-          [
-            2,
-            status.tuples.map(
-              (tuple) =>
-                new Map<number, CborValue>([
-                  [1, directionNumber(tuple.direction)],
-                  [2, tuple.scope],
-                  [3, tuple.revoked],
-                  [4, tuple.rotatedAt],
-                ]),
-            ),
-          ],
-        ]),
-      );
-    }
-    const state = await dependencies.store.readState();
-    const fullyRevoked =
-      state.revocations[revocationKey(relationshipId)]?.revoked === true;
-    const tuples = new Map<string, V2RevocationRecord>();
-    for (const capability of Object.values(state.capabilities)) {
-      if (capability.relationshipId !== relationshipId) {
-        continue;
-      }
-      tuples.set(`${capability.direction}|${capability.scope}`, {
-        relationshipId,
-        direction: capability.direction,
-        scope: capability.scope,
-        revoked:
-          fullyRevoked || capabilityIsRevoked(capability, state.revocations),
-        rotatedAt: capability.rotatedAt,
-      });
-    }
-    for (const revocation of Object.values(state.revocations)) {
-      if (
-        revocation.relationshipId === relationshipId &&
-        revocation.direction &&
-        revocation.scope
-      ) {
-        tuples.set(`${revocation.direction}|${revocation.scope}`, revocation);
-      }
-    }
-    const rendered: CborValue[] = Array.from(tuples.values())
-      .sort((a, b) =>
-        `${a.direction}|${a.scope}`.localeCompare(`${b.direction}|${b.scope}`),
-      )
-      .map(
-        (tuple) =>
-          new Map<number, CborValue>([
-            [1, directionNumber(tuple.direction!)],
-            [2, tuple.scope!],
-            [3, tuple.revoked],
-            [4, tuple.rotatedAt],
-          ]),
-      );
-    return v2CborResponse(
-      new Map<number, CborValue>([
-        [1, fullyRevoked],
-        [2, rendered],
-      ]),
+    return relationshipStatusResponse(
+      administrator
+        ? await administrator.relationshipStatus(relationshipId)
+        : wholeStateRelationshipStatus(
+            await dependencies.store.readState(),
+            relationshipId,
+          ),
     );
   }
+
+  const adminRoutes = new Map<string, (request: Request) => Promise<Response>>([
+    ['/v2/admin/relationships/revoke', revokeRelationship],
+    ['/v2/admin/relationships/rotate-capabilities', rotateCapability],
+    ['/v2/admin/relationships/status', relationshipStatus],
+  ]);
 
   const pairing = createV2PairingHandlers({
     store: dependencies.store,
@@ -703,10 +780,7 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
     try {
       origin = canonicalRequestOrigin(request);
     } catch (error) {
-      return v2ErrorResponse(
-        error instanceof V2RequestError ? error.code : 1,
-        error instanceof Error ? error.message : 'Invalid v2 request origin.',
-      );
+      return requestErrorResponse(error, 'Invalid v2 request origin.');
     }
 
     if (request.method === 'GET' && url.pathname === '/v2/capabilities') {
@@ -737,28 +811,14 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
     if (resetResponse) {
       return resetResponse;
     }
-    if (
-      request.method === 'POST' &&
-      url.pathname === '/v2/admin/relationships/revoke'
-    ) {
-      return revokeRelationship(request);
+    if (request.method !== 'POST') {
+      return v2ErrorResponse(4, 'V2 endpoint is not available.');
     }
-    if (
-      request.method === 'POST' &&
-      url.pathname === '/v2/admin/relationships/rotate-capabilities'
-    ) {
-      return rotateCapability(request);
+    const adminRoute = adminRoutes.get(url.pathname);
+    if (adminRoute) {
+      return adminRoute(request);
     }
-    if (
-      request.method === 'POST' &&
-      url.pathname === '/v2/admin/relationships/status'
-    ) {
-      return relationshipStatus(request);
-    }
-    if (
-      request.method === 'POST' &&
-      url.pathname === '/v2/capabilities/reissue'
-    ) {
+    if (url.pathname === '/v2/capabilities/reissue') {
       return reissue(request, origin, sourceKey);
     }
     return v2ErrorResponse(4, 'V2 endpoint is not available.');

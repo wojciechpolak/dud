@@ -2,9 +2,8 @@
 // Copyright (C) 2026 Wojciech Polak
 
 import type { BlobObject } from './types.js';
-import type { V2Direction } from './v2-types.js';
+import type { V2Direction, V2Scope } from './v2-types.js';
 
-export type V2DeliveryScope = 'write' | 'read' | 'ack';
 export type V2DeliveryState = 'reserved' | 'published' | 'completed';
 
 /**
@@ -36,10 +35,36 @@ export function isV2OperationConflict(error: unknown): boolean {
   );
 }
 
-export interface V2CapabilityLookup {
-  lookupId: Uint8Array;
-  epoch: number;
-  capabilityId: string;
+/**
+ * Checks the fields of a chunk upload lease that do not depend on stored
+ * state. Every repository applies it before touching storage, and each still
+ * bounds the lease by its capability's own expiry.
+ */
+export function isV2ChunkUploadLeaseWellFormed(
+  input: Pick<
+    Parameters<V2Repository['createChunkUpload']>[0],
+    | 'chain'
+    | 'slot'
+    | 'epoch'
+    | 'now'
+    | 'expiresAt'
+    | 'totalLength'
+    | 'maximumConcurrentUploads'
+    | 'maximumStagedBytes'
+  >,
+): boolean {
+  return (
+    input.expiresAt > input.now &&
+    Number.isSafeInteger(input.chain) &&
+    input.chain >= 0 &&
+    input.slot.byteLength === 16 &&
+    Number.isSafeInteger(input.epoch) &&
+    input.epoch >= 0 &&
+    Number.isSafeInteger(input.maximumConcurrentUploads) &&
+    input.maximumConcurrentUploads >= 1 &&
+    Number.isSafeInteger(input.maximumStagedBytes) &&
+    input.maximumStagedBytes >= input.totalLength
+  );
 }
 
 export interface V2AdministrativeRepository {
@@ -56,20 +81,20 @@ export interface V2AdministrativeRepository {
   revokeRelationship(input: {
     relationshipId: string;
     direction?: V2Direction;
-    scope?: V2DeliveryScope;
+    scope?: V2Scope;
     now: number;
   }): Promise<void>;
   rotateCapability(input: {
     relationshipId: string;
     direction: V2Direction;
-    scope: V2DeliveryScope;
+    scope: V2Scope;
     now: number;
   }): Promise<boolean>;
   relationshipStatus(relationshipId: string): Promise<{
     fullyRevoked: boolean;
     tuples: Array<{
       direction: V2Direction;
-      scope: V2DeliveryScope;
+      scope: V2Scope;
       revoked: boolean;
       rotatedAt: number;
     }>;
@@ -172,7 +197,7 @@ export interface V2RepositoryCapability {
   id: string;
   relationshipId: string;
   direction: V2Direction;
-  scope: V2DeliveryScope;
+  scope: V2Scope;
   encryptedTokenSecret: string;
   createdAt: number;
   expiresAt: number;
@@ -247,6 +272,30 @@ export interface V2RepositoryAuthorization {
     expiresAt: number;
   }[];
   maximumRequestsPerMinute: number;
+}
+
+/**
+ * Counts the proofs each capability spends in one request. A request that
+ * repeats a (capability, nonce) pair returns null: the second copy would be a
+ * replay of the first, so no repository may admit it.
+ */
+export function countV2AuthorizationClaims(
+  claims: V2RepositoryAuthorization['claims'],
+): Map<string, number> | null {
+  const keys = new Set(
+    claims.map(
+      ({ capabilityId, nonce }) =>
+        `${capabilityId}:${Array.from(nonce).join(',')}`,
+    ),
+  );
+  if (keys.size !== claims.length) {
+    return null;
+  }
+  const counts = new Map<string, number>();
+  for (const { capabilityId } of claims) {
+    counts.set(capabilityId, (counts.get(capabilityId) ?? 0) + 1);
+  }
+  return counts;
 }
 
 export interface V2ChunkUploadPart extends V2BodyPartDeclaration {

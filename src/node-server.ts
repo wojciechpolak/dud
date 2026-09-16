@@ -459,22 +459,53 @@ async function listen(server: any, host: string, port: number): Promise<void> {
   });
 }
 
+/**
+ * The peer-mode metadata and body stores a server runs with: the injected
+ * ones, or the on-disk defaults when peers are enabled.
+ */
+function nodeV2Storage(
+  config: NodeServerConfig,
+  v2Enabled: boolean,
+  options: NodeServerOptions,
+): { repository?: V2Repository; bodyStore?: V2BodyStore } {
+  return {
+    repository:
+      options.v2Repository ??
+      (v2Enabled ? new SQLiteV2Repository(config.dataDir) : undefined),
+    bodyStore:
+      options.v2BodyStore ??
+      (v2Enabled ? new FilesystemV2BodyStore(config.dataDir) : undefined),
+  };
+}
+
+async function createNodeServer(
+  config: NodeServerConfig,
+  handler: (req: any, res: any) => Promise<void>,
+): Promise<any> {
+  if (!config.tlsCertFile || !config.tlsKeyFile) {
+    return createHttpServer(handler);
+  }
+  return createHttpsServer(
+    {
+      cert: await readFile(config.tlsCertFile),
+      key: await readFile(config.tlsKeyFile),
+      minVersion: 'TLSv1.3',
+    },
+    handler,
+  );
+}
+
 export async function startNodeServer(
   config: NodeServerConfig,
   options: NodeServerOptions = {},
 ): Promise<any> {
   const logger = options.logger ?? console;
   const serviceConfig = buildServiceConfig(config);
-  const repository =
-    options.v2Repository ??
-    (serviceConfig.v2Enabled
-      ? new SQLiteV2Repository(config.dataDir)
-      : undefined);
-  const bodyStore =
-    options.v2BodyStore ??
-    (serviceConfig.v2Enabled
-      ? new FilesystemV2BodyStore(config.dataDir)
-      : undefined);
+  const { repository, bodyStore } = nodeV2Storage(
+    config,
+    serviceConfig.v2Enabled,
+    options,
+  );
   if (repository && bodyStore) {
     await repository.initialize();
   }
@@ -483,50 +514,48 @@ export async function startNodeServer(
     ...(repository ? { v2Repository: repository } : {}),
     ...(bodyStore ? { v2BodyStore: bodyStore } : {}),
   });
-
-  const server =
-    config.tlsCertFile && config.tlsKeyFile
-      ? createHttpsServer(
-          {
-            cert: await readFile(config.tlsCertFile),
-            key: await readFile(config.tlsKeyFile),
-            minVersion: 'TLSv1.3',
-          },
-          handler,
-        )
-      : createHttpServer(handler);
+  const server = await createNodeServer(config, handler);
 
   const host = config.listenHost ?? '127.0.0.1';
   const port = config.listenPort ?? 8787;
   await listen(server, host, port);
 
-  const stopMaintenance =
-    repository && bodyStore
-      ? scheduleNodeV2Maintenance(
-          repository,
-          bodyStore,
-          options.now ?? (() => Date.now()),
-          serviceConfig.cleanupBatchSize,
-          logger,
-        )
-      : undefined;
-  server.once('close', () => stopMaintenance?.());
+  if (repository && bodyStore) {
+    const stopMaintenance = scheduleNodeV2Maintenance(
+      repository,
+      bodyStore,
+      options.now ?? (() => Date.now()),
+      serviceConfig.cleanupBatchSize,
+      logger,
+    );
+    server.once('close', () => stopMaintenance());
+  }
+  if (config.logMode !== 'silent') {
+    logListening(config, logger, server, host, port);
+  }
+  return server;
+}
 
+/** Logs the origin the server answers on, including an OS-assigned port. */
+function logListening(
+  config: NodeServerConfig,
+  logger: NonNullable<NodeServerOptions['logger']>,
+  server: any,
+  host: string,
+  port: number,
+): void {
   const address = server.address();
   const actualPort =
     typeof address === 'object' && address ? Number(address.port) : port;
-  const origin = `${config.tlsCertFile && config.tlsKeyFile ? 'https' : 'http'}://${host}:${actualPort}`;
-  if (config.logMode !== 'silent') {
-    logger.log(
-      formatEventLog(
-        config.logFormat ?? 'text',
-        'info',
-        'listening',
-        `DUD node server listening on ${origin}`,
-      ),
-    );
-  }
-  return server;
+  const scheme = config.tlsCertFile && config.tlsKeyFile ? 'https' : 'http';
+  logger.log(
+    formatEventLog(
+      config.logFormat ?? 'text',
+      'info',
+      'listening',
+      `DUD node server listening on ${scheme}://${host}:${actualPort}`,
+    ),
+  );
 }
 
 export function loadNodeServerConfig(

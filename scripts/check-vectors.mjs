@@ -17,6 +17,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const MODULE_DIR = 'tests/vectors/protocol-v2';
 const GOLDEN = path.join(MODULE_DIR, 'vectors.txt');
@@ -34,7 +35,7 @@ function die(message, detail) {
  * The first difference locates the change far better than a whole-file dump, so
  * report that line rather than every line downstream of it.
  */
-function firstDifference(expected, actual) {
+export function firstDifference(expected, actual) {
   const want = expected.split('\n');
   const got = actual.split('\n');
   for (let i = 0; i < Math.max(want.length, got.length); i += 1) {
@@ -49,47 +50,52 @@ function firstDifference(expected, actual) {
   return 'files differ only in trailing content';
 }
 
-if (!fs.existsSync(GOLDEN)) {
-  die(`${GOLDEN} is missing`);
-}
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  if (!fs.existsSync(GOLDEN)) {
+    die(`${GOLDEN} is missing`);
+  }
 
-const run = spawnSync('go', ['run', '.'], {
-  cwd: MODULE_DIR,
-  encoding: 'utf8',
-  env: {
-    ...process.env,
-    GOCACHE: process.env.GOCACHE ?? '/tmp/dud-go-build-cache',
-  },
-  maxBuffer: 32 * 1024 * 1024,
-});
+  const run = spawnSync('go', ['run', '.'], {
+    cwd: MODULE_DIR,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GOCACHE: process.env.GOCACHE ?? '/tmp/dud-go-build-cache',
+    },
+    maxBuffer: 32 * 1024 * 1024,
+  });
 
-if (run.error) {
-  die(`could not run the generator in ${MODULE_DIR}`, String(run.error));
-}
-if (run.status !== 0) {
-  die(
-    `the generator failed with exit code ${run.status}; the specification and the code disagree`,
-    run.stderr,
+  if (run.error) {
+    die(`could not run the generator in ${MODULE_DIR}`, String(run.error));
+  }
+  if (run.status !== 0) {
+    die(
+      `the generator failed with exit code ${run.status}; the specification and the code disagree`,
+      run.stderr,
+    );
+  }
+
+  const generated = run.stdout;
+  const committed = fs.readFileSync(GOLDEN, 'utf8');
+
+  // The generator prints this only after every assertion has held. Its absence
+  // means a check was silently dropped from the generator.
+  if (!generated.includes(TERMINATOR)) {
+    die(`the generator did not print "${TERMINATOR}"`, generated.slice(-2000));
+  }
+
+  if (generated !== committed) {
+    die(
+      `${GOLDEN} is stale — regenerate it with:\n` +
+        `  cd ${MODULE_DIR} && go run . > vectors.txt`,
+      firstDifference(committed, generated),
+    );
+  }
+
+  console.log(
+    `check-vectors: ${GOLDEN} matches the generator (${committed.split('\n').length} lines)`,
   );
 }
-
-const generated = run.stdout;
-const committed = fs.readFileSync(GOLDEN, 'utf8');
-
-// The generator prints this only after every assertion has held. Its absence
-// means a check was silently dropped from the generator.
-if (!generated.includes(TERMINATOR)) {
-  die(`the generator did not print "${TERMINATOR}"`, generated.slice(-2000));
-}
-
-if (generated !== committed) {
-  die(
-    `${GOLDEN} is stale — regenerate it with:\n` +
-      `  cd ${MODULE_DIR} && go run . > vectors.txt`,
-    firstDifference(committed, generated),
-  );
-}
-
-console.log(
-  `check-vectors: ${GOLDEN} matches the generator (${committed.split('\n').length} lines)`,
-);

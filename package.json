@@ -40,6 +40,7 @@
     "check:docs": "node scripts/check-docs.mjs",
     "check:vectors": "node scripts/check-vectors.mjs",
     "tools:go": "./scripts/go-tools.sh",
+    "analyze:ts": "node scripts/test-coverage.mjs server && fallow",
     "analyze:go": "./scripts/go-analyze.sh",
     "analyze:go:gate": "./scripts/go-analyze.sh --gate",
     "analyze:go:pending": "./scripts/go-analyze.sh --pending",

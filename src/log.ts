@@ -13,8 +13,6 @@ import type { V2OperationTiming } from './v2-timing.js';
  */
 export type DudLogFormat = 'text' | 'json';
 
-export type DudLogMode = 'normal' | 'minimal' | 'silent';
-
 export interface DudAccessLogInput {
   method: string;
   /** Already passed through the path redactor. */

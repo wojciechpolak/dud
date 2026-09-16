@@ -10,6 +10,7 @@ import { bytesEqual } from './cbor.js';
 import { StreamingSha256 } from './sha256.js';
 import {
   v2BodyKeyKind,
+  v2CommittedBodyParts,
   v2DeliveryChunkKey,
   v2StagedChunkKey,
   validateV2BodyPartDeclarations,
@@ -55,12 +56,96 @@ async function fileMatches(
     const actual = await fileDigest(path);
     return actual.size === length && bytesEqual(actual.digest, digest);
   } catch (error) {
-    if ((error as { code?: string }).code === 'ENOENT') {
+    if (hasErrorCode(error, 'ENOENT')) {
       return false;
     }
     throw error;
   }
 }
+
+type Directory = Awaited<ReturnType<typeof opendir>>;
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (error as { code?: string }).code === code;
+}
+
+async function openDirectoryIfPresent(
+  path: string,
+): Promise<Directory | undefined> {
+  try {
+    return await opendir(path);
+  } catch (error) {
+    if (hasErrorCode(error, 'ENOENT')) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/** Yields the regular files in `directory` whose names match `pattern`. */
+async function* matchingFiles(
+  directory: Directory | undefined,
+  pattern: RegExp,
+): AsyncGenerator<string> {
+  if (!directory) {
+    return;
+  }
+  for await (const item of directory) {
+    if (item.isFile() && pattern.test(item.name)) {
+      yield item.name;
+    }
+  }
+}
+
+/** Yields the subdirectories of `directory` named by a 32-hex-digit ID. */
+async function* idDirectories(
+  directory: Directory | undefined,
+): AsyncGenerator<string> {
+  if (!directory) {
+    return;
+  }
+  for await (const item of directory) {
+    if (item.isDirectory() && ID_NAME.test(item.name)) {
+      yield item.name;
+    }
+  }
+}
+
+/**
+ * Streams a body into `file`, refusing it as soon as it outgrows its declared
+ * length and again at the end unless its length and digest both match.
+ */
+async function writeVerifiedBody(
+  file: { write(value: Uint8Array): Promise<unknown> },
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  expectedLength: number,
+  expectedDigest: Uint8Array,
+): Promise<void> {
+  const hasher = new StreamingSha256();
+  let length = 0;
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    const value: unknown = read.value;
+    if (!(value instanceof Uint8Array)) {
+      throw new Error('Delivery body chunk is invalid.');
+    }
+    length += value.byteLength;
+    if (length > expectedLength) {
+      throw new Error('Delivery body exceeds its declared length.');
+    }
+    hasher.update(value);
+    await file.write(value);
+  }
+  if (
+    length !== expectedLength ||
+    !bytesEqual(hasher.digest(), expectedDigest)
+  ) {
+    throw new Error('Delivery body does not match its declared digest.');
+  }
+}
+
+const ID_NAME = /^[a-f0-9]{32}$/;
+const BODY_FILE_NAME = /^[a-f0-9]{32}\.bin$/;
+const CHUNK_FILE_NAME = /^[a-f0-9]{32}\.age$/;
 
 const BODY_NAMESPACES = [
   ['deliveries', 'delivery-bodies'],
@@ -119,7 +204,7 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
       }
       throw new Error('Delivery body conflicts with an existing payload.');
     } catch (error) {
-      if ((error as { code?: string }).code !== 'ENOENT') {
+      if (!hasErrorCode(error, 'ENOENT')) {
         throw error;
       }
     }
@@ -175,7 +260,7 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
           await link(part.stagedPath, part.destinationPath);
         } catch (error) {
           if (
-            (error as { code?: string }).code !== 'EEXIST' ||
+            !hasErrorCode(error, 'EEXIST') ||
             !(await fileMatches(part.destinationPath, part.length, part.digest))
           ) {
             throw error;
@@ -184,12 +269,7 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
       }
       await rm(part.stagedPath, { force: true });
     }
-    return parts.map(({ id, length, digest, key }) => ({
-      id,
-      length,
-      digest: Uint8Array.from(digest),
-      key,
-    }));
+    return v2CommittedBodyParts(parts);
   }
 
   async put(
@@ -206,37 +286,17 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const file = await open(temporaryPath, 'wx', 0o600);
     const reader = body.getReader();
-    const hasher = new StreamingSha256();
-    let length = 0;
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
-        if (!(value instanceof Uint8Array)) {
-          throw new Error('Delivery body chunk is invalid.');
-        }
-        length += value.byteLength;
-        if (length > expectedLength) {
-          throw new Error('Delivery body exceeds its declared length.');
-        }
-        hasher.update(value);
-        await file.write(value);
-      }
-      if (
-        length !== expectedLength ||
-        !bytesEqual(hasher.digest(), expectedDigest)
-      ) {
-        throw new Error('Delivery body does not match its declared digest.');
-      }
+      await writeVerifiedBody(file, reader, expectedLength, expectedDigest);
       await file.sync();
       await file.close();
       try {
         await link(temporaryPath, path);
       } catch (error) {
+        // An existing body is accepted only when it holds the same bytes, so a
+        // retried upload is idempotent and a conflicting one is refused.
         if (
-          (error as { code?: string }).code !== 'EEXIST' ||
+          !hasErrorCode(error, 'EEXIST') ||
           !(await sameFileDigest(temporaryPath, path))
         ) {
           throw error;
@@ -263,7 +323,7 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
         size: info.size,
       };
     } catch (error) {
-      if ((error as { code?: string }).code === 'ENOENT') {
+      if (hasErrorCode(error, 'ENOENT')) {
         return null;
       }
       throw error;
@@ -275,7 +335,7 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
       await stat(this.pathForKey(key));
       return true;
     } catch (error) {
-      if ((error as { code?: string }).code === 'ENOENT') {
+      if (hasErrorCode(error, 'ENOENT')) {
         return false;
       }
       throw error;
@@ -304,12 +364,12 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
       throw new Error('Body inventory page limit is invalid.');
     }
     const page: V2BodyInventoryEntry[] = [];
-    const consider = async (key: string, path: string): Promise<void> => {
+    for await (const { key, path } of this.bodyFiles()) {
       if (input.cursor !== undefined && key <= input.cursor) {
-        return;
+        continue;
       }
       if (page.length === input.limit && key >= page[input.limit - 1]!.key) {
-        return;
+        continue;
       }
       const info = await stat(path);
       insertBounded(
@@ -321,92 +381,6 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
         },
         input.limit,
       );
-    };
-    for (const [prefix, namespace] of BODY_NAMESPACES) {
-      const directory = join(this.rootDir, 'v2', namespace);
-      let entries;
-      try {
-        entries = await opendir(directory);
-      } catch (error) {
-        if ((error as { code?: string }).code === 'ENOENT') {
-          continue;
-        }
-        throw error;
-      }
-      for await (const item of entries) {
-        if (!item.isFile() || !/^[a-f0-9]{32}\.bin$/.test(item.name)) {
-          continue;
-        }
-        const key = `${prefix}/${item.name}`;
-        await consider(key, join(directory, item.name));
-      }
-    }
-    const deliveryDirectory = join(this.rootDir, 'v2', 'delivery-bodies');
-    let deliveries;
-    try {
-      deliveries = await opendir(deliveryDirectory);
-    } catch (error) {
-      if ((error as { code?: string }).code !== 'ENOENT') {
-        throw error;
-      }
-    }
-    if (deliveries) {
-      for await (const delivery of deliveries) {
-        if (!delivery.isDirectory() || !/^[a-f0-9]{32}$/.test(delivery.name)) {
-          continue;
-        }
-        const chunksDirectory = join(
-          deliveryDirectory,
-          delivery.name,
-          'chunks',
-        );
-        let chunks;
-        try {
-          chunks = await opendir(chunksDirectory);
-        } catch (error) {
-          if ((error as { code?: string }).code === 'ENOENT') {
-            continue;
-          }
-          throw error;
-        }
-        for await (const chunk of chunks) {
-          if (!chunk.isFile() || !/^[a-f0-9]{32}\.age$/.test(chunk.name)) {
-            continue;
-          }
-          const key = `deliveries/${delivery.name}/chunks/${chunk.name}`;
-          await consider(key, join(chunksDirectory, chunk.name));
-        }
-      }
-    }
-    const uploadsDirectory = join(
-      this.rootDir,
-      'v2',
-      'delivery-staging',
-      'uploads',
-    );
-    let uploads;
-    try {
-      uploads = await opendir(uploadsDirectory);
-    } catch (error) {
-      if ((error as { code?: string }).code !== 'ENOENT') {
-        throw error;
-      }
-    }
-    if (uploads) {
-      for await (const upload of uploads) {
-        if (!upload.isDirectory() || !/^[a-f0-9]{32}$/.test(upload.name)) {
-          continue;
-        }
-        const uploadDirectory = join(uploadsDirectory, upload.name);
-        const chunks = await opendir(uploadDirectory);
-        for await (const chunk of chunks) {
-          if (!chunk.isFile() || !/^[a-f0-9]{32}\.age$/.test(chunk.name)) {
-            continue;
-          }
-          const key = `staging/uploads/${upload.name}/${chunk.name}`;
-          await consider(key, join(uploadDirectory, chunk.name));
-        }
-      }
     }
     return {
       entries: page,
@@ -414,6 +388,53 @@ export class FilesystemV2BodyStore implements V2BodyStore, V2BodyInventory {
         ? { cursor: page[page.length - 1]!.key }
         : {}),
     };
+  }
+
+  /**
+   * Walks every body layout on disk: whole bodies in each namespace, committed
+   * delivery chunks, and staged upload chunks. Entries whose names are not
+   * body keys are skipped, and a missing layout root holds no bodies.
+   */
+  private async *bodyFiles(): AsyncGenerator<{ key: string; path: string }> {
+    for (const [prefix, namespace] of BODY_NAMESPACES) {
+      const directory = join(this.rootDir, 'v2', namespace);
+      for await (const name of matchingFiles(
+        await openDirectoryIfPresent(directory),
+        BODY_FILE_NAME,
+      )) {
+        yield { key: `${prefix}/${name}`, path: join(directory, name) };
+      }
+    }
+    const deliveries = join(this.rootDir, 'v2', 'delivery-bodies');
+    for await (const delivery of idDirectories(
+      await openDirectoryIfPresent(deliveries),
+    )) {
+      const chunks = join(deliveries, delivery, 'chunks');
+      for await (const name of matchingFiles(
+        await openDirectoryIfPresent(chunks),
+        CHUNK_FILE_NAME,
+      )) {
+        yield {
+          key: `deliveries/${delivery}/chunks/${name}`,
+          path: join(chunks, name),
+        };
+      }
+    }
+    const uploads = join(this.rootDir, 'v2', 'delivery-staging', 'uploads');
+    for await (const upload of idDirectories(
+      await openDirectoryIfPresent(uploads),
+    )) {
+      const chunks = join(uploads, upload);
+      for await (const name of matchingFiles(
+        await opendir(chunks),
+        CHUNK_FILE_NAME,
+      )) {
+        yield {
+          key: `staging/uploads/${upload}/${name}`,
+          path: join(chunks, name),
+        };
+      }
+    }
   }
 
   private pathForKey(key: string): string {

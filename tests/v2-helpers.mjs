@@ -6,7 +6,6 @@ import {
   deriveV2EnrollmentProof,
   encodeBase64Url,
 } from '../dist/src/v2-auth.js';
-import { encodeCbor } from '../dist/src/cbor.js';
 import { createDudService } from '../dist/src/service.js';
 import { MemoryBlobStore } from './helpers.mjs';
 
@@ -95,19 +94,6 @@ export async function enrollmentHeader(
       expiresAt,
     ),
   )}`;
-}
-
-export function adminRequest(path, body) {
-  const encoded = encodeCbor(body);
-  return new Request(`${V2_ORIGIN}${path}`, {
-    method: 'POST',
-    headers: {
-      authorization: `DUD2-Bearer ${encodeBase64Url(V2_ADMIN_SECRET)}`,
-      'content-length': String(encoded.byteLength),
-      'content-type': 'application/dud+cbor; version=2',
-    },
-    body: encoded,
-  });
 }
 
 export class MockR2Bucket {

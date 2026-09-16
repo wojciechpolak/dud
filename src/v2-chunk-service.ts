@@ -10,6 +10,7 @@ import {
 } from './cbor.js';
 import {
   bytesToHex,
+  hexToBytes,
   decodeBase64Url,
   decryptV2TokenSecret,
   parseV2DeliveryProof,
@@ -35,6 +36,7 @@ import type {
   V2Repository,
   V2RepositoryAuthorization,
   V2RepositoryCapability,
+  V2RepositoryDelivery,
 } from './v2-repository.js';
 import { sha256 } from './sha256.js';
 import type { V2TimingRecorder } from './v2-timing.js';
@@ -208,6 +210,96 @@ function parseAuthorizationHeader(request: Request): Uint8Array {
   return decodeBase64Url(value.slice(AUTHORIZATION_PREFIX.length));
 }
 
+/** Reads the headers that declare a chunk body's length and digest. */
+function parseChunkDeclaration(request: Request): {
+  body: ReadableStream<Uint8Array>;
+  digest: Uint8Array;
+  length: number;
+} {
+  if (request.headers.get('content-type') !== 'application/octet-stream') {
+    throw new Error('Chunk Content-Type is invalid.');
+  }
+  const digestText = request.headers.get('dud-content-sha256');
+  const lengthText = request.headers.get('content-length');
+  if (
+    !digestText ||
+    !/^[a-f0-9]{64}$/.test(digestText) ||
+    !lengthText ||
+    !/^(?:0|[1-9][0-9]*)$/.test(lengthText) ||
+    !request.body
+  ) {
+    throw new Error('Chunk body declaration is invalid.');
+  }
+  return {
+    body: request.body,
+    digest: hexToBytes(digestText),
+    length: Number(lengthText),
+  };
+}
+
+/**
+ * Decodes a chunk read proof that is unexpired, not issued implausibly far
+ * ahead, and names the first operation of its request.
+ */
+function parseReadProof(
+  request: Request,
+  current: number,
+): {
+  proof: Uint8Array;
+  parsed: ReturnType<typeof parseV2DeliveryProof>;
+} | null {
+  let proof: Uint8Array;
+  let parsed: ReturnType<typeof parseV2DeliveryProof>;
+  try {
+    proof = parseAuthorizationHeader(request);
+    parsed = parseV2DeliveryProof(proof);
+  } catch {
+    return null;
+  }
+  return parsed.expiresAt < current ||
+    parsed.expiresAt > current + MAX_PROOF_LIFETIME_SECONDS ||
+    parsed.operationIndex !== 0
+    ? null
+    : { proof, parsed };
+}
+
+/**
+ * A chunk is readable through a live read capability for the delivery's own
+ * relationship and direction, while the delivery is unexpired and chunked.
+ */
+function canReadChunk(
+  delivery: V2RepositoryDelivery,
+  capability: V2RepositoryCapability,
+  current: number,
+): boolean {
+  return (
+    delivery.expiresAt > current &&
+    delivery.chain !== undefined &&
+    capability.scope === 'read' &&
+    capability.relationshipId === delivery.relationshipId &&
+    capability.direction === delivery.direction &&
+    capability.expiresAt > current &&
+    capability.revokedAt === undefined
+  );
+}
+
+function chunkResponse(
+  body: ReadableStream<Uint8Array>,
+  part: V2BodyPartDeclaration,
+): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'x-frame-options': 'DENY',
+      'content-type': 'application/octet-stream',
+      'content-length': String(part.length),
+      'dud-content-sha256': bytesToHex(part.digest),
+    },
+  });
+}
+
 function currentEpoch(current: number): number {
   return Math.floor(current / 86_400);
 }
@@ -303,22 +395,13 @@ async function authorize(
 function missingParts(upload: V2ChunkUpload): Uint8Array[] {
   return upload.parts
     .filter((part) => part.bodyKey === undefined)
-    .map((part) =>
-      Uint8Array.from(part.id.match(/.{2}/g)!, (pair) =>
-        Number.parseInt(pair, 16),
-      ),
-    );
+    .map((part) => hexToBytes(part.id));
 }
 
 function createResponse(upload: V2ChunkUpload, idempotent: boolean): Response {
   return v2CborResponse(
     new Map<number, CborValue>([
-      [
-        1,
-        Uint8Array.from(upload.id.match(/.{2}/g)!, (pair) =>
-          Number.parseInt(pair, 16),
-        ),
-      ],
+      [1, hexToBytes(upload.id)],
       [2, upload.expiresAt],
       [3, missingParts(upload)],
       [4, idempotent],
@@ -465,24 +548,8 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
     timing: V2TimingRecorder,
   ): Promise<Response> {
     try {
-      if (request.headers.get('content-type') !== 'application/octet-stream') {
-        throw new Error('Chunk Content-Type is invalid.');
-      }
-      const digestText = request.headers.get('dud-content-sha256');
-      const lengthText = request.headers.get('content-length');
-      if (
-        !digestText ||
-        !/^[a-f0-9]{64}$/.test(digestText) ||
-        !lengthText ||
-        !/^(?:0|[1-9][0-9]*)$/.test(lengthText) ||
-        !request.body
-      ) {
-        throw new Error('Chunk body declaration is invalid.');
-      }
+      const { body, digest, length } = parseChunkDeclaration(request);
       const current = Math.floor(dependencies.now() / 1000);
-      const digest = Uint8Array.from(digestText.match(/.{2}/g)!, (pair) =>
-        Number.parseInt(pair, 16),
-      );
       const resolved = await resolveUpload(
         request,
         origin,
@@ -498,16 +565,10 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
       const part = resolved.upload.parts.find(
         (candidate) => candidate.id === partId,
       );
-      if (
-        !part ||
-        Number(lengthText) !== part.length ||
-        !bytesEqual(digest, part.digest)
-      ) {
+      if (!part || length !== part.length || !bytesEqual(digest, part.digest)) {
         return v2ErrorResponse(1, 'Chunk does not match its manifest.');
       }
-      const operationId = Uint8Array.from(partId.match(/.{2}/g)!, (pair) =>
-        Number.parseInt(pair, 16),
-      );
+      const operationId = hexToBytes(partId);
       const operationDigest = sha256(
         encodeCbor(
           new Map<number, CborValue>([
@@ -534,50 +595,93 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
           now: current,
         }),
       );
-      const stagedKey = v2StagedChunkKey(uploadId, partId);
-      try {
-        const bodyKey = await timing.measure('body', () =>
-          dependencies.bodyStore.stagePart(uploadId, part, request.body!),
-        );
-        if (!prepared.idempotent) {
-          await timing.measure('metadata', () =>
-            dependencies.repository.completeChunkUploadPart({
-              id: uploadId,
-              capabilityId: resolved.authorized.capability.id,
-              partId,
-              writeToken,
-              bodyKey,
-              now: current,
-            }),
-          );
-        }
-      } catch (error) {
-        if (!prepared.idempotent) {
-          try {
-            const deleteBody =
-              await dependencies.repository.abortChunkUploadPart({
-                id: uploadId,
-                partId,
-                writeToken,
-              });
-            if (deleteBody) {
-              await dependencies.bodyStore.delete(stagedKey);
-            }
-          } catch (compensationError) {
-            throw new AggregateError(
-              [error, compensationError],
-              'Chunk upload part compensation failed.',
-            );
-          }
-        }
-        throw error;
-      }
+      await stagePart({
+        uploadId,
+        part,
+        body,
+        capabilityId: resolved.authorized.capability.id,
+        writeToken,
+        idempotent: prepared.idempotent,
+        now: current,
+        timing,
+      });
       return v2EmptyResponse();
     } catch (error) {
       return rejected(
         dependencies,
         '/v2/deliveries/uploads/:id/chunks/:id',
         error,
+      );
+    }
+  }
+
+  /**
+   * Stores a part's bytes and records them against the write lease. A retry of
+   * a part already written only re-verifies the bytes. When a fresh write
+   * fails, the lease is aborted and its staged bytes are removed, so the part
+   * can be written again.
+   */
+  async function stagePart(input: {
+    uploadId: string;
+    part: V2BodyPartDeclaration;
+    body: ReadableStream<Uint8Array>;
+    capabilityId: string;
+    writeToken: string;
+    idempotent: boolean;
+    now: number;
+    timing: V2TimingRecorder;
+  }): Promise<void> {
+    try {
+      const bodyKey = await input.timing.measure('body', () =>
+        dependencies.bodyStore.stagePart(
+          input.uploadId,
+          input.part,
+          input.body,
+        ),
+      );
+      if (!input.idempotent) {
+        await input.timing.measure('metadata', () =>
+          dependencies.repository.completeChunkUploadPart({
+            id: input.uploadId,
+            capabilityId: input.capabilityId,
+            partId: input.part.id,
+            writeToken: input.writeToken,
+            bodyKey,
+            now: input.now,
+          }),
+        );
+      }
+    } catch (error) {
+      if (!input.idempotent) {
+        await abortPartWrite(input, error);
+      }
+      throw error;
+    }
+  }
+
+  async function abortPartWrite(
+    input: {
+      uploadId: string;
+      part: V2BodyPartDeclaration;
+      writeToken: string;
+    },
+    error: unknown,
+  ): Promise<void> {
+    try {
+      const deleteBody = await dependencies.repository.abortChunkUploadPart({
+        id: input.uploadId,
+        partId: input.part.id,
+        writeToken: input.writeToken,
+      });
+      if (deleteBody) {
+        await dependencies.bodyStore.delete(
+          v2StagedChunkKey(input.uploadId, input.part.id),
+        );
+      }
+    } catch (compensationError) {
+      throw new AggregateError(
+        [error, compensationError],
+        'Chunk upload part compensation failed.',
       );
     }
   }
@@ -768,23 +872,13 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
         encodeCbor(
           new Map<number, CborValue>([
             [1, requestDigest],
-            [
-              2,
-              Uint8Array.from(uploadId.match(/.{2}/g)!, (pair) =>
-                Number.parseInt(pair, 16),
-              ),
-            ],
+            [2, hexToBytes(uploadId)],
             [
               3,
               resolved.upload.parts.map(
                 (part) =>
                   new Map<number, CborValue>([
-                    [
-                      1,
-                      Uint8Array.from(part.id.match(/.{2}/g)!, (pair) =>
-                        Number.parseInt(pair, 16),
-                      ),
-                    ],
+                    [1, hexToBytes(part.id)],
                     [2, part.length],
                     [3, part.digest],
                   ]),
@@ -811,12 +905,7 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
       if ('existing' in reservation) {
         return v2CborResponse(
           new Map<number, CborValue>([
-            [
-              1,
-              Uint8Array.from(reservation.existing.id.match(/.{2}/g)!, (pair) =>
-                Number.parseInt(pair, 16),
-              ),
-            ],
+            [1, hexToBytes(reservation.existing.id)],
             [2, true],
           ]),
         );
@@ -854,12 +943,7 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
       );
       return v2CborResponse(
         new Map<number, CborValue>([
-          [
-            1,
-            Uint8Array.from(published.delivery.id.match(/.{2}/g)!, (pair) =>
-              Number.parseInt(pair, 16),
-            ),
-          ],
+          [1, hexToBytes(published.delivery.id)],
           [2, published.idempotent],
         ]),
       );
@@ -878,21 +962,11 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
   ): Promise<Response> {
     try {
       const current = Math.floor(dependencies.now() / 1000);
-      let proof: Uint8Array;
-      let parsed: ReturnType<typeof parseV2DeliveryProof>;
-      try {
-        proof = parseAuthorizationHeader(request);
-        parsed = parseV2DeliveryProof(proof);
-      } catch {
+      const readProof = parseReadProof(request, current);
+      if (!readProof) {
         return v2ErrorResponse(2, 'Chunk read proof is invalid.');
       }
-      if (
-        parsed.expiresAt < current ||
-        parsed.expiresAt > current + MAX_PROOF_LIFETIME_SECONDS ||
-        parsed.operationIndex !== 0
-      ) {
-        return v2ErrorResponse(2, 'Chunk read proof is invalid.');
-      }
+      const { proof, parsed } = readProof;
       const delivery = await timing.measure('metadata', () =>
         dependencies.repository.findDelivery(deliveryId),
       );
@@ -907,14 +981,8 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
       );
       if (
         !delivery ||
-        delivery.expiresAt <= current ||
-        delivery.chain === undefined ||
         !capability ||
-        capability.scope !== 'read' ||
-        capability.relationshipId !== delivery.relationshipId ||
-        capability.direction !== delivery.direction ||
-        capability.expiresAt <= current ||
-        capability.revokedAt !== undefined
+        !canReadChunk(delivery, capability, current)
       ) {
         return v2ErrorResponse(2, 'Chunk read proof is invalid.');
       }
@@ -962,10 +1030,9 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
       if (!authorized.authorizationAccepted) {
         return v2ErrorResponse(6, 'Chunk read proof was already used.');
       }
-      if (authorized.delivery?.id !== deliveryId) {
-        return v2ErrorResponse(4, 'Delivery chunk is unavailable.');
-      }
-      if (!part) {
+      // Only the delivery at the head of its slot is readable, which keeps a
+      // receiver from reading past a delivery it has not completed.
+      if (authorized.delivery?.id !== deliveryId || !part) {
         return v2ErrorResponse(4, 'Delivery chunk is unavailable.');
       }
       const body = await timing.measure('body', () =>
@@ -974,17 +1041,7 @@ export function createV2ChunkHandler(dependencies: V2ChunkHandlerDependencies) {
       if (!body || body.size !== part.length) {
         return v2ErrorResponse(13, 'Delivery chunk is unavailable.');
       }
-      return new Response(body.body, {
-        status: 200,
-        headers: {
-          'cache-control': 'no-store',
-          'x-content-type-options': 'nosniff',
-          'x-frame-options': 'DENY',
-          'content-type': 'application/octet-stream',
-          'content-length': String(part.length),
-          'dud-content-sha256': bytesToHex(part.digest),
-        },
-      });
+      return chunkResponse(body.body, part);
     } catch (error) {
       return rejected(dependencies, '/v2/deliveries/:id/chunks/:id', error);
     }

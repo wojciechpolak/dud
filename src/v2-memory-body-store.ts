@@ -4,6 +4,7 @@
 import { bytesEqual } from './cbor.js';
 import { sha256 } from './sha256.js';
 import {
+  v2CommittedBodyParts,
   v2DeliveryChunkKey,
   v2StagedChunkKey,
   validateV2BodyPartDeclarations,
@@ -73,34 +74,42 @@ export class MemoryV2BodyStore implements V2BodyStore {
     expectedTotalLength: number;
   }): Promise<V2CommittedBodyPart[]> {
     validateV2BodyPartDeclarations(input.parts, input.expectedTotalLength);
-    const committed = input.parts.map((part) => {
-      const stagedKey = v2StagedChunkKey(input.uploadId, part.id);
-      const key = v2DeliveryChunkKey(input.deliveryId, part.id);
-      const staged = this.bodies.get(stagedKey);
-      const existing = this.bodies.get(key);
-      const bytes = staged ?? existing;
-      if (
-        !bytes ||
-        bytes.byteLength !== part.length ||
-        !bytesEqual(sha256(bytes), part.digest) ||
-        (existing !== undefined &&
-          staged !== undefined &&
-          !bytesEqual(existing, staged))
-      ) {
-        throw new Error('Staged delivery chunk is unavailable or invalid.');
-      }
-      return { ...part, key, stagedKey, bytes };
-    });
+    const committed = input.parts.map((part) =>
+      this.verifiedStagedPart(input.uploadId, input.deliveryId, part),
+    );
     for (const part of committed) {
       this.bodies.set(part.key, part.bytes);
       this.bodies.delete(part.stagedKey);
     }
-    return committed.map(({ id, length, digest, key }) => ({
-      id,
-      length,
-      digest: Uint8Array.from(digest),
-      key,
-    }));
+    return v2CommittedBodyParts(committed);
+  }
+
+  /**
+   * Resolves a part from its staged bytes, or from bytes a retried commit
+   * already moved, requiring the declared length and digest. Staged and moved
+   * copies that both exist must be identical.
+   */
+  private verifiedStagedPart(
+    uploadId: string,
+    deliveryId: string,
+    part: V2BodyPartDeclaration,
+  ) {
+    const stagedKey = v2StagedChunkKey(uploadId, part.id);
+    const key = v2DeliveryChunkKey(deliveryId, part.id);
+    const staged = this.bodies.get(stagedKey);
+    const existing = this.bodies.get(key);
+    const bytes = staged ?? existing;
+    if (
+      !bytes ||
+      bytes.byteLength !== part.length ||
+      !bytesEqual(sha256(bytes), part.digest) ||
+      (existing !== undefined &&
+        staged !== undefined &&
+        !bytesEqual(existing, staged))
+    ) {
+      throw new Error('Staged delivery chunk is unavailable or invalid.');
+    }
+    return { ...part, key, stagedKey, bytes };
   }
 
   async put(

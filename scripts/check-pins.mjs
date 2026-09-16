@@ -43,10 +43,20 @@ function read(file) {
  */
 function checkDockerfile(file) {
   const text = read(file);
-  const lines = text.split('\n');
+  checkBaseImages(file, text.split('\n'));
+  checkPinAnnotations(file, text);
+  if (/:latest\b/.test(text)) {
+    fail(file, 'references a :latest tag');
+  }
+}
+
+/**
+ * A `FROM` is pinned when it names an earlier build stage, a digest ARG the
+ * file defines, or a literal digest.
+ */
+function checkBaseImages(file, lines) {
   const digestArgs = new Map();
   const stages = new Set();
-
   for (const [index, line] of lines.entries()) {
     const at = `${file}:${index + 1}`;
     const arg = /^ARG\s+([A-Z0-9_]+)=(\S+)\s*$/.exec(line.trim());
@@ -57,7 +67,6 @@ function checkDockerfile(file) {
       digestArgs.set(arg[1], arg[2]);
       continue;
     }
-
     const from = /^FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$/i.exec(
       line.trim(),
     );
@@ -68,24 +77,32 @@ function checkDockerfile(file) {
     if (stage) {
       stages.add(stage);
     }
-    if (stages.has(reference)) {
-      continue;
+    const problem = stages.has(reference)
+      ? undefined
+      : baseImageProblem(reference, digestArgs);
+    if (problem) {
+      fail(at, problem);
     }
-    const digested = /@\$\{([A-Z0-9_]+)\}$/.exec(reference);
-    if (digested) {
-      if (!digestArgs.has(digested[1])) {
-        fail(at, `FROM uses undefined digest ARG ${digested[1]}`);
-      }
-      continue;
-    }
-    if (/@sha256:[a-f0-9]{64}$/.test(reference)) {
-      continue;
-    }
-    fail(at, `FROM ${reference} is not pinned to a digest`);
   }
+}
 
-  // Each `# pin: <name> <tag>` records what a source checkout is meant to be,
-  // and the checkout below it must name an exact commit.
+function baseImageProblem(reference, digestArgs) {
+  const digested = /@\$\{([A-Z0-9_]+)\}$/.exec(reference);
+  if (digested) {
+    return digestArgs.has(digested[1])
+      ? undefined
+      : `FROM uses undefined digest ARG ${digested[1]}`;
+  }
+  return /@sha256:[a-f0-9]{64}$/.test(reference)
+    ? undefined
+    : `FROM ${reference} is not pinned to a digest`;
+}
+
+/**
+ * Each `# pin: <name> <tag>` records what a source checkout is meant to be,
+ * and the checkout below it must name an exact commit.
+ */
+function checkPinAnnotations(file, text) {
   const annotations = [...text.matchAll(/^# pin: (\S+) (\S+)$/gm)].map(
     (match) => match[1],
   );
@@ -124,43 +141,39 @@ function checkDockerfile(file) {
       fail(file, `pin annotation '${name}' has no pinned consumer`);
     }
   }
-
-  if (/:latest\b/.test(text)) {
-    fail(file, 'references a :latest tag');
-  }
 }
 
 /** A workflow action is only pinned when it names a full commit SHA. */
 function checkWorkflow(file) {
   for (const [index, line] of read(file).split('\n').entries()) {
-    const at = `${file}:${index + 1}`;
     const uses = /^\s*(?:-\s*)?uses:\s*(\S+)/.exec(line);
-    if (!uses) {
-      continue;
-    }
-    const reference = uses[1];
-    if (reference.startsWith('./')) {
-      continue;
-    }
-    if (reference.startsWith('docker://')) {
-      if (!/@sha256:[a-f0-9]{64}$/.test(reference)) {
-        fail(at, `uses: ${reference} is not pinned to an image digest`);
-      }
-      continue;
-    }
-    const at_ = reference.lastIndexOf('@');
-    if (at_ < 0) {
-      fail(at, `uses: ${reference} has no revision`);
-      continue;
-    }
-    const revision = reference.slice(at_ + 1);
-    if (!COMMIT.test(revision)) {
-      fail(at, `uses: ${reference} is not pinned to a commit SHA`);
-    }
-    if (!/#\s*v?\d/.test(line)) {
-      fail(at, `uses: ${reference} has no human-readable version comment`);
+    for (const problem of uses ? usesProblems(uses[1], line) : []) {
+      fail(`${file}:${index + 1}`, problem);
     }
   }
+}
+
+function usesProblems(reference, line) {
+  if (reference.startsWith('./')) {
+    return [];
+  }
+  if (reference.startsWith('docker://')) {
+    return /@sha256:[a-f0-9]{64}$/.test(reference)
+      ? []
+      : [`uses: ${reference} is not pinned to an image digest`];
+  }
+  const at = reference.lastIndexOf('@');
+  if (at < 0) {
+    return [`uses: ${reference} has no revision`];
+  }
+  const problems = [];
+  if (!COMMIT.test(reference.slice(at + 1))) {
+    problems.push(`uses: ${reference} is not pinned to a commit SHA`);
+  }
+  if (!/#\s*v?\d/.test(line)) {
+    problems.push(`uses: ${reference} has no human-readable version comment`);
+  }
+  return problems;
 }
 
 /**

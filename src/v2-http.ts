@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Wojciech Polak
 
+import { hexToBytes } from './v2-auth.js';
 import { bytesEqual, decodeCbor, encodeCbor, type CborValue } from './cbor.js';
 import {
   encodeV2DeliveryFrameAuthorizationPrefix,
@@ -46,9 +47,7 @@ function requireContentDigest(request: Request): Uint8Array {
       'DUD-Content-SHA256 must contain a lowercase SHA-256 digest.',
     );
   }
-  return Uint8Array.from(value.match(/.{2}/g)!, (byte) =>
-    Number.parseInt(byte, 16),
-  );
+  return hexToBytes(value);
 }
 
 async function readAtLeast(
@@ -142,10 +141,6 @@ export function v2ErrorResponse(
     body.set(3, retryAfter);
   }
   return v2CborResponse(body, V2_ERROR_HTTP_STATUS[code]);
-}
-
-export function v2NotFoundResponse(): Response {
-  return v2ErrorResponse(4, 'Object is not available.');
 }
 
 /** Reads a bounded V2 CBOR request without losing its canonical source bytes. */
@@ -386,16 +381,6 @@ export async function readV2CborRequest(
   maxBytes: number,
 ): Promise<CborValue> {
   return decodeCbor(await readV2RequestBytes(request, maxBytes), { maxBytes });
-}
-
-export function v2RawResponse(
-  body: ReadableStream<Uint8Array> | null,
-  status: number,
-  headers?: HeadersInit,
-): Response {
-  const responseHeaders = secureHeaders(headers);
-  responseHeaders.set('content-type', 'application/octet-stream');
-  return new Response(body, { status, headers: responseHeaders });
 }
 
 /** Emits a bounded DUD2 response frame without buffering its opaque payload. */

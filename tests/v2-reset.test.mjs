@@ -18,6 +18,7 @@ import { sha256 } from '../dist/src/sha256.js';
 import { MemoryV2Store } from '../dist/src/v2-memory.js';
 import { encryptV2RelationshipState } from '../dist/src/v2-relationship-state.js';
 import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
+import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
 import { WorkerV2Store } from '../dist/src/v2-worker-store.js';
 import {
   V2_DEPLOYMENT_KEY,
@@ -25,6 +26,7 @@ import {
   V2_ORIGIN,
   createV2TestService,
 } from './v2-helpers.mjs';
+import { createMigratedLocalD1 } from './d1-local.mjs';
 
 const encoder = new TextEncoder();
 const now = Math.floor(V2_NOW_MS / 1000);
@@ -417,14 +419,26 @@ test('peer relationship reset selects the smaller proposal ID and rejects stale 
   assert.equal((await proposeReset(value, skipped)).status, 400);
 });
 
-test('SQLite activates a fresh relationship and revokes the old one atomically', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'dud-v2-reset-'));
-  const repository = new SQLiteV2Repository(directory);
-  await repository.initialize();
-  t.after(async () => {
-    repository.close();
-    await rm(directory, { recursive: true, force: true });
-  });
+const REPOSITORY_BACKENDS = [
+  [
+    'SQLite',
+    async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), 'dud-v2-reset-'));
+      const repository = new SQLiteV2Repository(directory);
+      await repository.initialize();
+      t.after(async () => {
+        repository.close();
+        await rm(directory, { recursive: true, force: true });
+      });
+      return repository;
+    },
+  ],
+  ['D1', async (t) => new D1V2Repository(await createMigratedLocalD1(t))],
+];
+
+/** A granular repository holding one relationship, served by a peer service. */
+async function repositoryFixture(t, createRepository) {
+  const repository = await createRepository(t);
   const oldRelationshipId = fixed(0x10, 16);
   const inviter = ed25519Key(fixed(0x20, 32));
   const invitee = ed25519Key(fixed(0x40, 32));
@@ -451,29 +465,94 @@ test('SQLite activates a fresh relationship and revokes the old one atomically',
   const { service } = await createV2TestService(new WorkerV2Store(), {
     repository,
   });
-  const value = { oldRelationshipId, inviter, invitee, service };
-  const reset = proposal(value);
-  assert.equal((await proposeReset(value, reset)).status, 200);
+  return {
+    oldRelationshipId,
+    oldId: relationship.relationshipId,
+    inviter,
+    invitee,
+    repository,
+    service,
+  };
+}
+
+function activationRequest(value, reset) {
   const consent = acceptance(value, reset);
-  const activated = await service.fetch(
-    resetRequest(
-      3,
-      reset.value,
-      reset.signature,
-      consent.value,
-      consent.signature,
-    ),
+  return resetRequest(
+    3,
+    reset.value,
+    reset.signature,
+    consent.value,
+    consent.signature,
   );
-  assert.equal(activated.status, 200);
-  assert.equal(
-    await repository.findRelationship(relationship.relationshipId),
-    null,
+}
+
+function cancellationRequest(value, reset, requestId = fixed(0x33, 16)) {
+  const cancellation = new Map([
+    [1, 1],
+    [2, value.oldRelationshipId],
+    [3, reset.resetId],
+    [4, 0],
+    [5, requestId],
+    [6, now + 60],
+    [7, V2_ORIGIN],
+  ]);
+  return resetRequest(
+    4,
+    cancellation,
+    signReset('cancellation', cancellation, value.inviter.privateKey),
   );
-  assert.ok(
-    await repository.findRelationship(bytesToHex(reset.newRelationshipId)),
-  );
-  assert.equal(
-    (await repository.findRelationshipReset(relationship.relationshipId)).state,
-    'active',
-  );
-});
+}
+
+for (const [backend, createRepository] of REPOSITORY_BACKENDS) {
+  test(`${backend} activates a fresh relationship and revokes the old one atomically`, async (t) => {
+    const value = await repositoryFixture(t, createRepository);
+    const reset = proposal(value);
+    assert.equal((await proposeReset(value, reset)).status, 200);
+    const activated = await value.service.fetch(
+      activationRequest(value, reset),
+    );
+    assert.equal(activated.status, 200);
+    assert.equal(await value.repository.findRelationship(value.oldId), null);
+    assert.ok(
+      await value.repository.findRelationship(
+        bytesToHex(reset.newRelationshipId),
+      ),
+    );
+    assert.equal(
+      (await value.repository.findRelationshipReset(value.oldId)).state,
+      'active',
+    );
+
+    const replay = await value.service.fetch(activationRequest(value, reset));
+    assert.equal(replay.status, 200);
+    assert.equal(decodeMap(await replay.arrayBuffer()).get(1), 2);
+    const late = await value.service.fetch(cancellationRequest(value, reset));
+    assert.equal(late.status, 422);
+  });
+
+  test(`${backend} cancels a proposal idempotently and refuses to activate it afterwards`, async (t) => {
+    const value = await repositoryFixture(t, createRepository);
+    const reset = proposal(value);
+    assert.equal((await proposeReset(value, reset)).status, 200);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cancelled = await value.service.fetch(
+        cancellationRequest(value, reset),
+      );
+      assert.equal(cancelled.status, 200);
+      assert.equal(decodeMap(await cancelled.arrayBuffer()).get(1), 3);
+    }
+    const conflicting = await value.service.fetch(
+      cancellationRequest(value, reset, fixed(0x34, 16)),
+    );
+    assert.equal(conflicting.status, 409);
+    const activation = await value.service.fetch(
+      activationRequest(value, reset),
+    );
+    assert.equal(activation.status, 409);
+    assert.equal(
+      (await value.repository.findRelationshipReset(value.oldId)).state,
+      'cancelled',
+    );
+    assert.ok(await value.repository.findRelationship(value.oldId));
+  });
+}

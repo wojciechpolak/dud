@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Wojciech Polak
 
 import { V2_CHUNK_LIMITS } from './v2-contract.js';
+import type { V2CommittedBodyPart } from './v2-repository.js';
 
 const ID = '[a-f0-9]{32}';
 const BASELINE_DELIVERY = new RegExp(`^deliveries/(${ID})\\.bin$`);
@@ -99,4 +100,35 @@ export function validateV2BodyPartDeclarations(
   ) {
     throw new Error('Delivery chunk manifest total is invalid.');
   }
+}
+
+/**
+ * Projects committed parts onto the stored manifest shape. Each digest is
+ * copied so the caller's working state never aliases the returned manifest.
+ */
+export function v2CommittedBodyParts(
+  parts: readonly V2CommittedBodyPart[],
+): V2CommittedBodyPart[] {
+  return parts.map(({ id, length, digest, key }) => ({
+    id,
+    length,
+    digest: Uint8Array.from(digest),
+    key,
+  }));
+}
+
+/**
+ * The body key maintenance releases for an expired upload part row: its stored
+ * body, or the staged chunk of an uncommitted upload. A committed part whose
+ * body moved to its delivery releases nothing here.
+ */
+export function v2ExpiredChunkPartBodyKeys(
+  row: Record<string, unknown>,
+): string[] {
+  if (row.body_key !== null && row.body_key !== undefined) {
+    return [String(row.body_key)];
+  }
+  return row.committed_at === null || row.committed_at === undefined
+    ? [v2StagedChunkKey(String(row.upload_id), String(row.part_id))]
+    : [];
 }

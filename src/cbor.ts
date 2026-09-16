@@ -214,44 +214,13 @@ class Decoder {
       return this.readLength(additional);
     }
     if (major === 2 || major === 3) {
-      const length = this.readLength(additional);
-      if (length > this.options.maxBytes) {
-        throw new Error('CBOR string exceeds the configured limit.');
-      }
-      const bytes = this.take(length);
-      if (major === 2) {
-        return new Uint8Array(bytes);
-      }
-      return textDecoder.decode(bytes);
+      return this.decodeString(major, additional);
     }
     if (major === 4) {
-      const length = this.readLength(additional);
-      if (length > this.options.maxArrayElements) {
-        throw new Error('CBOR array exceeds the configured limit.');
-      }
-      const values: CborValue[] = [];
-      for (let i = 0; i < length; i++) {
-        values.push(this.decodeValue(depth + 1));
-      }
-      return values;
+      return this.decodeArray(additional, depth);
     }
     if (major === 5) {
-      const length = this.readLength(additional);
-      if (length > this.options.maxMapPairs) {
-        throw new Error('CBOR map exceeds the configured limit.');
-      }
-      const values = new Map<number, CborValue>();
-      for (let i = 0; i < length; i++) {
-        const key = this.decodeValue(depth + 1);
-        if (typeof key !== 'number') {
-          throw new Error('CBOR protocol map key is not an unsigned integer.');
-        }
-        if (values.has(key)) {
-          throw new Error('CBOR map contains a duplicate key.');
-        }
-        values.set(key, this.decodeValue(depth + 1));
-      }
-      return values;
+      return this.decodeMap(additional, depth);
     }
     if (major === 7 && additional === 20) {
       return false;
@@ -260,6 +229,47 @@ class Decoder {
       return true;
     }
     throw new Error('Unsupported CBOR type.');
+  }
+
+  private decodeString(major: 2 | 3, additional: number): CborValue {
+    const length = this.readLength(additional);
+    if (length > this.options.maxBytes) {
+      throw new Error('CBOR string exceeds the configured limit.');
+    }
+    const bytes = this.take(length);
+    return major === 2 ? new Uint8Array(bytes) : textDecoder.decode(bytes);
+  }
+
+  private decodeArray(additional: number, depth: number): CborValue[] {
+    const length = this.readLength(additional);
+    if (length > this.options.maxArrayElements) {
+      throw new Error('CBOR array exceeds the configured limit.');
+    }
+    const values: CborValue[] = [];
+    for (let i = 0; i < length; i++) {
+      values.push(this.decodeValue(depth + 1));
+    }
+    return values;
+  }
+
+  /** Protocol maps use unsigned integer keys, each at most once. */
+  private decodeMap(additional: number, depth: number): Map<number, CborValue> {
+    const length = this.readLength(additional);
+    if (length > this.options.maxMapPairs) {
+      throw new Error('CBOR map exceeds the configured limit.');
+    }
+    const values = new Map<number, CborValue>();
+    for (let i = 0; i < length; i++) {
+      const key = this.decodeValue(depth + 1);
+      if (typeof key !== 'number') {
+        throw new Error('CBOR protocol map key is not an unsigned integer.');
+      }
+      if (values.has(key)) {
+        throw new Error('CBOR map contains a duplicate key.');
+      }
+      values.set(key, this.decodeValue(depth + 1));
+    }
+    return values;
   }
 }
 
