@@ -105,6 +105,11 @@ staticcheck walks up from the directory it runs in.
 `scripts/errcheck-excludes.txt` lists the calls errcheck ignores: writes to
 stderr and to usage writers, where a failed write has nowhere to be reported.
 
+`govulncheck` uses the release policy in `scripts/check-security-waivers.mjs`.
+Every finding requires an unexpired waiver in `.github/security-waivers.json`;
+failed scans also fail the gate. `check:tidy` uses `go mod tidy -diff` to report
+module changes without writing `go.mod` or `go.sum`.
+
 ## 4. Coverage
 
 ```sh

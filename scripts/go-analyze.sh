@@ -106,6 +106,21 @@ run_per_platform() {
     report "$tool" "$code"
 }
 
+# Use the same finding and waiver policy as the release scanner. A failed
+# scan must fail the check even if its partial report contains only waived
+# findings. JSON output leaves finding decisions to the waiver checker.
+check_go_vulnerabilities() {
+    local report_path code=0
+    report_path="$(mktemp)" || return 1
+    if (cd client && "$BIN/govulncheck" -json ./... >"$report_path"); then
+        node "$ROOT/scripts/check-security-waivers.mjs" govulncheck "$report_path" || code=1
+    else
+        code=1
+    fi
+    rm -f "$report_path"
+    return "$code"
+}
+
 for tool in "${tools[@]}"; do
     case "$tool" in
         analyze)
@@ -148,7 +163,7 @@ for tool in "${tools[@]}"; do
         govulncheck)
             echo "--- govulncheck: client"
             code=0
-            (cd client && "$BIN/govulncheck" ./...) || code=1
+            check_go_vulnerabilities || code=1
             report govulncheck "$code"
             ;;
         *)

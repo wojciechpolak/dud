@@ -5,6 +5,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,31 @@ func TestV2CollectionRoundTripUsesAtomicNoFollowExtraction(t *testing.T) {
 	}
 	if _, err := extractV2CollectionArchive(archive, destination, uint64(len(archive))); err == nil || !strings.Contains(err.Error(), "overwrite") {
 		t.Fatalf("second extraction error = %v", err)
+	}
+}
+
+func TestV2CollectionExtractsARegularFileWithANullTypeFlag(t *testing.T) {
+	body := buildV2HostileArchive(t, []*tar.Header{{
+		Name: "file", Typeflag: tar.TypeReg, Size: 1, Mode: 0o644,
+	}}, [][]byte{[]byte("x")})
+	// The tar writer normalizes a null type flag. Set it in the wire header
+	// and recompute the checksum to exercise the reader's normalization.
+	body[156] = 0
+	for i := 148; i < 156; i++ {
+		body[i] = ' '
+	}
+	checksum := 0
+	for _, value := range body[:512] {
+		checksum += int(value)
+	}
+	copy(body[148:156], fmt.Sprintf("%06o\x00 ", checksum))
+	destination := filepath.Join(t.TempDir(), "output")
+	if _, err := extractV2CollectionArchive(body, destination, uint64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(destination, "file"))
+	if err != nil || string(content) != "x" {
+		t.Fatalf("extracted content = %q, error = %v", content, err)
 	}
 }
 

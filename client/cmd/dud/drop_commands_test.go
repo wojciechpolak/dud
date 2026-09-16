@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,6 +18,36 @@ import (
 // records it.
 
 const testDropID = "3df7-5d5c-0c3b-4f53-ac1b-8eeb-2370-4fbe"
+
+type responseBodyFailingWriter struct{ body string }
+
+func (writer responseBodyFailingWriter) Write(body []byte) (int, error) {
+	if string(body) == writer.body {
+		return 0, errWriteFailed
+	}
+	return len(body), nil
+}
+
+func TestDeadDropCommandsReportResponseBodyWriteFailures(t *testing.T) {
+	for _, args := range [][]string{{"upload", "-m", "hello", "--json"}, {"test"}} {
+		t.Run(args[0], func(t *testing.T) {
+			a, transport, _, _ := newDropTestApp(t, "")
+			body := `{"id":"` + testDropID + `"}`
+			a.out = responseBodyFailingWriter{body: body}
+			transport.respond = func(recordedDropRequest) (*v2Response, error) {
+				return &v2Response{
+					StatusCode: http.StatusOK,
+					Body:       []byte(body),
+					TLS:        &v2ConnectionInfo{ECHAccepted: true},
+				}, nil
+			}
+			if err := a.run(args); !errors.Is(err, errWriteFailed) {
+				t.Fatalf("error = %v, want the response body write error", err)
+			}
+			transport.only(t)
+		})
+	}
+}
 
 func writeRecordingAge(t *testing.T, logPath, output string) string {
 	t.Helper()
