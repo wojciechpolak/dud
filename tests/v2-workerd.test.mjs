@@ -89,24 +89,39 @@ async function startWorker(t) {
     logLevel: 'error',
   });
   const miniflare = new Miniflare({
-    compatibilityDate: '2026-05-03',
-    modules: [
+    workers: [
       {
-        type: 'ESModule',
-        path: 'index.js',
-        contents: bundle.outputFiles[0].text,
+        config: {
+          name: 'dud',
+          compatibilityDate: '2026-05-03',
+          manifest: {
+            mainModule: 'index.js',
+            modules: {
+              'index.js': {
+                type: 'esm',
+                contents: bundle.outputFiles[0].text,
+              },
+            },
+          },
+          env: {
+            DB: { type: 'd1', id: 'dud-v2' },
+            FILES: { type: 'r2', name: 'FILES' },
+            APP_VERSION: { type: 'text', value: '2.4.0' },
+            DUD_DROP_ENABLED: { type: 'text', value: 'true' },
+            DUD_DROP_SECRET: {
+              type: 'text',
+              value: 'workerd-suite-v1-secret',
+            },
+            DUD_PEER_ENABLED: { type: 'text', value: 'true' },
+            DUD_PEER_OPEN_ENROLLMENT: { type: 'text', value: 'true' },
+            DUD_PEER_DEPLOYMENT_KEY: {
+              type: 'text',
+              value: base64url(V2_DELIVERY_DEPLOYMENT_KEY),
+            },
+          },
+        },
       },
     ],
-    d1Databases: { DB: 'dud-v2' },
-    r2Buckets: ['FILES'],
-    bindings: {
-      APP_VERSION: '2.4.0',
-      DUD_DROP_ENABLED: 'true',
-      DUD_DROP_SECRET: 'workerd-suite-v1-secret',
-      DUD_PEER_ENABLED: 'true',
-      DUD_PEER_OPEN_ENROLLMENT: 'true',
-      DUD_PEER_DEPLOYMENT_KEY: base64url(V2_DELIVERY_DEPLOYMENT_KEY),
-    },
   });
   t.after(() => miniflare.dispose());
 
