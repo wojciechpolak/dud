@@ -67,6 +67,15 @@ type v2Paths struct {
 // name it explicitly; that selects the same directory rather than a second one.
 const v2DefaultWorldName = "default"
 
+// v2ProfiledCommand keeps a recovery command in the peer world that produced
+// it. Profile names and peer aliases share the shell-safe name grammar.
+func v2ProfiledCommand(command string) string {
+	if profile := os.Getenv("DUD_PROFILE"); profile != "" {
+		return "DUD_PROFILE=" + profile + " dud " + command
+	}
+	return "dud " + command
+}
+
 // resolveV2Root locates the directory that holds every world. DUD_HOME overrides
 // it; the default keeps all peer state under a single directory so that no part
 // of it lands on a path convention tells people to synchronize. The device

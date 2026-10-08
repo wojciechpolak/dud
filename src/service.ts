@@ -1202,6 +1202,7 @@ export function createDudService(dependencies: DudDependencies) {
       adminSecret,
       enrollmentSecret,
       limits: config.v2Limits,
+      serverVersion: config.version,
       now: service.now,
       randomBytes: dependencies.randomBytes,
       observeTiming: dependencies.observeV2Timing,

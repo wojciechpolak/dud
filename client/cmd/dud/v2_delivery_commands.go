@@ -45,6 +45,27 @@ type v2PeerRuntime struct {
 	maxTTL         uint64
 }
 
+type v2SequenceGapError struct {
+	sequence uint64
+}
+
+func (err *v2SequenceGapError) Error() string {
+	return fmt.Sprintf("gap before sequence %d", err.sequence)
+}
+
+func v2GapRecoveryHint(err error, alias string) error {
+	var gap *v2SequenceGapError
+	if !errors.As(err, &gap) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w; run '%s' to approve one forward jump, then retry '%s'; ask the sender to resend the skipped deliveries",
+		err,
+		v2ProfiledCommand("peer resume "+alias),
+		v2ProfiledCommand("receive "+alias),
+	)
+}
+
 type v2PeerSendOptions struct {
 	alias           string
 	message         string
@@ -1973,7 +1994,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 			item, sawDelivery, err := runtime.receiveAvailable(ctx, a, opts)
 			if err != nil {
 				if !errors.As(err, &stop) {
-					return err
+					return v2GapRecoveryHint(err, opts.alias)
 				}
 				// Nothing was committed, so there is no partial result worth
 				// reporting: fail the way a single-delivery receive always has.
@@ -2207,7 +2228,7 @@ func (runtime *v2PeerRuntime) validateNextDescriptor(chain *v2ChainState, envelo
 		if !chain.ResumeApproved {
 			chain.Quarantined = true
 			chain.QuarantineReason = fmt.Sprintf("gap before sequence %d", sequence)
-			return false, errors.New(chain.QuarantineReason)
+			return false, &v2SequenceGapError{sequence: sequence}
 		}
 		// The operator accepted that the skipped sequences are gone. Adopt
 		// this delivery's predecessor digest so the chain continues from here:

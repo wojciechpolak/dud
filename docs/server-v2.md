@@ -435,10 +435,11 @@ Neither requires a credential and neither reveals stored state.
 
 From a paired client, `dud doctor` reports the effective origin, resolver, and
 transport mode for every configured target, which layer each value came from,
-the local state and tool health, and the result of a real transport check. Each
-target gets its own section, and a peer target also carries its delivery status
-block. It exits non-zero if anything failed. `dud doctor --json` reports the
-same values as one document.
+the server version, the local state and tool health, and the result of a real
+transport check. Each target gets its own section, and a peer target also
+carries its delivery status block. It exits non-zero if anything failed.
+`dud doctor --json` reports the same values as one document. A server that does
+not send `DUD-Server-Version` is reported as `unreported`.
 
 A peer target reports the transport its own profile pins, which is the origin
 bound into its signed descriptors. The global target below follows
@@ -465,16 +466,18 @@ Tools
   qrencode    ok
 
 Origin: global
-  url        https://dud.example.com               (DUD_PEER_BASE_URL)
-  doh        https://cloudflare-dns.com/dns-query  (config)
-  ech        hard                                  (environment)
-  transport  ok (HTTP 200)
+  url             https://dud.example.com               (DUD_PEER_BASE_URL)
+  doh             https://cloudflare-dns.com/dns-query  (config)
+  ech             hard                                  (environment)
+  transport       ok (HTTP 200)
+  server version  2.4.0
 
 Origin: peer desktop
-  url        https://desktop.example.com           (peer)
-  doh        https://cloudflare-dns.com/dns-query  (config)
-  ech        hard                                  (peer)
-  transport  ok (HTTP 200)
+  url             https://desktop.example.com           (peer)
+  doh             https://cloudflare-dns.com/dns-query  (config)
+  ech             hard                                  (peer)
+  transport       ok (HTTP 200)
+  server version  2.4.0
   Note: DUD_PEER_BASE_URL set in the environment, but this peer pins its own
   transport; the pinned values are the ones in use.
 

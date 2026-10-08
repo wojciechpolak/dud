@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -188,7 +189,10 @@ func TestCapabilitiesCommandUsesMandatoryTransportAndValidatesPayload(t *testing
 		t.Fatal(err)
 	}
 	body, _ := hex.DecodeString(v2CapabilitiesVectorHex)
-	transport := &capabilitiesStubTransport{body: body}
+	transport := &capabilitiesStubTransport{
+		body:    body,
+		headers: http.Header{"Dud-Server-Version": {"2.5.1-test.3"}},
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	a := newApp(strings.NewReader(""), &stdout, &stderr)
@@ -203,6 +207,7 @@ func TestCapabilitiesCommandUsesMandatoryTransportAndValidatesPayload(t *testing
 	}
 	if !strings.Contains(stdout.String(), `"atomic-delivery"`) ||
 		!strings.Contains(stdout.String(), `"quota_enforcement": "atomic"`) ||
+		!strings.Contains(stdout.String(), `"server_version": "2.5.1-test.3"`) ||
 		!strings.Contains(stdout.String(), `"base_url": "https://peer.example.com"`) ||
 		!strings.Contains(stdout.String(), `"base_url": "environment"`) {
 		t.Fatalf("output = %s", stdout.String())
@@ -219,7 +224,7 @@ func TestCapabilitiesDiscoveryRejectsWrongMediaType(t *testing.T) {
 	a.newV2Transport = func(v2TransportOptions) (v2Transport, error) {
 		return transport, nil
 	}
-	_, _, err := a.fetchV2Capabilities(
+	_, _, _, err := a.fetchV2Capabilities(
 		context.Background(),
 		v2NetworkSettings{
 			BaseURL: v2NetworkOption{Value: "https://dud.example.com", Source: v2NetworkSourceConfig},
@@ -250,6 +255,7 @@ func TestV2FeatureDiscoveryAgainstLegacyServerFailsWithSafeAlternative(t *testin
 
 type capabilitiesStubTransport struct {
 	body        []byte
+	headers     http.Header
 	contentType string
 	statusCode  int
 	called      int
@@ -276,6 +282,7 @@ func (transport *capabilitiesStubTransport) Do(_ context.Context, request v2Requ
 	return &v2Response{
 		StatusCode:  statusCode,
 		ContentType: contentType,
+		Headers:     transport.headers.Clone(),
 		Body:        append([]byte(nil), transport.body...),
 	}, nil
 }

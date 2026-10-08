@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -595,7 +596,12 @@ func (transport *stubV2Transport) Do(_ context.Context, request v2Request) (*v2R
 	if err != nil {
 		return nil, err
 	}
-	return &v2Response{StatusCode: 200, ContentType: v2CBORContentType, Body: body}, nil
+	return &v2Response{
+		StatusCode:  200,
+		ContentType: v2CBORContentType,
+		Headers:     http.Header{"Dud-Server-Version": {"2.5.1-test.3"}},
+		Body:        body,
+	}, nil
 }
 
 // clearV2TestEnvironment removes the ambient DUD_* configuration. Every test

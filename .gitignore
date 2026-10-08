@@ -5,6 +5,7 @@
 .fallow/
 .idea/
 .wrangler/
+.work/
 .dud-dev/
 coverage/
 /bin/

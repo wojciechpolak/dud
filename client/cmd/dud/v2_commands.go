@@ -566,7 +566,7 @@ func (a *app) cmdDoctor(args []string) error {
 		if len(target.Delivery) != 0 {
 			result["delivery"] = target.Delivery
 		}
-		capabilities, transportStatus, transportErr := a.fetchV2Capabilities(
+		capabilities, transportStatus, serverVersion, transportErr := a.fetchV2Capabilities(
 			ctx,
 			target.Settings,
 			bootstrap,
@@ -578,6 +578,7 @@ func (a *app) cmdDoctor(args []string) error {
 		} else {
 			result["ok"] = true
 			result["transport_status"] = transportStatus
+			result["server_version"] = serverVersion
 			result["capabilities"] = renderV2Capabilities(capabilities)
 		}
 		results = append(results, result)
@@ -664,6 +665,7 @@ func (a *app) renderDoctorReport(
 		renderPinnedV2Network(origin, targets[index].Pinned, targets[index].Settings)
 		if result["ok"] == true {
 			origin.addf("transport", "ok (HTTP %v)", result["transport_status"])
+			origin.addf("server version", "%s", safeTerminalText(fmt.Sprint(result["server_version"])))
 		} else {
 			origin.addf("transport", "FAILED (%v)", result["error"])
 		}

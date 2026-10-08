@@ -1263,6 +1263,10 @@ Content-Type: application/dud+cbor; version=2
 Accept: application/dud+cbor; version=2
 ```
 
+`GET /v2/capabilities` returns the deployment's application version in the
+`DUD-Server-Version` response header. Clients treat an absent header as an
+unreported version, so the header remains optional for compatible deployments.
+
 Opaque ciphertext upload/download bodies use `application/octet-stream`. Private
 responses carry `Cache-Control: no-store`. Request bodies, including raw
 ciphertext, are covered by the body digest in [§9.3](#93-request-authorization).

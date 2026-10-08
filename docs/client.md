@@ -294,6 +294,11 @@ same entries under `resumable_transfers`. To discard one explicitly:
 dud peer abandon PEER --id DESCRIPTOR_DIGEST --yes
 ```
 
+`dud doctor` and `dud capabilities` also report the application version sent by
+each peer server. `unreported` means the server omitted the optional
+`DUD-Server-Version` response header. `dud --version` reports the client build,
+while `dud test` reads the server version from the dead drop health endpoint.
+
 Abandoning an upload deletes its active server lease when reachable, removes the
 private spool, and rolls back the unpublished sequence. It is allowed only for
 the newest outbound sequence. A lost commit response leaves publication

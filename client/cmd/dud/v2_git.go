@@ -2594,7 +2594,7 @@ func (runtime *v2PeerRuntime) readV2GitDeliveryHeader(opts v2GitFetchOptions, de
 	next, err := runtime.validateNextDescriptor(runtime.state.Chains["in:data"], envelope)
 	if err != nil {
 		_ = writeV2PeerDeliveryState(runtime.paths, runtime.state)
-		return header, err
+		return header, v2GapRecoveryHint(err, opts.Alias)
 	}
 	policy, err := descriptorPolicy(envelope.Descriptor)
 	if err != nil {

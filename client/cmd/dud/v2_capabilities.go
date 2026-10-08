@@ -372,7 +372,7 @@ func v2BootstrapAddresses(cfg *v2LocalConfig) []netip.Addr {
 
 // fetchV2Capabilities takes the resolved settings rather than their values so
 // that a transport failure can name the layer that chose the target.
-func (a *app) fetchV2Capabilities(ctx context.Context, settings v2NetworkSettings, bootstrap []netip.Addr) (*v2Capabilities, int, error) {
+func (a *app) fetchV2Capabilities(ctx context.Context, settings v2NetworkSettings, bootstrap []netip.Addr) (*v2Capabilities, int, string, error) {
 	baseURL, dohURL, echMode := settings.values()
 	transport, err := a.newV2Transport(v2TransportOptions{
 		DOHURL:        dohURL,
@@ -385,7 +385,7 @@ func (a *app) fetchV2Capabilities(ctx context.Context, settings v2NetworkSetting
 		ECHModeSource: settings.ECHMode.Source,
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
 	response, err := transport.Do(ctx, v2Request{
 		Method: "GET",
@@ -397,22 +397,30 @@ func (a *app) fetchV2Capabilities(ctx context.Context, settings v2NetworkSetting
 		MaxResponseBytes: v2MaxDescriptorBytes,
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, response.StatusCode, fmt.Errorf("capability discovery returned HTTP %d", response.StatusCode)
+		return nil, response.StatusCode, "", fmt.Errorf("capability discovery returned HTTP %d", response.StatusCode)
 	}
 	if response.ContentType != v2CBORContentType {
-		return nil, response.StatusCode, fmt.Errorf(
+		return nil, response.StatusCode, "", fmt.Errorf(
 			"capability discovery returned unexpected Content-Type %q",
 			response.ContentType,
 		)
 	}
 	capabilities, err := decodeV2Capabilities(response.Body)
 	if err != nil {
-		return nil, response.StatusCode, err
+		return nil, response.StatusCode, "", err
 	}
-	return capabilities, response.StatusCode, nil
+	serverVersion := response.Headers.Get("DUD-Server-Version")
+	if serverVersion == "" {
+		serverVersion = "unreported"
+	} else if len(serverVersion) > 128 || strings.IndexFunc(serverVersion, func(r rune) bool {
+		return r < 0x21 || r > 0x7e
+	}) >= 0 {
+		serverVersion = "invalid"
+	}
+	return capabilities, response.StatusCode, serverVersion, nil
 }
 
 func (a *app) cmdCapabilities(args []string) error {
@@ -448,7 +456,7 @@ func (a *app) cmdCapabilities(args []string) error {
 	if echMode == "off" && !jsonOutput {
 		fmt.Fprintln(a.errOut, "WARNING: v2 ECH off mode exposes the target hostname in TLS SNI.")
 	}
-	capabilities, status, err := a.fetchV2Capabilities(
+	capabilities, status, serverVersion, err := a.fetchV2Capabilities(
 		context.Background(),
 		settings,
 		v2BootstrapAddresses(cfg),
@@ -462,6 +470,7 @@ func (a *app) cmdCapabilities(args []string) error {
 	report["ech_mode"] = echMode
 	report["network_sources"] = settings.sources()
 	report["transport_status"] = status
+	report["server_version"] = serverVersion
 	if jsonOutput {
 		return writeJSON(a.out, report)
 	}
@@ -473,6 +482,7 @@ func (a *app) cmdCapabilities(args []string) error {
 	origin.addf("Transport", "ok (HTTP %d)", status)
 
 	server := out.section("Server capabilities")
+	server.add("version", safeTerminalText(serverVersion))
 	server.add("protocols", joinValues(capabilities.Protocols))
 	features, _ := report["features"].([]string)
 	server.add("features", joinValues(features))

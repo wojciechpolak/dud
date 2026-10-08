@@ -453,8 +453,8 @@ func TestV2DoctorSeparatesTheGlobalEnvironmentFromPinnedPeers(t *testing.T) {
 		t.Fatalf("doctor code = %d", code)
 	}
 	for _, want := range []string{
-		"url        https://env.example.com       (DUD_PEER_BASE_URL)",
-		"url        https://peer.example.com      (peer)",
+		"url             https://env.example.com       (DUD_PEER_BASE_URL)",
+		"url             https://peer.example.com      (peer)",
 		"Note: DUD_PEER_BASE_URL set in the environment, but this peer pins its own",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -474,8 +474,8 @@ func TestV2DoctorSeparatesTheGlobalEnvironmentFromPinnedPeers(t *testing.T) {
 		t.Fatalf("doctor code = %d", code)
 	}
 	for _, want := range []string{
-		"url         https://cli.example.com       (cli)",
-		"pinned url  https://peer.example.com      (peer profile)",
+		"url             https://cli.example.com       (cli)",
+		"pinned url      https://peer.example.com      (peer profile)",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("doctor text omitted %q: %s", want, stdout.String())
@@ -502,9 +502,9 @@ func TestV2DoctorTextReportsTheResolvedLayer(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Origin: global",
-		"url        https://dud.example.com       (config)",
-		"doh        https://dns.google/dns-query  (config)",
-		"ech        hard                          (config)",
+		"url             https://dud.example.com       (config)",
+		"doh             https://dns.google/dns-query  (config)",
+		"ech             hard                          (config)",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("doctor text omitted %q: %s", want, stdout.String())

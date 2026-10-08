@@ -457,6 +457,7 @@ test('capability discovery advertises only implemented features and atomic quota
     'application/dud+cbor; version=2',
   );
   assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('dud-server-version'), '2.4.0');
   const body = await decodeResponse(response);
   assert.deepEqual(body.get(1), [1, 2]);
   assert.deepEqual(body.get(2), [2, 3, 5, 6, 7, 9, 10, 11, 12]);

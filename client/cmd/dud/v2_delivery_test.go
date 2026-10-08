@@ -1086,6 +1086,26 @@ func TestV2ResumeApprovalCrossesOneGapAndNoMore(t *testing.T) {
 	}
 }
 
+func TestV2GapErrorNamesTheRecoveryCommandsAndDataLoss(t *testing.T) {
+	t.Setenv("DUD_PROFILE", "ak")
+	gap := &v2SequenceGapError{sequence: 9}
+	message := v2GapRecoveryHint(gap, "ak2").Error()
+	for _, fragment := range []string{
+		"gap before sequence 9",
+		"DUD_PROFILE=ak dud peer resume ak2",
+		"DUD_PROFILE=ak dud receive ak2",
+		"resend the skipped deliveries",
+	} {
+		if !strings.Contains(message, fragment) {
+			t.Fatalf("gap recovery error %q omitted %q", message, fragment)
+		}
+	}
+	original := errors.New("unrelated failure")
+	if v2GapRecoveryHint(original, "ak2") != original {
+		t.Fatal("a non-gap error gained a recovery hint")
+	}
+}
+
 // An output that already holds the payload is a no-op, so it is accepted on
 // the first attempt and anything else is refused. The durable transfer record
 // is written before the output check, so refusing the first run would let an

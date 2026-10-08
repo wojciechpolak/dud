@@ -245,6 +245,7 @@ func TestDoctorTextOutputSummarizesLocalStateAndTools(t *testing.T) {
 		"Local state\n  peers             0\n  schema            v3\n  issues            none",
 		"Tools\n  age         ok",
 		"git         ok",
+		"server version  2.5.1-test.3",
 	} {
 		if !strings.Contains(stdout.String(), fragment) {
 			t.Fatalf("doctor text omitted %q: %s", fragment, stdout.String())

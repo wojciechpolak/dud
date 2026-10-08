@@ -10,6 +10,9 @@ and this project follows
 
 ### Added
 
+- Report the server application version in `dud doctor`, `dud capabilities`, and
+  their JSON output. Peer servers publish it on capability discovery without
+  changing the deterministic capability document.
 - Add Go static analysis: `gocyclo`, `errcheck`, `deadcode`, `goimports`,
   `govulncheck`, and `staticcheck`, plus a multichecker bundling the
   `golang.org/x/tools` analyzers that `go vet` leaves off. They are declared in
@@ -49,6 +52,9 @@ and this project follows
 
 ### Fixed
 
+- Add the exact `dud peer resume PEER` and follow-up `dud receive PEER` commands
+  to sequence-gap errors, and warn that the sender must resend skipped
+  deliveries.
 - Report a failed write of a command's own output. `dud flush`, `dud test`, and
   `dud upload --json` pass a response body through to standard output, and a
   short write there exited 0 as though the whole body had been written.

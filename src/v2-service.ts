@@ -87,6 +87,7 @@ export interface V2ServiceDependencies {
    */
   enrollmentSecret?: string;
   limits: V2Limits;
+  serverVersion?: string;
   now?: () => number;
   randomBytes?: (length: number) => Uint8Array;
   observeTiming?: V2TimingObserver;
@@ -221,6 +222,7 @@ function v2Capabilities(
   v1Enabled: boolean,
   pairingEnabled: boolean,
   enrollmentGated: boolean,
+  serverVersion?: string,
 ): Response {
   const limitMap = new Map<number, CborValue>([
     [V2_LIMIT.maxPayloadBytes, limits.maxObjectBytes],
@@ -243,6 +245,10 @@ function v2Capabilities(
       V2_CHUNK_LIMITS.maxUploadLeaseSeconds,
     ],
   ]);
+  const headers =
+    serverVersion && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(serverVersion)
+      ? { 'dud-server-version': serverVersion }
+      : undefined;
   return v2CborResponse(
     new Map<number, CborValue>([
       [1, v1Enabled ? [1, 2] : [2]],
@@ -262,6 +268,8 @@ function v2Capabilities(
         ]),
       ],
     ]),
+    200,
+    headers,
   );
 }
 
@@ -790,6 +798,7 @@ export function createV2Service(dependencies: V2ServiceDependencies) {
         v1Enabled,
         true,
         dependencies.enrollmentSecret !== undefined,
+        dependencies.serverVersion,
       );
     }
     const deliveryResponse = delivery

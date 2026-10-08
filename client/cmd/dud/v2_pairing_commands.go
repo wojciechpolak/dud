@@ -1573,8 +1573,8 @@ func (a *app) cmdPeerResume(args []string) error {
 				"pending_receive": "the next delivery on each chain is accepted even if it skips a sequence",
 			})
 		}
-		fmt.Fprintf(a.out, "Resumed %d chain(s) for %q. Run dud receive %s to continue.\n",
-			len(quarantined), alias, alias)
+		fmt.Fprintf(a.out, "Resumed %d chain(s) for %q. Run %s to continue.\n",
+			len(quarantined), alias, v2ProfiledCommand("receive "+alias))
 		return nil
 	})
 }
