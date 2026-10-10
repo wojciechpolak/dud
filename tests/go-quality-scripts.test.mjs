@@ -116,7 +116,12 @@ test('the tidy check reports changes without writing module files', (t) => {
       'scripts/check-tidy.sh',
       path.join(root, 'scripts/check-tidy.sh'),
     );
-    const mod = readFileSync('client/go.mod', 'utf8');
+    // Offline fixtures use the installed Go toolchain. Their dependency check
+    // must not trigger a toolchain download with checksum verification disabled.
+    const mod = readFileSync('client/go.mod', 'utf8').replace(
+      /^toolchain\s+\S+\n/m,
+      '',
+    );
     const sum = readFileSync('client/go.sum', 'utf8');
     for (const dir of MODULES) {
       writeFileSync(path.join(root, dir, 'go.mod'), mod);

@@ -47,15 +47,17 @@ function pinFixture(t, overrides = {}) {
     ].join('\n'),
     '.github/supported-versions.json': JSON.stringify({
       node: { minimum: '24.0.0' },
-      go: { minimum: '1.24.0' },
+      go: { minimum: '1.24.0', toolchain: 'go1.24.1' },
       pinnedSources: { openssl: 'openssl-4.0.0' },
       updatePolicy: 'reviewed like code',
     }),
     '.node-version': '24.15.0\n',
-    'client/go.mod': 'module example.test/client\n\ngo 1.24.0\n',
+    'client/go.mod':
+      'module example.test/client\n\ngo 1.24.0\n\ntoolchain go1.24.1\n',
     'tests/vectors/protocol-v2/go.mod':
-      'module example.test/vectors\n\ngo 1.24.0\n',
-    'tools/go.mod': 'module example.test/tools\n\ngo 1.24.0\n',
+      'module example.test/vectors\n\ngo 1.24.0\n\ntoolchain go1.24.1\n',
+    'tools/go.mod':
+      'module example.test/tools\n\ngo 1.24.0\n\ntoolchain go1.24.1\n',
     ...overrides,
   };
   for (const [relative, contents] of Object.entries(files)) {
@@ -149,7 +151,7 @@ test('the pin gate rejects a manifest that disagrees with the build', (t) => {
   const root = pinFixture(t, {
     '.github/supported-versions.json': JSON.stringify({
       node: { minimum: '22.0.0' },
-      go: { minimum: '1.21.0' },
+      go: { minimum: '1.21.0', toolchain: 'go1.21.1' },
       pinnedSources: { openssl: 'openssl-3.0.0' },
       updatePolicy: 'reviewed like code',
     }),
@@ -159,6 +161,7 @@ test('the pin gate rejects a manifest that disagrees with the build', (t) => {
   for (const pattern of [
     /node minimum 22\.0\.0 disagrees/,
     /go minimum 1\.21\.0 disagrees/,
+    /go toolchain go1\.21\.1 disagrees/,
     /pinned source 'openssl' is openssl-3\.0\.0 here and openssl-4\.0\.0/,
   ]) {
     assert.match(result.output, pattern);
@@ -169,11 +172,28 @@ test('the pin gate rejects a manifest that disagrees with the build', (t) => {
 // version quietly changes what they accept.
 test('the pin gate rejects a Go module left behind the manifest', (t) => {
   const root = pinFixture(t, {
-    'tools/go.mod': 'module example.test/tools\n\ngo 1.23.0\n',
+    'tools/go.mod':
+      'module example.test/tools\n\ngo 1.23.0\n\ntoolchain go1.24.1\n',
   });
   const result = run(CHECK_PINS, root);
   assert.equal(result.ok, false);
   assert.match(result.output, /disagrees with tools\/go\.mod 1\.23\.0/);
+});
+
+test('the pin gate rejects missing or mismatched Go toolchains', (t) => {
+  for (const toolchain of ['', '\ntoolchain go1.24.0\n']) {
+    const root = pinFixture(t, {
+      'client/go.mod': `module example.test/client\n\ngo 1.24.0\n${toolchain}`,
+    });
+    const result = run(CHECK_PINS, root);
+    assert.equal(result.ok, false);
+    assert.match(
+      result.output,
+      toolchain
+        ? /go toolchain go1\.24\.1 disagrees with client\/go\.mod go1\.24\.0/
+        : /client\/go\.mod: has no toolchain directive/,
+    );
+  }
 });
 
 test('the pin gate rejects a :latest reference', (t) => {

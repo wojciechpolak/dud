@@ -191,17 +191,26 @@ function checkManifest() {
     );
   }
 
-  // Every module states the same language version. A module left behind
-  // compiles against an older set of rules than the one the manifest promises,
-  // and for tools/ that silently changes what the analyzers accept.
+  // Every module shares the minimum Go version and preferred toolchain, so
+  // builds and analyzers use the same language rules and security fixes.
   for (const module of GO_MODULES) {
-    const goDirective = /^go\s+(\S+)$/m.exec(read(module));
+    const text = read(module);
+    const goDirective = /^go\s+(\S+)$/m.exec(text);
     if (!goDirective) {
       fail(module, 'has no go directive');
     } else if (goDirective[1] !== manifest.go.minimum) {
       fail(
         MANIFEST,
         `go minimum ${manifest.go.minimum} disagrees with ${module} ${goDirective[1]}`,
+      );
+    }
+    const toolchainDirective = /^toolchain\s+(\S+)$/m.exec(text);
+    if (!toolchainDirective) {
+      fail(module, 'has no toolchain directive');
+    } else if (toolchainDirective[1] !== manifest.go.toolchain) {
+      fail(
+        MANIFEST,
+        `go toolchain ${manifest.go.toolchain} disagrees with ${module} ${toolchainDirective[1]}`,
       );
     }
   }

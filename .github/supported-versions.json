@@ -6,6 +6,7 @@
   },
   "go": {
     "minimum": "1.26.6",
+    "toolchain": "go1.27.2",
     "enforcedBy": "client/go.mod"
   },
   "tools": {

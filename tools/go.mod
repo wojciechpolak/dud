@@ -2,6 +2,8 @@ module github.com/wojciechpolak/dud/tools
 
 go 1.26.6
 
+toolchain go1.27.2
+
 tool (
 	github.com/fzipp/gocyclo/cmd/gocyclo
 	github.com/kisielk/errcheck
