@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-10
+
 ### Added
 
 - Report the server application version in `dud doctor`, `dud capabilities`, and
