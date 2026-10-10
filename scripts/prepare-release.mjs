@@ -23,14 +23,6 @@ const VERSION_TARGETS = [
     text: (version) => `  version: '${version}',`,
   },
   {
-    file: 'tests/v2-workerd.test.mjs',
-    text: (version) => `      APP_VERSION: '${version}',`,
-  },
-  {
-    file: 'tests/worker.test.mjs',
-    text: (version) => `    config: { version: '${version}' },`,
-  },
-  {
     file: 'wrangler.example.toml',
     text: (version) => `APP_VERSION = "${version}"`,
   },

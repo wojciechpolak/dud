@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Wojciech Polak
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { decodeCbor, encodeCbor } from '../dist/src/cbor.js';
@@ -446,6 +447,9 @@ test('dead drops serve a deployment that keeps no whole state', async () => {
 });
 
 test('capability discovery advertises only implemented features and atomic quotas', async () => {
+  const { version } = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  );
   const { service } = await createV2TestService(new MemoryV2Store());
   const response = await service.fetch(
     new Request(`${V2_ORIGIN}/v2/capabilities`),
@@ -457,7 +461,7 @@ test('capability discovery advertises only implemented features and atomic quota
     'application/dud+cbor; version=2',
   );
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.equal(response.headers.get('dud-server-version'), '2.4.0');
+  assert.equal(response.headers.get('dud-server-version'), version);
   const body = await decodeResponse(response);
   assert.deepEqual(body.get(1), [1, 2]);
   assert.deepEqual(body.get(2), [2, 3, 5, 6, 7, 9, 10, 11, 12]);

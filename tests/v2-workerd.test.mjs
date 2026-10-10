@@ -106,7 +106,7 @@ async function startWorker(t) {
           env: {
             DB: { type: 'd1', id: 'dud-v2' },
             FILES: { type: 'r2', name: 'FILES' },
-            APP_VERSION: { type: 'text', value: '2.4.0' },
+            APP_VERSION: { type: 'text', value: '9.9.9' },
             DUD_DROP_ENABLED: { type: 'text', value: 'true' },
             DUD_DROP_SECRET: {
               type: 'text',

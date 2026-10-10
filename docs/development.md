@@ -51,9 +51,10 @@ as well when deployment or end-to-end peer behavior changes.
 
 Use `npm version major`, `npm version minor`, or `npm version patch` to cut a
 release commit and its `vMAJOR.MINOR.PATCH` tag. The command updates the package
-manifest and lockfile, copies the version to the server defaults, examples, and
-tests, and adds a dated heading below `Unreleased` in the changelog. It stops
-before editing those files if any checked-in version has drifted from
+manifest and lockfile, copies the version to the server defaults and examples,
+and adds a dated heading below `Unreleased` in the changelog. Tests read the
+release version from `package.json` or use independent fixture versions. It
+stops before editing those files if any checked-in version has drifted from
 `package.json`.
 
 ## 3. Go static analysis
