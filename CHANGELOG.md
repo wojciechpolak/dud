@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-15
+
 ### Added
 
 - Add `dud sync [PEER] --refresh-capabilities` to renew server authorization and
