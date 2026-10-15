@@ -146,18 +146,20 @@ func validateUploadOptions(opts uploadOptions, cfg config) error {
 func parseUploadResponse(data []byte) (uploadResponse, error) {
 	var response uploadResponse
 	if err := json.Unmarshal(data, &response); err != nil {
-		return response, fatalError("Upload succeeded but returned an unexpected JSON response.")
+		return response, withCLISteps(fatalError("Upload succeeded but returned an unexpected JSON response; inspect the server logs before creating another upload because the first payload may already be stored"), localCLIStep("Check the upload response format supported by this client.", "--version"))
 	}
 	if response.ID == "" || response.ExpiresAt == "" {
-		return response, fatalError("Upload succeeded but returned an unexpected JSON response.")
+		return response, withCLISteps(fatalError("Upload succeeded but returned an unexpected JSON response; inspect the server logs before creating another upload because the first payload may already be stored"), localCLIStep("Check the upload response format supported by this client.", "--version"))
 	}
 	return response, nil
 }
 
 func buildReceiveCommand(prefix, id, baseURL string, bundle bool) string {
-	cmd := fmt.Sprintf("%s --id %s --url %s", prefix, id, baseURL)
+	cmd := fmt.Sprintf("%s --id %s --url %s", prefix, cliShellArg(id), cliShellArg(baseURL))
 	if bundle {
 		cmd += " --extract"
+	} else if prefix == "dud receive" || prefix == "dud download" {
+		cmd += " --out PATH_TO_NEW_OUTPUT"
 	}
 	return cmd
 }
@@ -170,6 +172,7 @@ func (a *app) printUploadResponse(response uploadResponse, receiveCommand string
 	drop.add("Expires", response.ExpiresAt)
 	drop.add("Delete after read", v2YesNo(response.DeleteAfterRead))
 	drop.add("Receive", receiveCommand)
+	drop.note("On the receiving device, run the Receive command; replace PATH_TO_NEW_OUTPUT with a new output path when shown. Recipient encryption also requires --identity PATH_TO_PRIVATE_IDENTITY. Dead drops use the original --url, independently of DUD_PROFILE.")
 	return report.write(a.out)
 }
 
@@ -331,7 +334,7 @@ func (a *app) reportUpload(data []byte, opts uploadOptions, receivePrefix string
 func (a *app) cmdUpload(args []string, receivePrefix string) error {
 	opts, err := parseUploadOptions(args, a.cfg.DropBaseURL, a.cfg.DOHURL)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	if err := validateUploadOptions(opts, a.cfg); err != nil {
 		return err

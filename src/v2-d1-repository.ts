@@ -364,7 +364,7 @@ export class D1V2Repository
       .prepare(
         `INSERT INTO relationship_resets(old_relationship_id, reset_id, new_relationship_id, state, encrypted_state, created_at, updated_at)
 				 SELECT ?, ?, ?, 'proposed', ?, ?, ? WHERE EXISTS (SELECT 1 FROM relationships WHERE id = ? AND state = 'active')
-				 ON CONFLICT(old_relationship_id) DO UPDATE SET reset_id = excluded.reset_id, new_relationship_id = excluded.new_relationship_id, encrypted_state = excluded.encrypted_state, created_at = excluded.created_at, updated_at = excluded.updated_at
+				 ON CONFLICT(old_relationship_id) DO UPDATE SET reset_id = excluded.reset_id, new_relationship_id = excluded.new_relationship_id, state = excluded.state, encrypted_state = excluded.encrypted_state, created_at = excluded.created_at, updated_at = excluded.updated_at
 				 WHERE relationship_resets.state = 'cancelled' OR (relationship_resets.state = 'proposed' AND excluded.reset_id < relationship_resets.reset_id)`,
       )
       .bind(

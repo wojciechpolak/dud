@@ -462,7 +462,7 @@ func (a *app) cmdCapabilities(args []string) error {
 		v2BootstrapAddresses(cfg),
 	)
 	if err != nil {
-		return err
+		return withCLISteps(err, v2NetworkDiagnosticStep(settings))
 	}
 	report := renderV2Capabilities(capabilities)
 	report["base_url"] = baseURL

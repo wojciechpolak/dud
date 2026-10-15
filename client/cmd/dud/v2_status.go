@@ -26,6 +26,7 @@ type v2ResumableTransfer struct {
 // facts, so text and JSON output render them from this one value rather than
 // from per-command ad-hoc maps.
 type v2DeliveryStatus struct {
+	Alias                      string
 	Generation                 uint64
 	RelationshipReset          *v2RelationshipReset
 	PendingDeliveries          int
@@ -49,7 +50,7 @@ type v2DeliveryStatus struct {
 	LastSuccessfulDrain uint64
 }
 
-func v2DeliveryStatusOf(state *v2PeerDeliveryState) v2DeliveryStatus {
+func v2DeliveryStatusOf(state *v2PeerDeliveryState, aliases ...string) v2DeliveryStatus {
 	pendingChunkBytes := uint64(0)
 	resumableTransfers := make([]v2ResumableTransfer, 0, len(state.PendingChunkDeliveries)+len(state.InboundTransfers))
 	for _, transfer := range state.PendingChunkDeliveries {
@@ -119,6 +120,9 @@ func v2DeliveryStatusOf(state *v2PeerDeliveryState) v2DeliveryStatus {
 	sort.Slice(status.QuarantinedChains, func(left, right int) bool {
 		return status.QuarantinedChains[left].Chain < status.QuarantinedChains[right].Chain
 	})
+	if len(aliases) != 0 {
+		status.Alias = aliases[0]
+	}
 	return status
 }
 
@@ -156,10 +160,18 @@ func (status v2DeliveryStatus) fields() map[string]any {
 		"halt_reason":                  status.HaltReason,
 		"last_successful_drain":        status.LastSuccessfulDrain,
 	}
+	if status.Alias != "" {
+		fields["next_steps"] = status.nextSteps()
+	}
 	if status.RelationshipReset != nil {
 		fields["relationship_reset"] = status.RelationshipReset
+		fields["relationship_reset_next_step"] = v2ResetStatusGuidance(status.RelationshipReset)
+		fields["relationship_reset_can_cancel"] = v2ResetCanCancel(status.RelationshipReset)
 		if status.RelationshipReset.Phase != "active" && status.RelationshipReset.Phase != "cancelled" {
-			fields["relationship_reset_recovery_command"] = status.RelationshipReset.RecoveryCommand
+			fields["relationship_reset_recovery_command"] = v2ResetRecoveryCommand(status.RelationshipReset, status.Alias)
+			if v2ResetCanCancel(status.RelationshipReset) {
+				fields["relationship_reset_cancel_command"] = v2ResetRecoveryCommand(status.RelationshipReset, status.Alias) + " --cancel"
+			}
 		}
 	}
 	if status.HaltEvidence != nil {
@@ -249,9 +261,13 @@ func (status v2DeliveryStatus) rows() []textRow {
 			textRow{Label: "reset server activation", Value: v2YesNo(reset.ServerActivated)},
 			textRow{Label: "reset local abandoned", Value: formatV2ResetDisposition(reset.LocalDisposition)},
 			textRow{Label: "reset peer abandoned", Value: formatV2ResetDisposition(reset.PeerDisposition)},
+			textRow{Label: "reset next step", Value: v2ResetStatusGuidance(reset)},
 		)
 		if reset.Phase != "active" && reset.Phase != "cancelled" {
-			rows = append(rows, textRow{Label: "reset recovery command", Value: reset.RecoveryCommand})
+			rows = append(rows, textRow{Label: "reset recovery command", Value: v2ResetRecoveryCommand(reset, status.Alias)})
+			if v2ResetCanCancel(reset) {
+				rows = append(rows, textRow{Label: "cancel before activation", Value: v2ResetRecoveryCommand(reset, status.Alias) + " --cancel"})
+			}
 		}
 	}
 	if evidence := status.HaltEvidence; evidence != nil {
@@ -263,7 +279,7 @@ func (status v2DeliveryStatus) rows() []textRow {
 			textRow{Label: "relationship ID", Value: evidence.RelationshipID},
 		)
 	}
-	return rows
+	return append(rows, cliStepRows(status.nextSteps())...)
 }
 
 func formatV2ResetDisposition(value v2ResetDisposition) string {
@@ -311,4 +327,34 @@ func v2YesNo(value bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// nextSteps prioritizes recovery guards over ordinary queue work. Synchronizing
+// a halted or resetting relationship cannot advance it, and must not be shown
+// as a way around that guard.
+func (status v2DeliveryStatus) nextSteps() []cliNextStep {
+	alias := status.Alias
+	if alias == "" {
+		return nil
+	}
+	if reset := status.RelationshipReset; reset != nil && reset.Phase != "active" && reset.Phase != "cancelled" {
+		return v2ResetNextSteps(alias, reset)
+	}
+	if status.Halted {
+		return []cliNextStep{localCLIStep("Inspect the halt evidence and verify both devices before choosing recovery.", "peer show "+alias), localCLIStep("If both devices are trusted, preview the work a reset would abandon.", "peer reset "+alias)}
+	}
+	if len(status.QuarantinedChains) != 0 {
+		return []cliNextStep{localCLIStep("Review the sequence gap. This command asks for consent to abandon skipped deliveries; ask the sender to resend their contents afterwards.", "peer resume "+alias)}
+	}
+	steps := []cliNextStep{}
+	if status.PendingDeliveries != 0 || status.PendingCompletions != 0 || status.PendingControlPublications != 0 || status.UndrainedControl {
+		steps = append(steps, localCLIStep("Resume saved publications and acknowledgements; respect any reported retry time. Do not repeat send or Git push.", "sync "+alias))
+	}
+	if status.InboundWaiting || status.InboundChunkTransfers != 0 {
+		steps = append(steps, localCLIStep("Inspect the waiting delivery; use receive for messages/files or git fetch inside the matching repository for a Git checkpoint.", "inbox "+alias))
+	}
+	if status.UnacknowledgedDeliveries != 0 {
+		steps = append(steps, peerCLIStep("Receive the waiting messages/files. For a Git checkpoint use git fetch instead, inside the matching repository.", "receive NAME_FOR_THIS_DEVICE"), localCLIStep("After the other device receives and publishes its acknowledgement, collect it here.", "sync "+alias))
+	}
+	return steps
 }

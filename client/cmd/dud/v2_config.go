@@ -31,7 +31,9 @@ type v2LocalConfig struct {
 
 const v2ConfigSchemaVersion = 3
 
-const v2LocalStateResetInstruction = "erase local peer state with 'dud erase all --yes', initialize again with 'dud init', and re-pair"
+func v2LocalStateResetInstruction() string {
+	return "use a DUD version compatible with the saved state; if you choose to discard all peer state in this profile, first inspect the affected files on this device with '" + v2ProfiledCommand("erase all --dry-run") + "'; erasure loses pairings and pending work"
+}
 
 type v2LocalIdentity struct {
 	DeviceID string
@@ -71,7 +73,7 @@ const v2DefaultWorldName = "default"
 // it. Profile names and peer aliases share the shell-safe name grammar.
 func v2ProfiledCommand(command string) string {
 	if profile := os.Getenv("DUD_PROFILE"); profile != "" {
-		return "DUD_PROFILE=" + profile + " dud " + command
+		return "DUD_PROFILE=" + cliShellArg(profile) + " dud " + command
 	}
 	return "dud " + command
 }
@@ -167,7 +169,7 @@ func acquireV2ConfigLock(paths v2Paths) (func(), error) {
 	}
 	if err := lockLocalFile(file); err != nil {
 		_ = file.Close()
-		return nil, errors.New("another DUD process is updating local configuration")
+		return nil, errors.New("another DUD process is updating local configuration; on this device, wait for that operation to finish or stop it, then repeat this command; do not delete the lock file")
 	}
 	if err := file.Truncate(0); err != nil {
 		_ = unlockLocalFile(file)
@@ -247,7 +249,7 @@ func loadV2Config() (*v2LocalConfig, v2Paths, error) {
 	}
 	if err := validatePrivateV2File(paths.Config); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, paths, errors.New("this device is not initialized for peer transfers; run 'dud init --device NAME'")
+			return nil, paths, withCLISteps(errors.New("this device is not initialized for peer transfers"), localCLIStep("Initialize this profile; replace DEVICE_NAME with a name for this device.", "init --device DEVICE_NAME"))
 		}
 		return nil, paths, err
 	}
@@ -348,7 +350,7 @@ func validateV2NetworkConfig(cfg *v2LocalConfig) error {
 // and either could otherwise send traffic somewhere the operator never chose.
 func validateV2Config(cfg *v2LocalConfig) error {
 	if cfg.Version != v2ConfigSchemaVersion {
-		return fmt.Errorf("unsupported V2 config schema version %d; %s", cfg.Version, v2LocalStateResetInstruction)
+		return fmt.Errorf("unsupported V2 config schema version %d; %s", cfg.Version, v2LocalStateResetInstruction())
 	}
 	if err := validateV2DeviceName(cfg.Device); err != nil {
 		return err

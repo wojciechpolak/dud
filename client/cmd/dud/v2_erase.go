@@ -27,12 +27,13 @@ type v2EraseOptions struct {
 }
 
 type v2EraseResult struct {
-	Scope       string   `json:"scope"`
-	Erased      bool     `json:"erased"`
-	Removed     []string `json:"removed"`
-	Retained    []string `json:"retained"`
-	Warnings    []string `json:"warnings"`
-	WouldRemove []string `json:"would_remove,omitempty"`
+	Scope       string        `json:"scope"`
+	NextSteps   []cliNextStep `json:"next_steps,omitempty"`
+	Erased      bool          `json:"erased"`
+	Removed     []string      `json:"removed"`
+	Retained    []string      `json:"retained"`
+	Warnings    []string      `json:"warnings"`
+	WouldRemove []string      `json:"would_remove,omitempty"`
 }
 
 type v2ManagedGitRefs struct {
@@ -88,7 +89,14 @@ func parseV2EraseOptions(args []string) (v2EraseOptions, error) {
 		return opts, fatalError("--yes and --dry-run cannot be combined")
 	}
 	if !opts.Yes && !opts.DryRun {
-		return opts, fatalError("dud erase is destructive; rerun with --yes or inspect it with --dry-run")
+		command := "erase " + opts.Scope
+		if opts.Peer != "" {
+			command += " " + opts.Peer
+		}
+		if opts.IncludeRepo {
+			command += " --repo"
+		}
+		return opts, withCLISteps(fatalError("dud erase is destructive"), localCLIStep("Preview the files and state that erasure would remove before confirming with --yes.", command+" --dry-run"))
 	}
 	return opts, nil
 }
@@ -105,7 +113,7 @@ func newV2EraseResult(scope string) v2EraseResult {
 func (a *app) cmdErase(args []string) error {
 	opts, err := parseV2EraseOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	result := newV2EraseResult(opts.Scope)
 	var eraseErr error
@@ -134,6 +142,18 @@ func (a *app) cmdErase(args []string) error {
 	result.Retained = sortedUniqueStrings(result.Retained)
 	result.Warnings = sortedUniqueStrings(result.Warnings)
 	result.WouldRemove = sortedUniqueStrings(result.WouldRemove)
+	if eraseErr == nil && opts.DryRun {
+		command := "erase " + opts.Scope
+		if opts.Peer != "" {
+			command += " " + opts.Peer
+		}
+		if opts.IncludeRepo {
+			command += " --repo"
+		}
+		result.NextSteps = []cliNextStep{localCLIStep("Only after reviewing and accepting the listed losses, confirm erasure here.", command+" --yes")}
+	} else if eraseErr == nil && opts.Scope == "all" {
+		result.NextSteps = []cliNextStep{localCLIStep("To use peer transfers, initialize this profile and pair the devices again; replace DEVICE_NAME.", "init --device DEVICE_NAME")}
+	}
 	if renderErr := a.renderV2EraseResult(result, opts.DryRun, opts.JSON); renderErr != nil {
 		return renderErr
 	}
@@ -187,6 +207,9 @@ func (a *app) renderV2EraseResult(result v2EraseResult, dryRun, jsonOutput bool)
 	}
 	for _, value := range result.Retained {
 		fmt.Fprintf(a.errOut, "RETAINED: %s\n", value)
+	}
+	for _, step := range result.NextSteps {
+		fmt.Fprintln(a.out, step.text())
 	}
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(a.errOut, "WARNING: %s\n", warning)
@@ -552,7 +575,7 @@ func acquireV2EraseLock(paths v2Paths) (func(), error) {
 	}
 	if err := lockLocalFile(file); err != nil {
 		_ = file.Close()
-		return nil, errors.New("another DUD process is using local state")
+		return nil, errors.New("another DUD process is using local state; on this device, wait for it to finish or stop it, then repeat erasure; do not delete lock files")
 	}
 	return func() {
 		_ = unlockLocalFile(file)
@@ -853,7 +876,7 @@ func acquireV2EraseRepositoryLocks(repository *v2GitRepository) (func(), error) 
 		if err := lockLocalFile(file); err != nil {
 			_ = file.Close()
 			unlock()
-			return nil, errors.New("another DUD Git operation is using repository state")
+			return nil, errors.New("another DUD Git operation is using repository state; on this device, wait for it to finish or stop it, then repeat this command; do not delete lock files")
 		}
 		files = append(files, file)
 	}

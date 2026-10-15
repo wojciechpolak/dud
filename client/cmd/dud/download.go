@@ -122,7 +122,7 @@ func validateDownloadOptions(opts downloadOptions) error {
 func (a *app) cmdDownload(args []string) error {
 	opts, err := parseDownloadOptions(args, a.cfg.DropBaseURL, a.cfg.DOHURL)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	if err := validateDownloadOptions(opts); err != nil {
 		return err

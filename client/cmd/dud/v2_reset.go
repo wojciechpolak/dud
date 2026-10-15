@@ -750,6 +750,7 @@ func (runtime *v2PeerRuntime) activateV2ResetLocally(ctx context.Context, a *app
 	newState := newV2PeerDeliveryState(pending, map[string]string{})
 	newState.Generation = reset.Generation
 	initializeV2ResetChains(newState, newRelationshipID)
+	reset.RecoveryCommand = ""
 	newState.Reset = reset
 	newState.ResetAudit = append(append([]v2ResetAuditRecord(nil), runtime.state.ResetAudit...), v2ResetAuditRecord{
 		ResetID: reset.ResetID, OldRelationshipID: reset.OldRelationshipID,
@@ -795,6 +796,7 @@ func (runtime *v2PeerRuntime) activateV2ResetLocally(ctx context.Context, a *app
 	}
 	oldMarker := *reset
 	oldMarker.Phase = "activating"
+	oldMarker.RecoveryCommand = v2ProfiledCommand("peer reset " + alias + " --yes")
 	runtime.state.Reset = &oldMarker
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return err
@@ -819,6 +821,7 @@ type v2PeerResetOptions struct {
 	confirmed bool
 	json      bool
 	cancel    bool
+	newReset  bool
 }
 
 func parseV2PeerResetOptions(args []string) (v2PeerResetOptions, error) {
@@ -837,9 +840,14 @@ func parseV2PeerResetOptions(args []string) (v2PeerResetOptions, error) {
 			}
 		case "--cancel":
 			opts.cancel = true
+		case "--new":
+			opts.newReset = true
 		default:
 			return opts, fatalError("Unknown peer reset option: " + option)
 		}
+	}
+	if opts.cancel && opts.newReset {
+		return opts, fatalError("--new and --cancel cannot be combined")
 	}
 	return opts, nil
 }
@@ -848,11 +856,14 @@ func parseV2PeerResetOptions(args []string) (v2PeerResetOptions, error) {
 // records the cancellation, so both devices learn the relationship was kept
 // rather than one of them continuing to expect a new generation.
 func (a *app) cancelV2PeerReset(runtime *v2PeerRuntime, opts v2PeerResetOptions) error {
+	if runtime.state.Reset != nil && runtime.state.Reset.ServerActivated {
+		return fmt.Errorf("the server activated this reset; cancellation is unavailable; inspect the next steps with '%s'", v2ProfiledCommand("peer reset "+opts.alias))
+	}
 	if runtime.state.Reset == nil || runtime.state.Reset.Phase == "active" || runtime.state.Reset.Phase == "cancelled" {
 		return errors.New("there is no pending peer relationship reset to cancel")
 	}
 	if !opts.confirmed {
-		return fatalError("cancelling a peer relationship reset requires --yes")
+		return fatalError("confirm cancellation here with '" + v2ProfiledCommand("peer reset "+opts.alias+" --cancel --yes") + "'")
 	}
 	body, err := runtime.resetCancellationBody(runtime.state.Reset)
 	if err != nil {
@@ -871,19 +882,20 @@ func (a *app) cancelV2PeerReset(runtime *v2PeerRuntime, opts v2PeerResetOptions)
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return err
 	}
-	if opts.json {
-		return writeJSON(a.out, map[string]any{"peer": opts.alias, "reset_id": reset.ResetID, "phase": reset.Phase})
-	}
-	fmt.Fprintf(a.out, "Cancelled peer relationship reset %s for %q.\n", reset.ResetID, opts.alias)
-	return nil
+	return a.reportV2PeerReset(opts, reset)
 }
 
 // reportV2ResetDisposition lists the work a reset would abandon and stops. A
 // reset discards everything in flight on both devices, so the operator sees the
 // count of each kind before the command that performs it is accepted.
 func (a *app) reportV2ResetDisposition(opts v2PeerResetOptions, disposition v2ResetDisposition) error {
+	command := "peer reset " + opts.alias
+	if opts.newReset {
+		command += " --new"
+	}
+	command = v2ProfiledCommand(command + " --yes")
 	if opts.json {
-		return writeJSON(a.out, map[string]any{"peer": opts.alias, "confirmed": false, "abandons": disposition, "next": "dud peer reset " + opts.alias + " --yes"})
+		return writeJSON(a.out, map[string]any{"peer": opts.alias, "confirmed": false, "abandons": disposition, "next": command, "next_device": "local"})
 	}
 	fmt.Fprintf(a.out, "Peer relationship reset for %q abandons:\n", opts.alias)
 	report := &textReport{}
@@ -899,17 +911,26 @@ func (a *app) reportV2ResetDisposition(opts v2PeerResetOptions, disposition v2Re
 	if err := report.write(a.out); err != nil {
 		return err
 	}
-	return fatalError("review the abandoned work, then rerun with --yes")
+	return fatalError("review the abandoned work, then confirm here with '" + command + "'")
 }
 
 // proposeV2PeerReset finds the reset the server already holds for this
 // relationship, or proposes one. Both devices run the same command, so the one
 // that arrives second adopts the proposal already on the server instead of
 // racing a second proposal against it.
-func (runtime *v2PeerRuntime) proposeV2PeerReset(ctx context.Context) (*v2RelationshipReset, map[int]any, error) {
+func (runtime *v2PeerRuntime) proposeV2PeerReset(ctx context.Context, startNew bool) (*v2RelationshipReset, map[int]any, error) {
 	result, found, err := runtime.findV2Reset(ctx)
 	if err != nil {
 		return nil, nil, err
+	}
+	if found && startNew && v2UintEquals(result[1], 3) {
+		found = false
+	}
+	// Repeating a recovery command must not begin another generation after a
+	// completed or cancelled reset. An existing peer proposal can be adopted.
+	if !found && runtime.state.Reset != nil && !startNew &&
+		(runtime.state.Reset.Phase == "active" || runtime.state.Reset.Phase == "cancelled") {
+		return nil, nil, nil
 	}
 	canPropose := runtime.state.Reset == nil || runtime.state.Reset.Phase == "active" || runtime.state.Reset.Phase == "cancelled"
 	if !found && !canPropose {
@@ -938,7 +959,7 @@ func (runtime *v2PeerRuntime) acceptV2PeerResetProposal(ctx context.Context, opt
 	if err := runtime.acceptV2Reset(reset, proposal); err != nil {
 		return nil, nil, err
 	}
-	reset.RecoveryCommand = "dud peer reset " + opts.alias + " --yes"
+	reset.RecoveryCommand = v2ProfiledCommand("peer reset " + opts.alias + " --yes")
 	runtime.state.Reset = reset
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return nil, nil, err
@@ -956,27 +977,47 @@ func (runtime *v2PeerRuntime) acceptV2PeerResetProposal(ctx context.Context, opt
 	return runtime.applyV2ResetResponse(result)
 }
 
-// reportV2PeerReset renders the state a reset reached. A reset the server has
-// not activated is waiting for the other device, so the line names the command
-// that device runs, and the same command re-entered here picks the reset up
-// where it stands.
+// reportV2PeerReset distinguishes server activation from completion on each
+// device and names the actor and command for every remaining step.
 func (a *app) reportV2PeerReset(opts v2PeerResetOptions, reset *v2RelationshipReset) error {
+	steps := v2ResetNextSteps(opts.alias, reset)
+	canCancel := v2ResetCanCancel(reset)
 	output := map[string]any{
 		"peer": opts.alias, "reset_id": reset.ResetID, "generation": reset.Generation,
 		"phase": reset.Phase, "local_consent": reset.LocalConsent,
 		"peer_consent": reset.PeerConsent, "server_activated": reset.ServerActivated,
 		"local_abandoned": reset.LocalDisposition, "peer_abandoned": reset.PeerDisposition,
+		"next_steps": steps, "next": steps[0].Command, "next_device": steps[0].Device,
+		"can_cancel": canCancel, "guidance": v2ResetStatusGuidance(reset),
 	}
-	if !reset.ServerActivated {
-		output["next"] = "dud peer reset " + opts.alias + " --yes"
+	if canCancel {
+		output["cancel_command"] = v2ProfiledCommand("peer reset " + opts.alias + " --cancel --yes")
+	}
+	if reset.Phase == "active" || reset.Phase == "cancelled" {
+		output["new_reset_preview"] = v2ProfiledCommand("peer reset " + opts.alias + " --new")
 	}
 	if opts.json {
 		return writeJSON(a.out, output)
 	}
-	if reset.ServerActivated {
+	if reset.Phase == "cancelled" {
+		fmt.Fprintf(a.out, "Cancelled peer relationship reset %s for %q.\n", reset.ResetID, opts.alias)
+	} else if reset.Phase == "active" {
 		fmt.Fprintf(a.out, "Activated peer relationship reset %s for %q at generation %d.\n", reset.ResetID, opts.alias, reset.Generation)
 	} else {
-		fmt.Fprintf(a.out, "Peer relationship reset %s for %q is waiting for peer consent.\n", reset.ResetID, opts.alias)
+		fmt.Fprintf(a.out, "Peer relationship reset %s for %q is %s.\n", reset.ResetID, opts.alias, reset.Phase)
+	}
+	fmt.Fprintln(a.out, v2ResetStatusGuidance(reset))
+	fmt.Fprintln(a.out, "\nNext steps:")
+	for index, step := range steps {
+		fmt.Fprintf(a.out, "%d. [%s device] %s\n   %s\n", index+1, step.Device, step.Action, step.Command)
+	}
+	if canCancel {
+		fmt.Fprintf(a.out, "\nCancel here before server activation:\n  %s\n", output["cancel_command"])
+	} else if reset.ServerActivated {
+		fmt.Fprintln(a.out, "\nCancellation is unavailable after server activation.")
+	}
+	if preview, ok := output["new_reset_preview"]; ok {
+		fmt.Fprintf(a.out, "\nTo deliberately start another reset, preview it with:\n  %s\n", preview)
 	}
 	return nil
 }
@@ -984,40 +1025,62 @@ func (a *app) reportV2PeerReset(opts v2PeerResetOptions, reset *v2RelationshipRe
 func (a *app) cmdPeerReset(args []string) error {
 	opts, err := parseV2PeerResetOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	return a.withV2PeerForRecovery(opts.alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
-		capabilities, err := runtime.state.ServerContract.capabilities()
-		if err != nil || !hasV2Feature(capabilities.Features, 12) {
-			return errors.New("server does not support peer relationship reset; no reset state was written")
-		}
 		if !hasV2Feature(runtime.state.PeerFeatures, 12) {
 			return errors.New("peer does not advertise peer relationship reset support; no reset state was written")
 		}
-		if opts.cancel {
-			return a.cancelV2PeerReset(runtime, opts)
+		if reset := runtime.state.Reset; opts.newReset && reset != nil && reset.Phase != "active" && reset.Phase != "cancelled" {
+			if err := a.reportV2PeerReset(opts, reset); err != nil {
+				return err
+			}
+			return errors.New("a reset is pending; follow the next steps above before starting another")
 		}
-		if !opts.confirmed {
+		if !opts.confirmed && !opts.cancel {
+			if runtime.state.Reset != nil && !opts.newReset {
+				return a.reportV2PeerReset(opts, runtime.state.Reset)
+			}
 			return a.reportV2ResetDisposition(opts, v2ResetDispositionOf(runtime.state))
 		}
 		ctx := context.Background()
-		reset, proposal, err := runtime.proposeV2PeerReset(ctx)
+		// Recovery checks live support at the pinned origin independently of
+		// the retained delivery contract.
+		capabilities, err := requireV2Features(ctx, runtime.transport, runtime.origin, 12)
+		if err != nil {
+			return fmt.Errorf("check server relationship reset support: %w", err)
+		}
+		contract, err := newV2ServerContract(capabilities)
 		if err != nil {
 			return err
 		}
-		reset.RecoveryCommand = "dud peer reset " + opts.alias + " --yes"
-		if reset.InitiatorRole != runtime.state.Role && !reset.ServerActivated {
+		runtime.state.ServerContract = contract
+		if opts.cancel {
+			return a.cancelV2PeerReset(runtime, opts)
+		}
+		reset, proposal, err := runtime.proposeV2PeerReset(ctx, opts.newReset)
+		if err != nil {
+			return err
+		}
+		if reset == nil {
+			return a.reportV2PeerReset(opts, runtime.state.Reset)
+		}
+		reset.RecoveryCommand = v2ProfiledCommand("peer reset " + opts.alias + " --yes")
+		if reset.Phase == "proposed" && reset.InitiatorRole != runtime.state.Role && !reset.ServerActivated {
 			reset, proposal, err = runtime.acceptV2PeerResetProposal(ctx, opts, reset, proposal)
 			if err != nil {
 				return err
 			}
-			reset.RecoveryCommand = "dud peer reset " + opts.alias + " --yes"
+			reset.RecoveryCommand = v2ProfiledCommand("peer reset " + opts.alias + " --yes")
 		}
 		if reset.ServerActivated {
 			if err := runtime.activateV2ResetLocally(ctx, a, opts.alias, reset, proposal); err != nil {
 				return err
 			}
 		} else {
+			if reset.Phase == "cancelled" {
+				reset.RecoveryCommand = ""
+			}
 			runtime.state.Reset = reset
 			if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 				return err

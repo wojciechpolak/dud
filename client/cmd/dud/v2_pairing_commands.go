@@ -156,7 +156,7 @@ func (a *app) issueV2Invitation(cfg *v2LocalConfig, paths v2Paths, opts v2PeerIn
 func (a *app) cmdPeerInvite(args []string) error {
 	opts, err := parseV2PeerInviteOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	cfg, paths, err := loadV2Config()
 	if err != nil {
@@ -230,7 +230,7 @@ func (a *app) displayAndWaitV2Invitation(cfg *v2LocalConfig, paths v2Paths, pend
 
 func (a *app) displayV2PairingCode(pending *v2PendingPairing, jsonOutput bool) error {
 	if jsonOutput {
-		if err := writeJSON(a.out, map[string]any{"event": "pairing_code", "alias": pending.Alias, "pairing_code": pending.PairingCode, "qr_payload": pending.PairingCode, "expires_at": pending.ExpiresAt}); err != nil {
+		if err := writeJSON(a.out, map[string]any{"event": "pairing_code", "alias": pending.Alias, "pairing_code": pending.PairingCode, "qr_payload": pending.PairingCode, "expires_at": pending.ExpiresAt, "next_steps": v2PairingNextSteps(pending)}); err != nil {
 			return err
 		}
 	} else {
@@ -239,6 +239,9 @@ func (a *app) displayV2PairingCode(pending *v2PendingPairing, jsonOutput bool) e
 			return err
 		}
 		fmt.Fprintln(a.out, "Waiting for the peer to accept...")
+		for _, step := range v2PairingNextSteps(pending) {
+			fmt.Fprintln(a.out, step.text())
+		}
 	}
 	return nil
 }
@@ -735,6 +738,9 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 	}
 	if !jsonOutput {
 		fmt.Fprintf(a.out, "Pairing response sent for %q. Waiting for authentication to finish...\n", alias)
+		for _, step := range v2PairingNextSteps(pending) {
+			fmt.Fprintln(a.out, step.text())
+		}
 	}
 	return a.waitV2Pairing(cfg, paths, pending, transport, jsonOutput)
 }
@@ -843,10 +849,10 @@ func (a *app) progressV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2Pe
 		return 0, errors.New("pairing status phase is invalid")
 	}
 	if phase == 4 {
-		return phase, errors.New("pairing was cancelled")
+		return phase, &v2PairingTerminalError{phase: phase}
 	}
 	if phase == 5 {
-		return phase, errors.New("pairing invitation expired")
+		return phase, &v2PairingTerminalError{phase: phase}
 	}
 	if phase == 3 {
 		return phase, nil
@@ -1404,7 +1410,18 @@ func (a *app) finalizeV2PairingStatus(cfg *v2LocalConfig, paths v2Paths, pending
 	return nil
 }
 
-func (a *app) waitV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2PendingPairing, transport v2Transport, jsonOutput bool) error {
+func (a *app) waitV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2PendingPairing, transport v2Transport, jsonOutput bool) (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			var terminal *v2PairingTerminalError
+			if errors.As(resultErr, &terminal) {
+				if cleanupErr := removeV2PendingPairing(paths, pending.Alias); cleanupErr != nil {
+					resultErr = errors.Join(resultErr, cleanupErr)
+				}
+			}
+			resultErr = v2PairingFailureHint(resultErr, pending)
+		}
+	}()
 	for {
 		if pending.ExpiresAt <= uint64(time.Now().Unix()) {
 			_ = removeV2PendingPairing(paths, pending.Alias)
@@ -1441,7 +1458,7 @@ func (a *app) cmdPeerRevoke(args []string) error {
 		}
 	}
 	if !confirmed {
-		return fatalError("peer revocation preserves but disables pending delivery state; rerun with --yes")
+		return withCLISteps(fatalError("peer revocation preserves but disables pending delivery state"), localCLIStep("If you intend to revoke this relationship, confirm here. Pair again to establish another relationship.", "peer revoke "+cliShellArg(alias)+" --yes"))
 	}
 	if err := a.withV2PeerForRecovery(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
 		ctx := context.Background()
@@ -1616,7 +1633,7 @@ func parseV2PeerAbandonOptions(args []string) (v2PeerAbandonOptions, error) {
 		return opts, errors.New("--id must be a 64-character descriptor digest")
 	}
 	if !confirmed {
-		return opts, fatalError("dud peer abandon is destructive; rerun with --yes")
+		return opts, withCLISteps(fatalError("dud peer abandon is destructive"), localCLIStep("Only if you intend to discard this resumable transfer, confirm here.", "peer abandon "+cliShellArg(opts.alias)+" --id "+opts.digest+" --yes"))
 	}
 	return opts, nil
 }
@@ -1701,7 +1718,7 @@ func (runtime *v2PeerRuntime) abandonV2ResumableDownload(digest string, inbound 
 func (a *app) cmdPeerAbandon(args []string) error {
 	opts, err := parseV2PeerAbandonOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	return a.withV2Peer(opts.alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
 		outboundIndex := -1

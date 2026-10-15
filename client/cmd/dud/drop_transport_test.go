@@ -299,7 +299,7 @@ func TestDropCommandsRejectAnInvalidECHMode(t *testing.T) {
 	a, _, _, _ := newDropTestApp(t, "")
 	a.cfg.ECHMode = "soft"
 	err := a.run([]string{"flush"})
-	if err == nil || err.Error() != "DUD_ECH_MODE must be either 'hard' or 'off'" {
+	if err == nil || !strings.Contains(err.Error(), "DUD_ECH_MODE must be either 'hard' or 'off'") || !strings.Contains(err.Error(), "dud help") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

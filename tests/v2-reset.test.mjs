@@ -504,6 +504,36 @@ function cancellationRequest(value, reset, requestId = fixed(0x33, 16)) {
 }
 
 for (const [backend, createRepository] of REPOSITORY_BACKENDS) {
+  test(`${backend} replaces a cancelled reset with an activatable proposal`, async (t) => {
+    const value = await repositoryFixture(t, createRepository);
+    const cancelledReset = proposal(value);
+    assert.equal((await proposeReset(value, cancelledReset)).status, 200);
+    assert.equal(
+      (await value.service.fetch(cancellationRequest(value, cancelledReset)))
+        .status,
+      200,
+    );
+    const replacement = proposal(value, {
+      resetId: fixed(0x91, 16),
+      newRelationshipId: fixed(0xa1, 16),
+    });
+    const proposed = await proposeReset(value, replacement);
+    assert.equal(proposed.status, 200);
+    const response = decodeMap(await proposed.arrayBuffer());
+    assert.equal(response.get(1), 1);
+    assert.deepEqual(response.get(2).get(3), replacement.resetId);
+    assert.equal(response.has(7), false);
+    assert.equal(
+      (await value.repository.findRelationshipReset(value.oldId)).state,
+      'proposed',
+    );
+    const activated = await value.service.fetch(
+      activationRequest(value, replacement),
+    );
+    assert.equal(activated.status, 200);
+    assert.equal(decodeMap(await activated.arrayBuffer()).get(1), 2);
+  });
+
   test(`${backend} activates a fresh relationship and revokes the old one atomically`, async (t) => {
     const value = await repositoryFixture(t, createRepository);
     const reset = proposal(value);

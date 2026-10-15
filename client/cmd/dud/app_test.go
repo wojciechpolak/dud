@@ -131,7 +131,7 @@ func TestAppMainHandlesUnknownCommand(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	if stderr.String() != "Unknown command: bogus\n" {
+	if !strings.Contains(stderr.String(), "Unknown command: bogus") || !strings.Contains(stderr.String(), "dud help") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

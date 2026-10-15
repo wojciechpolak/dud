@@ -155,7 +155,7 @@ func (a *app) cmdMigrate(args []string) error {
 		return err
 	}
 	if cfg.Version != v2ConfigSchemaVersion {
-		return fmt.Errorf("local peer state is at an unsupported schema version and cannot be migrated; %s", v2LocalStateResetInstruction)
+		return fmt.Errorf("local peer state is at an unsupported schema version and cannot be migrated; %s", v2LocalStateResetInstruction())
 	}
 	if jsonOutput {
 		return writeJSON(a.out, map[string]any{"migrated": false, "from": cfg.Version, "to": cfg.Version})
@@ -251,7 +251,14 @@ func (a *app) cmdPeerAccept(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.acceptV2PeerInvitation(alias, code, jsonOutput)
+	if err := a.acceptV2PeerInvitation(alias, code, jsonOutput); err != nil {
+		var guided *cliGuidanceError
+		if errors.As(err, &guided) {
+			return err
+		}
+		return withCLISteps(err, peerCLIStep("Keep the invitation running and share its unexpired code through a trusted channel. Reissue it if expired.", "peer invite NAME_FOR_THIS_DEVICE"), localCLIStep("Check that both devices use the same server; then enter the code again at the prompt.", "peer accept "+alias))
+	}
+	return nil
 }
 
 func (a *app) cmdPeerList(args []string) error {
@@ -259,7 +266,7 @@ func (a *app) cmdPeerList(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, _, err := loadV2Config()
+	cfg, paths, err := loadV2Config()
 	if err != nil {
 		return err
 	}
@@ -271,7 +278,11 @@ func (a *app) cmdPeerList(args []string) error {
 	if jsonOutput {
 		values := make([]map[string]any, 0, len(aliases))
 		for _, alias := range aliases {
-			values = append(values, redactedV2Peer(alias, cfg.Peers[alias]))
+			value := redactedV2Peer(alias, cfg.Peers[alias])
+			if cfg.Peers[alias].Status == "pending" {
+				value["next_steps"] = v2PeerProfileNextSteps(paths, alias, cfg.Peers[alias])
+			}
+			values = append(values, value)
 		}
 		return writeJSON(a.out, values)
 	}
@@ -283,6 +294,9 @@ func (a *app) cmdPeerList(args []string) error {
 	peers := report.section("")
 	for _, alias := range aliases {
 		peers.add(alias, displayV2PeerStatus(cfg.Peers[alias].Status))
+		if cfg.Peers[alias].Status == "pending" {
+			report.section("Pairing " + alias).addRows(cliStepRows(v2PeerProfileNextSteps(paths, alias, cfg.Peers[alias])))
+		}
 	}
 	return report.write(a.out)
 }
@@ -309,13 +323,17 @@ func (a *app) cmdPeerShow(args []string) error {
 	}
 	peer, exists := cfg.Peers[alias]
 	if !exists {
-		return fmt.Errorf("unknown peer %q", alias)
+		return unknownV2Peer(alias)
 	}
 	settings, err := resolveV2Network(cfg, &peer, v2NetworkOverrides{})
 	if err != nil {
 		return err
 	}
 	value := redactedV2Peer(alias, peer)
+	profileSteps := v2PeerProfileNextSteps(paths, alias, peer)
+	if len(profileSteps) != 0 {
+		value["next_steps"] = profileSteps
+	}
 	value["effective_base_url"] = settings.BaseURL.Value
 	value["effective_doh_url"] = settings.DOHURL.Value
 	value["effective_ech_mode"] = settings.ECHMode.Value
@@ -325,14 +343,14 @@ func (a *app) cmdPeerShow(args []string) error {
 	var status *v2DeliveryStatus
 	if peer.Status == "active" && peer.RelationshipID != "" {
 		if state, stateErr := loadV2PeerDeliveryState(paths, peer.RelationshipID); stateErr == nil {
-			resolved := v2DeliveryStatusOf(state)
+			resolved := v2DeliveryStatusOf(state, alias)
 			status = &resolved
 			resolved.merge(value)
 			value["capabilities_issued_at"] = state.CapabilitiesIssuedAt
 			value["capabilities_expire_at"] = state.CapabilitiesExpireAt
 			value["capability_reissues"] = state.CapabilityReissues
 		} else {
-			value["delivery_state_error"] = stateErr.Error()
+			value["delivery_state_error"] = v2PeerStateFailureHint(stateErr, alias).Error()
 		}
 	}
 	if jsonOutput {
@@ -350,6 +368,7 @@ func (a *app) cmdPeerShow(args []string) error {
 	profile.addNote("doh", settings.DOHURL.Value, settings.DOHURL.Source)
 	profile.addNote("ech", settings.ECHMode.Value, settings.ECHMode.Source)
 	renderPinnedV2Network(profile, pinned, settings)
+	profile.addRows(cliStepRows(profileSteps))
 	profile.add("git remote", peer.GitRemote)
 	profile.addf("capability", "%v", value["capability"])
 
@@ -390,7 +409,7 @@ func (a *app) cmdPeerRename(args []string) error {
 	cfg, err := updateV2Config(func(cfg *v2LocalConfig) error {
 		peer, exists := cfg.Peers[oldAlias]
 		if !exists {
-			return fmt.Errorf("unknown peer %q", oldAlias)
+			return unknownV2Peer(oldAlias)
 		}
 		if _, exists := cfg.Peers[newAlias]; exists {
 			return fmt.Errorf("peer %q already exists", newAlias)
@@ -432,7 +451,7 @@ func (a *app) cmdPeerRemove(args []string) error {
 		}
 	}
 	if !confirmed {
-		return fatalError("dud peer remove is destructive; rerun with --yes")
+		return withCLISteps(fatalError("dud peer remove is destructive"), localCLIStep("If you intend to remove this pairing and its local state, confirm here.", "peer remove "+cliShellArg(alias)+" --yes"))
 	}
 	cfg, paths, err := loadV2Config()
 	if err != nil {
@@ -461,7 +480,7 @@ func (a *app) cmdPeerRemove(args []string) error {
 	}
 	_, err = updateV2Config(func(cfg *v2LocalConfig) error {
 		if _, exists := cfg.Peers[alias]; !exists {
-			return fmt.Errorf("unknown peer %q", alias)
+			return unknownV2Peer(alias)
 		}
 		delete(cfg.Peers, alias)
 		return nil
@@ -523,11 +542,11 @@ func (a *app) cmdDoctor(args []string) error {
 		var status *v2DeliveryStatus
 		if peer.Status == "active" && peer.RelationshipID != "" {
 			if state, stateErr := loadV2PeerDeliveryState(paths, peer.RelationshipID); stateErr == nil {
-				value := v2DeliveryStatusOf(state)
+				value := v2DeliveryStatusOf(state, alias)
 				status = &value
 				delivery = value.fields()
 			} else {
-				delivery["state_error"] = stateErr.Error()
+				delivery["state_error"] = v2PeerStateFailureHint(stateErr, alias).Error()
 			}
 		}
 		targets = append(targets, doctorTarget{
@@ -575,6 +594,7 @@ func (a *app) cmdDoctor(args []string) error {
 			allOK = false
 			result["ok"] = false
 			result["error"] = transportErr.Error()
+			result["next_steps"] = []cliNextStep{v2NetworkDiagnosticStep(target.Settings)}
 		} else {
 			result["ok"] = true
 			result["transport_status"] = transportStatus
@@ -668,6 +688,9 @@ func (a *app) renderDoctorReport(
 			origin.addf("server version", "%s", safeTerminalText(fmt.Sprint(result["server_version"])))
 		} else {
 			origin.addf("transport", "FAILED (%v)", result["error"])
+			if steps, ok := result["next_steps"].([]cliNextStep); ok {
+				origin.addRows(cliStepRows(steps))
+			}
 		}
 		if result["doh_resolver_public"] == false && !bootstrapPinned {
 			parsed, _ := url.Parse(fmt.Sprint(result["doh_url"]))

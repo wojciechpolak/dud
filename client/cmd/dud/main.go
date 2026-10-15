@@ -109,7 +109,7 @@ func (a *app) main(args []string) int {
 	// scripts wrapping the CLI branch on.
 	var statusErr *dropStatusError
 	if errors.As(err, &statusErr) {
-		fmt.Fprintln(a.errOut, statusErr.Error())
+		fmt.Fprintln(a.errOut, err.Error())
 		return statusErr.ExitCode()
 	}
 	if msg := err.Error(); msg != "" {
@@ -118,7 +118,14 @@ func (a *app) main(args []string) int {
 	return 1
 }
 
-func (a *app) run(args []string) error {
+func (a *app) run(args []string) (resultErr error) {
+	defer func() {
+		var syntax fatalError
+		var guided *cliGuidanceError
+		if errors.As(resultErr, &syntax) && syntax != "" && !errors.As(resultErr, &guided) {
+			resultErr = withCLISteps(resultErr, localCLIStep("Check the command syntax and required options.", "help"))
+		}
+	}()
 	if len(args) == 0 {
 		if stdinIsTTY() {
 			return a.interactiveMenu()

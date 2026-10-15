@@ -218,7 +218,7 @@ func TestV2ConfigSchemaMigrationRejectsLegacyV2State(t *testing.T) {
 	if code := a.main([]string{"migrate", "--json"}); code == 0 {
 		t.Fatal("peer configuration at an unsupported schema version was migrated")
 	}
-	if !strings.Contains(stderr.String(), "erase local peer state") || !strings.Contains(stderr.String(), "re-pair") {
+	if !strings.Contains(stderr.String(), "compatible with the saved state") || !strings.Contains(stderr.String(), "dud erase all --dry-run") || strings.Contains(stderr.String(), "dud erase all --yes") {
 		t.Fatalf("migration error = %s", stderr.String())
 	}
 }

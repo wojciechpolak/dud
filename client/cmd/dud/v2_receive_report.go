@@ -11,14 +11,15 @@ import (
 // delivery it can reach in one run, so the outcome of each one has to survive
 // until the whole run is reported rather than being printed as it happens.
 type v2ReceivedItem struct {
-	Sequence         uint64 `json:"sequence"`
-	DescriptorDigest string `json:"descriptor_digest"`
-	PayloadType      uint64 `json:"payload_type"`
-	DisplayName      string `json:"display_name,omitempty"`
-	PlaintextSize    uint64 `json:"plaintext_size"`
-	Output           string `json:"output"`
-	Outcome          string `json:"outcome"`
-	Conflict         string `json:"conflict,omitempty"`
+	Sequence         uint64        `json:"sequence"`
+	DescriptorDigest string        `json:"descriptor_digest"`
+	PayloadType      uint64        `json:"payload_type"`
+	DisplayName      string        `json:"display_name,omitempty"`
+	PlaintextSize    uint64        `json:"plaintext_size"`
+	Output           string        `json:"output"`
+	Outcome          string        `json:"outcome"`
+	Conflict         string        `json:"conflict,omitempty"`
+	NextSteps        []cliNextStep `json:"next_steps,omitempty"`
 	// Set when a copy DUD manages itself outlives the run. That copy is removed
 	// as soon as a separate output holds the same bytes, so what remains is
 	// either Output, a message or an output the operator skipped, or the archive
@@ -50,9 +51,13 @@ type v2ReceiveStop struct {
 func (stop *v2ReceiveStop) Error() string {
 	switch stop.Reason {
 	case "git_checkpoint":
-		return fmt.Sprintf("next delivery is a Git checkpoint; receive it with %s", stop.Next)
+		return fmt.Sprintf("next delivery is a Git checkpoint; on this device, inside the matching repository, receive it with %s", stop.Next)
 	case "conflict":
-		return fmt.Sprintf("refusing to overwrite existing output %s", safeTerminalText(stop.Detail))
+		message := fmt.Sprintf("refusing to overwrite existing output %s", safeTerminalText(stop.Detail))
+		if stop.Next != "" {
+			message += "; on this device, choose a new output path and run '" + stop.Next + "'"
+		}
+		return message
 	}
 	return stop.describe()
 }
@@ -134,7 +139,7 @@ func (a *app) renderV2ReceiveReport(opts v2PeerReceiveOptions, drained []v2Recei
 		stopped := report.section("Stopped")
 		stopped.add("reason", safeTerminalText(stop.describe()))
 		if stop.Next != "" {
-			stopped.add("next", stop.Next)
+			stopped.add("next (local)", stop.Next)
 		}
 	}
 	// A section left empty is skipped when the report is written, so the same
@@ -179,8 +184,8 @@ func v2ReceivedItemRow(alias string, item v2ReceivedItem) textRow {
 			Label: label,
 			Value: fmt.Sprintf("skipped: %s already exists", safeTerminalText(item.Conflict)),
 			Items: []string{fmt.Sprintf(
-				"recover with: dud receive %s --id %s --out PATH",
-				alias, item.DescriptorDigest,
+				"on this device, recover with: %s",
+				v2ProfiledCommand("receive "+alias+" --id "+item.DescriptorDigest+" --out PATH_TO_NEW_OUTPUT"),
 			)},
 		}
 	}
@@ -197,6 +202,12 @@ func v2ReceivedItemRow(alias string, item v2ReceivedItem) textRow {
 func v2ReceiveJSON(alias string, drained []v2ReceivedItem, stop *v2ReceiveStop, status v2DeliveryStatus) map[string]any {
 	if drained == nil {
 		drained = []v2ReceivedItem{}
+	}
+	drained = append([]v2ReceivedItem{}, drained...)
+	for index := range drained {
+		if drained[index].Outcome == "skipped" {
+			drained[index].NextSteps = []cliNextStep{localCLIStep("Recover the saved payload to a new output path; replace PATH_TO_NEW_OUTPUT.", "receive "+alias+" --id "+drained[index].DescriptorDigest+" --out PATH_TO_NEW_OUTPUT")}
+		}
 	}
 	payload := map[string]any{
 		"peer":            alias,
@@ -217,6 +228,7 @@ func v2ReceiveJSON(alias string, drained []v2ReceivedItem, stop *v2ReceiveStop, 
 		}
 		if stop.Next != "" {
 			stopped["next"] = stop.Next
+			stopped["next_device"] = "local"
 		}
 		payload["stopped"] = stopped
 	}

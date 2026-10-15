@@ -274,7 +274,7 @@ func TestPeerInviteCreatesPendingProfileAndRendezvous(t *testing.T) {
 	a := newApp(strings.NewReader(""), &output, &bytes.Buffer{})
 	a.newV2Transport = func(v2TransportOptions) (v2Transport, error) { return transport, nil }
 	err := a.run([]string{"peer", "invite", "laptop", "--json"})
-	if err == nil || !strings.Contains(err.Error(), "pairing was cancelled") {
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("invite error = %v", err)
 	}
 	if transport.rendezvous != 1 || transport.statuses != 1 {
@@ -310,7 +310,7 @@ func TestPeerInviteProvesEnrollmentWithoutStoringTheProof(t *testing.T) {
 	a := newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	a.newV2Transport = func(v2TransportOptions) (v2Transport, error) { return transport, nil }
 	if err := a.run([]string{"peer", "invite", "laptop", "--json"}); err == nil ||
-		!strings.Contains(err.Error(), "pairing was cancelled") {
+		!strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("invite error = %v", err)
 	}
 	_, paths, err := loadV2Config()
@@ -458,7 +458,7 @@ func TestPeerInviteFollowsTheEnvironmentBeforeAnythingIsPinned(t *testing.T) {
 		return transport, nil
 	}
 	err := a.run([]string{"peer", "invite", "laptop", "--json"})
-	if err == nil || !strings.Contains(err.Error(), "pairing was cancelled") {
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("invite error = %v", err)
 	}
 	if transport.origins["https://env.example.com"] == 0 || len(transport.origins) != 1 {
@@ -561,11 +561,7 @@ func (transport *inviteTestTransport) Do(_ context.Context, request v2Request) (
 		return &v2Response{StatusCode: 201}, nil
 	case request.Method == "GET" && strings.HasSuffix(request.Path, "/status"):
 		transport.statuses++
-		body, err := v2EncMode.Marshal(map[int]any{1: uint64(4)})
-		if err != nil {
-			return nil, err
-		}
-		return &v2Response{StatusCode: 200, ContentType: v2CBORContentType, Body: body}, nil
+		return nil, context.DeadlineExceeded
 	default:
 		return nil, errors.New("unexpected invite request: " + request.Method + " " + request.Path)
 	}

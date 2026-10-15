@@ -221,12 +221,12 @@ export async function buildDeliveryRequest({
         tokenSecret: query.tokenSecret,
         lookup: await deriveV2DailyCapabilityLookupId(
           query.lookupSecret ?? query.tokenSecret,
-          epoch,
+          query.epoch ?? epoch,
         ),
         direction: query.direction,
         scope: query.scope ?? 'read',
         slot: query.slot,
-        epoch,
+        epoch: query.epoch ?? epoch,
         path: '/v2/deliveries',
         operationIndex: index + 1,
         nonce: query.nonce,
@@ -250,7 +250,7 @@ export async function buildDeliveryRequest({
       header.set(
         V2_DELIVERY_REQUEST_KEYS.controlQueries,
         controlQueries.map((query, index) =>
-          slotProof(query.slot, epoch, 0, proofs[index + 1]),
+          slotProof(query.slot, query.epoch ?? epoch, 0, proofs[index + 1]),
         ),
       );
     }

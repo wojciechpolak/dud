@@ -18,9 +18,12 @@ import (
 // newPairedV2TestPeer installs an active peer profile plus its durable
 // delivery state so command-level tests can exercise reporting without
 // pairing against a server.
-func newPairedV2TestPeer(t *testing.T, alias string) (v2Paths, *v2PeerDeliveryState) {
+func newPairedV2TestPeer(t *testing.T, alias string, profiles ...string) (v2Paths, *v2PeerDeliveryState) {
 	t.Helper()
 	setTestV2Homes(t)
+	if len(profiles) != 0 {
+		t.Setenv("DUD_PROFILE", profiles[0])
+	}
 	_, paths, err := initializeV2Config(
 		"desktop",
 		"https://dud.example.com",
@@ -619,12 +622,10 @@ func TestV2SendKeepsStatusBehindVerboseUntilSomethingNeedsAttention(t *testing.T
 	if err := a.run([]string{"send", "laptop", "-m", "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	// Byte-exact, because both halves matter: no status block on a clean run,
-	// and no wording that claims this command waits for an acknowledgement it
-	// never waits for.
 	quiet := stdout.String()
-	if quiet != "Sent to laptop as data sequence 1.\n"+
-		"Not acknowledged yet; 'dud sync laptop' collects the acknowledgement.\n" {
+	if !strings.HasPrefix(quiet, "Sent to laptop as data sequence 1.\nNot acknowledged yet.\n") ||
+		!strings.Contains(quiet, "DUD_PROFILE=PROFILE_ON_OTHER_DEVICE dud receive NAME_FOR_THIS_DEVICE") ||
+		!strings.Contains(quiet, "dud sync laptop") || strings.Contains(quiet, "Status\n") {
 		t.Fatalf("send text = %q", quiet)
 	}
 

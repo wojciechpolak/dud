@@ -88,10 +88,17 @@ func (a *app) cmdInbox(args []string) error {
 			}
 			if preview != nil {
 				result["next"] = preview
+				command := "receive " + name
+				action := "Receive the waiting messages or files here."
+				if preview.PayloadType == 4 {
+					command = "git fetch " + name
+					action = "In the matching Git repository, fetch the waiting checkpoint."
+				}
+				result["delivery_next_steps"] = []cliNextStep{localCLIStep(action, command)}
 			} else {
 				result["next"] = nil
 			}
-			v2DeliveryStatusOf(runtime.state).merge(result)
+			v2DeliveryStatusOf(runtime.state, name).merge(result)
 			return nil
 		})
 		result["ok"] = err == nil
@@ -135,6 +142,9 @@ func (a *app) renderV2InboxReport(results []map[string]any) error {
 			if preview.Sequence != preview.Expected {
 				section.addf("expected", "sequence %d", preview.Expected)
 			}
+		}
+		if steps, ok := result["delivery_next_steps"].([]cliNextStep); ok {
+			section.addRows(cliStepRows(steps))
 		}
 		section.add("more waiting", v2YesNo(result["inbound_waiting"] == true))
 		section.note(

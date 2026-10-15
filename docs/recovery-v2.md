@@ -131,12 +131,39 @@ sign acceptance. Either side can then repeat the exact recovery command shown by
 dud peer reset PEER --yes
 ```
 
+Every reset result lists the next steps in order, names the device that must
+perform each step, and prints commands. Commands for this device include its
+`DUD_PROFILE`. Commands for the other device use `NAME_FOR_THIS_DEVICE`: select
+that device's paired profile and find its local alias with `dud peer list`. Peer
+aliases and profiles are local, so the other device can use different names.
+
+An `active` result means activation is complete on the device that printed it.
+If the other device still shows waiting, run its displayed recovery command
+there. Once both devices show active, use `dud sync PEER`. Repeating
+`dud peer reset PEER --yes` retrieves an existing peer proposal or reports the
+completed reset; it does not initiate another generation. To deliberately start
+another reset after completion or cancellation, preview and confirm it:
+
+```sh
+dud peer reset PEER --new
+dud peer reset PEER --new --yes
+```
+
+While a reset is pending, `dud peer reset PEER` shows its status and recovery
+steps. `dud peer show PEER`, `dud doctor`, and JSON status also include reset
+guidance and whether cancellation is available.
+
 The command remains available while delivery is halted. It reads reset status
 through the old signing identity without advancing either delivery chain. Once
 the server has both signatures, it atomically creates the next generation and
 revokes the old relationship. Retrying after a timeout or crash reads the same
 signed transcript and activation receipt; it does not create a second
 generation.
+
+The preview reads local state. Confirmed reset and cancellation commands check
+the pinned server's live capability document before sending reset requests. The
+peer must advertise relationship reset in the authenticated pairing transcript.
+Recovery uses live server support and authenticated peer features.
 
 Before server activation, either operator may cancel the proposal:
 
@@ -233,6 +260,27 @@ plain `dud sync` restores service when the relationship is still valid, and
 
 Reissue cannot recover from a _revoked_ relationship. Expiry is routine;
 revocation is a decision.
+
+If server authorization is missing while the locally cached capability expiry is
+still in the future, refresh it through the client:
+
+```sh
+dud sync PEER --refresh-capabilities
+```
+
+The command obtains and saves fresh capabilities before draining confirmations
+and retrying queued work. It preserves the relationship keys and sequence
+chains. Omitting `PEER` refreshes every active peer. A failed refresh stops that
+peer's synchronization and reports the error; a revoked relationship stays
+blocked. `dud peer show PEER --json` reports the increased reissue count after a
+successful refresh.
+
+Peer request refusals with HTTP `400`, `401`, or `403` include this command in
+the client error, with the selected `DUD_PROFILE` and peer alias. A uniform
+refusal does not prove that capabilities expired: authorization, replay, and
+quota checks can produce the same response. If a refreshed sync is still
+refused, inspect the server logs for the exact cause. Sync retries queued sends;
+check its result before submitting the same payload again.
 
 ## 6. Losing a device, or ending a relationship
 

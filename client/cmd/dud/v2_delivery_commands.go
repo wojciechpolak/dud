@@ -28,6 +28,7 @@ const (
 )
 
 type v2PeerRuntime struct {
+	alias          string
 	cfg            *v2LocalConfig
 	paths          v2Paths
 	peer           v2PeerProfile
@@ -53,17 +54,35 @@ func (err *v2SequenceGapError) Error() string {
 	return fmt.Sprintf("gap before sequence %d", err.sequence)
 }
 
-func v2GapRecoveryHint(err error, alias string) error {
+func v2GapRecoveryHint(err error, alias string, commands ...string) error {
 	var gap *v2SequenceGapError
 	if !errors.As(err, &gap) {
 		return err
 	}
-	return fmt.Errorf(
-		"%w; run '%s' to approve one forward jump, then retry '%s'; ask the sender to resend the skipped deliveries",
-		err,
-		v2ProfiledCommand("peer resume "+alias),
-		v2ProfiledCommand("receive "+alias),
-	)
+	command := "receive " + alias
+	if len(commands) != 0 {
+		command = commands[0]
+	}
+	return withCLISteps(err, localCLIStep("Review and explicitly approve one forward jump only if you accept losing the skipped deliveries; ask the sender to resend the skipped deliveries.", "peer resume "+alias), localCLIStep("After approving the gap, continue here.", command))
+}
+
+func v2PeerRequestRefused(err error) bool {
+	var protocol *v2ProtocolError
+	if !errors.As(err, &protocol) {
+		return false
+	}
+	return protocol.Code == 1 && protocol.Status == 400 ||
+		protocol.Code == 2 && protocol.Status == 401 ||
+		protocol.Code == 3 && protocol.Status == 403
+}
+
+func v2PeerCapabilityRecoveryHint(err error, alias string) error {
+	if !v2PeerRequestRefused(err) {
+		return err
+	}
+	// The uniform refusal does not identify capability state, replay, or quota
+	// as the cause, so refresh is a recovery option rather than a diagnosis.
+	return withCLISteps(err, localCLIStep("If peer authorization is out of date, refresh it and retry queued work. If the refusal persists, inspect the logs on the server.", "sync "+alias+" --refresh-capabilities"))
 }
 
 type v2PeerSendOptions struct {
@@ -95,7 +114,9 @@ type v2PeerReceiveOptions struct {
 }
 
 func (a *app) withV2Peer(alias string, timeout time.Duration, operation func(*v2PeerRuntime) error) error {
-	return a.withV2PeerMode(alias, timeout, false, true, operation)
+	return a.withV2PeerMode(alias, timeout, false, true, func(runtime *v2PeerRuntime) error {
+		return v2PeerCapabilityRecoveryHint(operation(runtime), alias)
+	})
 }
 
 // withV2PeerForRecovery loads enough relationship state to revoke or reset it.
@@ -114,7 +135,7 @@ func (a *app) withV2PeerForRecovery(alias string, timeout time.Duration, operati
 func (a *app) openV2PeerDeliveryState(paths v2Paths, peer v2PeerProfile, alias string, allowHalted bool) (*v2PeerDeliveryState, error) {
 	state, err := loadV2PeerDeliveryState(paths, peer.RelationshipID)
 	if err != nil {
-		return nil, err
+		return nil, v2PeerStateFailureHint(err, alias)
 	}
 	if state.Generation != peer.Generation {
 		return nil, errors.New("peer relationship generation does not match its delivery state")
@@ -126,16 +147,16 @@ func (a *app) openV2PeerDeliveryState(paths v2Paths, peer v2PeerProfile, alias s
 		}
 	}
 	for _, problem := range pruneProblems {
-		fmt.Fprintf(a.errOut, "WARNING: %v; the plaintext stays on disk and the next peer operation retries it\n", problem)
+		fmt.Fprintf(a.errOut, "WARNING: %v; the plaintext stays on disk; on this device, resume cleanup with '%s'\n", problem, v2ProfiledCommand("sync "+alias))
 	}
 	if allowHalted {
 		return state, nil
 	}
 	if state.Reset != nil && state.Reset.Phase != "active" && state.Reset.Phase != "cancelled" {
-		return nil, fmt.Errorf("peer relationship reset %s is %s; run 'dud peer reset %s --yes' to resume it", state.Reset.ResetID, state.Reset.Phase, alias)
+		return nil, fmt.Errorf("peer relationship reset %s is %s; %s Inspect the commands with '%s'", state.Reset.ResetID, state.Reset.Phase, v2ResetStatusGuidance(state.Reset), v2ProfiledCommand("peer reset "+alias))
 	}
 	if state.Halted {
-		return nil, fmt.Errorf("peer relationship is halted: %s; revoke and pair again", state.HaltReason)
+		return nil, v2HaltedPeerHint(state.HaltReason, alias)
 	}
 	return state, nil
 }
@@ -219,17 +240,21 @@ func (runtime *v2PeerRuntime) prepareV2DeliveryCapabilities() error {
 // withV2PeerMode runs one operation against a paired peer. It holds the
 // configuration lock for the whole operation, so two DUD processes cannot
 // advance the same relationship's chains at once.
-func (a *app) withV2PeerMode(alias string, timeout time.Duration, allowHalted, prepareDelivery bool, operation func(*v2PeerRuntime) error) error {
+func (a *app) withV2PeerMode(alias string, timeout time.Duration, allowHalted, prepareDelivery bool, operation func(*v2PeerRuntime) error) (resultErr error) {
+	defer func() { resultErr = v2PeerOperationHint(resultErr, alias) }()
 	cfg, paths, err := loadV2Config()
 	if err != nil {
 		return err
 	}
 	peer, exists := cfg.Peers[alias]
 	if !exists {
-		return fmt.Errorf("unknown peer %q", alias)
+		return unknownV2Peer(alias)
 	}
 	if peer.Status != "active" {
-		return fmt.Errorf("peer %q is not active; complete pairing first", alias)
+		if pending, pendingErr := loadV2PendingPairing(paths, alias); pendingErr == nil {
+			return v2PairingFailureHint(fmt.Errorf("peer %q is not active; complete pairing first", alias), pending)
+		}
+		return withCLISteps(fmt.Errorf("peer %q is not active (status %s)", alias, peer.Status), localCLIStep("Inspect this peer before starting another pairing.", "peer show "+alias))
 	}
 	unlock, err := acquireV2ConfigLock(paths)
 	if err != nil {
@@ -261,6 +286,7 @@ func (a *app) withV2PeerMode(alias string, timeout time.Duration, allowHalted, p
 		return err
 	}
 	runtime := &v2PeerRuntime{
+		alias:          alias,
 		cfg:            cfg,
 		paths:          paths,
 		peer:           peer,
@@ -286,7 +312,7 @@ func (a *app) withV2PeerMode(alias string, timeout time.Duration, allowHalted, p
 func (runtime *v2PeerRuntime) requirePeerFeatures() error {
 	capabilities, err := runtime.state.ServerContract.capabilities()
 	if err != nil {
-		return fmt.Errorf("stored peer server contract is invalid; re-pair this peer to refresh its protocol contract: %w", err)
+		return &v2StoredContractError{cause: err}
 	}
 	if err := requireV2CapabilityFeatures(capabilities, 2, 3, 9, 10, 11); err != nil {
 		return err
@@ -301,7 +327,7 @@ func (runtime *v2PeerRuntime) requirePeerFeatures() error {
 func (runtime *v2PeerRuntime) requireGitFeatures() error {
 	capabilities, err := runtime.state.ServerContract.capabilities()
 	if err != nil {
-		return fmt.Errorf("stored peer server contract is invalid; re-pair this peer to refresh its protocol contract: %w", err)
+		return &v2StoredContractError{cause: err}
 	}
 	return requireV2CapabilityFeatures(capabilities, 5)
 }
@@ -773,7 +799,7 @@ func (runtime *v2PeerRuntime) flushPendingGranularDeliveries(ctx context.Context
 		queued := runtime.state.PendingGranularDeliveries[0]
 		now := time.Now()
 		if queued.NextAttemptAt > uint64(now.Unix()) {
-			return fmt.Errorf("next granular delivery retry is scheduled at %d", queued.NextAttemptAt)
+			return &scheduledV2RetryError{kind: "granular delivery", at: queued.NextAttemptAt}
 		}
 		operationID, operationErr := hex.DecodeString(queued.OperationID)
 		descriptor, descriptorErr := decodeV2Base64URL(queued.EncryptedDescriptor, -1)
@@ -1168,7 +1194,7 @@ func (runtime *v2PeerRuntime) flushPendingChunkDeliveries(ctx context.Context) e
 		queued := runtime.state.PendingChunkDeliveries[0]
 		now := time.Now()
 		if queued.NextAttemptAt > uint64(now.Unix()) {
-			return fmt.Errorf("next chunk delivery retry is scheduled at %d", queued.NextAttemptAt)
+			return &scheduledV2RetryError{kind: "chunk delivery", at: queued.NextAttemptAt}
 		}
 		parts, err := pendingV2ChunkManifest(queued)
 		if err != nil {
@@ -1249,7 +1275,7 @@ func (runtime *v2PeerRuntime) flushPendingCompletions(ctx context.Context) error
 		queued := runtime.state.PendingCompletions[0]
 		now := time.Now()
 		if queued.NextAttemptAt > uint64(now.Unix()) {
-			return fmt.Errorf("next completion retry is scheduled at %d", queued.NextAttemptAt)
+			return &scheduledV2RetryError{kind: "completion", at: queued.NextAttemptAt}
 		}
 		decode := func(value string, size int) ([]byte, error) {
 			decoded, err := hex.DecodeString(value)
@@ -1673,7 +1699,7 @@ func (runtime *v2PeerRuntime) enqueueV2ChunkedSend(prepared v2PreparedSend, spoo
 func (a *app) reportV2PeerSend(runtime *v2PeerRuntime, opts v2PeerSendOptions, prepared v2PreparedSend) error {
 	runtime.progress.Phase("publication", 0)
 	runtime.progress.Complete()
-	status := v2DeliveryStatusOf(runtime.state)
+	status := v2DeliveryStatusOf(runtime.state, opts.alias)
 	if opts.json {
 		return writeJSON(a.out, status.merge(map[string]any{
 			"peer":              opts.alias,
@@ -1689,9 +1715,8 @@ func (a *app) reportV2PeerSend(runtime *v2PeerRuntime, opts v2PeerSendOptions, p
 	if err := fprintWrapped(a.out, "Sent to %s as data sequence %d.", opts.alias, prepared.descriptor.Sequence); err != nil {
 		return err
 	}
-	if err := fprintWrapped(a.out,
-		"Not acknowledged yet; 'dud sync %s' collects the acknowledgement.",
-		opts.alias); err != nil {
+	fmt.Fprintln(a.out, "Not acknowledged yet.")
+	if err := writeCLISteps(a.out, []cliNextStep{peerCLIStep("Receive this delivery, using the profile paired with this device.", "receive NAME_FOR_THIS_DEVICE"), localCLIStep("After the other device receives it, collect the acknowledgement here.", "sync "+opts.alias)}); err != nil {
 		return err
 	}
 	return status.reportWhen(opts.verbose, "Status").write(a.out)
@@ -1700,7 +1725,7 @@ func (a *app) reportV2PeerSend(runtime *v2PeerRuntime, opts v2PeerSendOptions, p
 func (a *app) cmdPeerSend(args []string) error {
 	opts, err := parseV2PeerSendOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	if err := preflightV2PeerSendPayload(opts); err != nil {
 		return err
@@ -1756,7 +1781,7 @@ func (a *app) cmdPeerSend(args []string) error {
 		}
 		retainChunkSpool = true
 		if err := runtime.flushPendingDeliveries(ctx); err != nil {
-			return fmt.Errorf("delivery committed locally and will retry publication: %w", err)
+			return v2QueuedPublicationHint(err, opts.alias)
 		}
 		return a.reportV2PeerSend(runtime, opts, prepared)
 	})
@@ -1959,7 +1984,7 @@ func (a *app) confirmV2CollectionExtraction(entries []v2CollectionEntry) bool {
 func (a *app) cmdPeerReceive(args []string) error {
 	opts, err := parseV2PeerReceiveOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	return a.withV2Peer(opts.alias, 2*time.Minute+opts.wait, func(runtime *v2PeerRuntime) (resultErr error) {
 		runtime.progress = a.newV2ProgressReporter(opts.alias, opts.json, opts.progress)
@@ -2018,7 +2043,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 				// The queue head is a replay of something already applied. The
 				// server will not retire it in response to a read, so looping
 				// would spin on the same entry forever.
-				stop = &v2ReceiveStop{Reason: "replay", Next: "dud receive " + opts.alias}
+				stop = &v2ReceiveStop{Reason: "replay", Next: v2ProfiledCommand("receive " + opts.alias)}
 				break
 			}
 			if len(drained) != 0 {
@@ -2040,7 +2065,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 			}
 		}
 		runtime.progress.Complete()
-		return a.renderV2ReceiveReport(opts, drained, stop, v2DeliveryStatusOf(runtime.state))
+		return a.renderV2ReceiveReport(opts, drained, stop, v2DeliveryStatusOf(runtime.state, opts.alias))
 	})
 }
 
@@ -2325,7 +2350,7 @@ func (runtime *v2PeerRuntime) readV2DataDeliveryHeader(opts v2PeerReceiveOptions
 		return header, &v2ReceiveStop{
 			Reason:   "git_checkpoint",
 			Sequence: sequence,
-			Next:     "dud git fetch " + opts.alias,
+			Next:     v2ProfiledCommand("git fetch " + opts.alias),
 		}
 	}
 	if payloadType != 1 && payloadType != 2 && payloadType != 3 {
@@ -2584,14 +2609,14 @@ func (runtime *v2PeerRuntime) commitV2FileOutput(opts v2PeerReceiveOptions, head
 	case v2ExistingOutputMatches(target, received.digest[:]):
 		return target, "", nil
 	case received.resume:
-		return "", "", fmt.Errorf("existing output %s conflicts with the durable transfer", safeTerminalText(target))
+		return "", "", withCLISteps(fmt.Errorf("existing output %s conflicts with the durable transfer", safeTerminalText(target)), localCLIStep("Choose a new path for the saved payload; replace PATH_TO_NEW_OUTPUT.", v2ReceiveOutputRecoveryCommand(opts, header.payloadType)))
 	case opts.onConflict == "overwrite":
 		if err := atomicCopyV2File(target, received.durableOutput); err != nil {
 			return "", "", err
 		}
 		return target, "", nil
 	case opts.onConflict == "refuse":
-		return "", "", &v2ReceiveStop{Reason: "conflict", Sequence: header.sequence, Detail: target}
+		return "", "", &v2ReceiveStop{Reason: "conflict", Sequence: header.sequence, Detail: target, Next: v2ProfiledCommand(v2ReceiveOutputRecoveryCommand(opts, header.payloadType))}
 	default:
 		// Skipping leaves the file alone but still commits and
 		// acknowledges the delivery, because the chain accepts only the
@@ -2652,7 +2677,7 @@ func (runtime *v2PeerRuntime) commitV2DataDelivery(ctx context.Context, a *app, 
 	}
 	if err := runtime.flushPendingCompletions(ctx); err != nil {
 		runtime.clearProgress()
-		fmt.Fprintf(a.errOut, "WARNING: output committed; atomic completion queued for automatic retry: %v\n", err)
+		fmt.Fprintf(a.errOut, "WARNING: output committed; atomic completion queued: %v; on this device, resume with '%s'\n", err, v2ProfiledCommand("sync "+runtime.alias))
 	}
 	return discarded, nil
 }
@@ -2860,7 +2885,7 @@ func (runtime *v2PeerRuntime) flushPendingControlPublications(ctx context.Contex
 		queued := runtime.state.PendingControlPublications[0]
 		now := uint64(time.Now().Unix())
 		if queued.NextAttemptAt > now {
-			return fmt.Errorf("next control event retry is scheduled at %d", queued.NextAttemptAt)
+			return &scheduledV2RetryError{kind: "control event", at: queued.NextAttemptAt}
 		}
 		operationID, operationErr := hex.DecodeString(queued.OperationID)
 		envelope, envelopeErr := decodeV2Base64URL(queued.EncryptedEvent, -1)
@@ -3508,15 +3533,22 @@ func (runtime *v2PeerRuntime) publishPeerRevocation(ctx context.Context, reason 
 }
 
 type v2SyncOptions struct {
-	alias    string
-	json     bool
-	progress v2ProgressFlags
+	alias               string
+	json                bool
+	progress            v2ProgressFlags
+	refreshCapabilities bool
 }
 
 func parseV2SyncOptions(args []string) (v2SyncOptions, error) {
 	opts := v2SyncOptions{}
 	for len(args) != 0 {
 		switch args[0] {
+		case "--refresh-capabilities":
+			if opts.refreshCapabilities {
+				return opts, errors.New("--refresh-capabilities can be provided only once")
+			}
+			opts.refreshCapabilities = true
+			args = args[1:]
 		case "--json":
 			if err := markJSONOption(&opts.json); err != nil {
 				return opts, err
@@ -3545,7 +3577,7 @@ func parseV2SyncOptions(args []string) (v2SyncOptions, error) {
 func (a *app) cmdSync(args []string) error {
 	opts, err := parseV2SyncOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	cfg, _, err := loadV2Config()
 	if err != nil {
@@ -3568,7 +3600,7 @@ func (a *app) cmdSync(args []string) error {
 	for _, name := range aliases {
 		result := map[string]any{"peer": name}
 		var status *v2DeliveryStatus
-		err := a.withV2Peer(name, 30*time.Second, func(runtime *v2PeerRuntime) (resultErr error) {
+		err := a.withV2PeerMode(name, 30*time.Second, false, !opts.refreshCapabilities, func(runtime *v2PeerRuntime) (resultErr error) {
 			runtime.progress = a.newV2ProgressReporter(name, opts.json, opts.progress)
 			defer func() {
 				if resultErr != nil {
@@ -3578,6 +3610,13 @@ func (a *app) cmdSync(args []string) error {
 				}
 			}()
 			runtime.progress.Phase("connecting", 0)
+			if opts.refreshCapabilities {
+				// A forced refresh replaces expiry-based preparation, so even an
+				// expiring grant rotates only once before delivery requests begin.
+				if err := runtime.reissueCapabilities(context.Background()); err != nil {
+					return fmt.Errorf("refresh peer capabilities: %w", err)
+				}
+			}
 			drainErr := runtime.boundedControlDrain(context.Background())
 			completionErr := runtime.flushPendingCompletions(context.Background())
 			deliveryErr := runtime.flushPendingDeliveries(context.Background())
@@ -3594,14 +3633,21 @@ func (a *app) cmdSync(args []string) error {
 			if controlErr != nil {
 				result["control_error"] = controlErr.Error()
 			}
-			resolved := v2DeliveryStatusOf(runtime.state)
+			resolved := v2DeliveryStatusOf(runtime.state, name)
 			status = &resolved
 			resolved.merge(result)
 			if runtime.state.Halted {
 				return errors.New(runtime.state.HaltReason)
 			}
-			if drainErr != nil || completionErr != nil || deliveryErr != nil || controlErr != nil {
-				return errors.New("sync remains incomplete")
+			if failure := errors.Join(drainErr, completionErr, deliveryErr, controlErr); failure != nil {
+				failure = fmt.Errorf("sync remains incomplete: %w", failure)
+				if opts.refreshCapabilities {
+					if v2PeerRequestRefused(failure) {
+						return fmt.Errorf("%w; peer authorization was refreshed; check the server logs for the refusal reason", failure)
+					}
+					return failure
+				}
+				return v2PeerCapabilityRecoveryHint(failure, name)
 			}
 			return nil
 		})

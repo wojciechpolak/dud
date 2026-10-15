@@ -36,12 +36,12 @@ Peer commands (addressed by the local alias of a paired device):
   dud peer show NAME [--json]
   dud peer rename OLD NEW [--json]
   dud peer resume NAME [--yes] [--json]
-  dud peer reset NAME [--yes] [--cancel] [--json]
+  dud peer reset NAME [--new | --cancel] [--yes] [--json]
   dud peer abandon NAME --id DIGEST --yes [--json]
   dud peer revoke NAME --yes [--json]
   dud peer remove NAME --yes [--json]
   dud peer enrollment-key [--json]
-  dud sync [PEER] [--progress | --no-progress] [--json]
+  dud sync [PEER] [--refresh-capabilities] [--progress | --no-progress] [--json]
   dud inbox [PEER] [--json]
   dud send PEER (--file PATH ... | -m TEXT | --stdin) [--name NAME] [--ttl 168h] [--delete-after-read] [--progress | --no-progress] [-v] [--json]
   dud receive PEER [--out PATH | --out-dir DIR] [--wait DURATION] [--max N] [--on-conflict skip|refuse|overwrite] [--no-extract] [--progress | --no-progress] [-v] [--json]
@@ -68,6 +68,11 @@ Peer receive:
   server exposes only that delivery, not the full queue.
 
 Peer status reporting:
+  'dud peer reset NAME' shows reset status and the commands for each device.
+  --yes proposes or continues a reset. After completion, repeating it keeps
+  the completed reset; --new starts another. --cancel --yes cancels before
+  server activation. Each result explains the next step and cancellation.
+
   'dud sync', 'dud doctor', 'dud peer show', and 'dud git status' always print
   delivery counters. 'dud send', 'dud receive', and peer Git commands print them
   only with -v or when work remains queued, undrained, quarantined, halted, or
@@ -76,6 +81,10 @@ Peer status reporting:
   A send returns after publishing. It does not wait for the peer. The peer signs
   an acknowledgement when it receives the delivery. 'dud sync PEER' collects
   that acknowledgement.
+
+  'dud sync PEER --refresh-capabilities' reissues server authorization before
+  synchronizing, even when the cached capabilities have not expired. Without
+  PEER, it refreshes every active peer. Revoked relationships remain blocked.
 
 Peer transfer progress:
   Progress is shown on terminal stderr. --progress forces newline-delimited

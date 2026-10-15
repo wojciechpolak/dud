@@ -1282,8 +1282,9 @@ func TestPruneV2ExpiredInboundTransfersRetainsStateWhenPayloadRemovalFails(t *te
 	}
 }
 
-func TestV2CapabilityReissueRefreshesDurableGrant(t *testing.T) {
+func TestV2ExpiredCapabilityReissueRefreshesDurableGrant(t *testing.T) {
 	paths, state := newPairedV2TestPeer(t, "laptop")
+	state.CapabilitiesExpireAt = 1
 	if err := writeV2PeerDeliveryState(paths, state); err != nil {
 		t.Fatal(err)
 	}
@@ -1303,7 +1304,7 @@ func TestV2CapabilityReissueRefreshesDurableGrant(t *testing.T) {
 	transport := &capabilityReissueTransport{grant: grant}
 	a := newDrainingV2TestApp(t, transport, &bytes.Buffer{}, &bytes.Buffer{})
 	if err := a.withV2Peer("laptop", time.Second, func(runtime *v2PeerRuntime) error {
-		return runtime.reissueCapabilities(context.Background())
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1349,9 +1350,9 @@ func encryptV2TestCapabilityGrant(t *testing.T, recipient age.Recipient, relatio
 	plaintext, err := v2EncMode.Marshal(map[int]any{
 		1: uint64(2), 2: relationshipID, 3: role, 4: uint64(0), 5: origin,
 		6: []any{
-			map[int]any{1: uint64(0), 2: "write", 3: bytesRepeatV2(0x91, 32)},
-			map[int]any{1: uint64(0), 2: "read", 3: bytesRepeatV2(0x92, 32)},
-			map[int]any{1: uint64(0), 2: "ack", 3: bytesRepeatV2(0x93, 32)},
+			map[int]any{1: v2OutboundDirection(role), 2: "write", 3: bytesRepeatV2(0x91, 32)},
+			map[int]any{1: v2InboundDirection(role), 2: "read", 3: bytesRepeatV2(0x92, 32)},
+			map[int]any{1: v2InboundDirection(role), 2: "ack", 3: bytesRepeatV2(0x93, 32)},
 		},
 	})
 	if err != nil {

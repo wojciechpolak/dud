@@ -1788,6 +1788,12 @@ Success rotates the requested verifier secrets and returns
 `forbidden`. This restores server authorization only, not missing directional
 relationship secrets.
 
+Replacement daily capability lookups cover the 30 slot epochs preceding issuance
+as well as the epochs through capability expiry. This preserves authorization
+for retained deliveries, pending completions, and control events whose slots
+precede rotation. Capability expiry and durable revocation still apply at
+request time.
+
 Administrative routes require the distinct v2 administrative bearer. Their
 request maps are:
 

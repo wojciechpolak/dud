@@ -8,6 +8,42 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add `dud sync [PEER] --refresh-capabilities` to renew server authorization and
+  resume queued work while preserving relationship keys and delivery sequences.
+- Include next-step commands and their target device in CLI errors and waiting
+  states for pairing, peer transfers, Git checkpoints, and relationship resets.
+  Local commands preserve `DUD_PROFILE`; commands for the other device mark its
+  unknown profile and alias as placeholders. JSON reports expose structured next
+  steps.
+
+### Changed
+
+- Make repeated `dud peer reset PEER --yes` report a completed or cancelled
+  reset without starting another generation. Starting another reset requires
+  `--new`. Reset output explains confirmation, activation, and cancellation on
+  each device.
+- Guide queued sends and Git pushes toward `sync` to avoid duplicate deliveries.
+  Show retry times in UTC, safe output paths for receive conflicts, and explicit
+  confirmation or scoped previews for destructive recovery.
+
+### Fixed
+
+- Register capability lookups for the 30 days preceding renewal so retained
+  control-slot proofs remain usable after a capability reissue. Expiry and
+  revocation checks remain enforced.
+- Check live server support before a confirmed peer relationship reset instead
+  of refusing it based on a cached capability document.
+- Restore the proposed state when replacing a cancelled reset in SQLite and D1,
+  allowing the replacement to receive consent and activate. Accept only pending
+  peer reset proposals, excluding cancellation receipts.
+- Clear terminal pairing rendezvous records so cancelled or expired pairing
+  attempts can restart with a fresh invitation.
+- Include the required output destination in dead drop download instructions.
+  Preserve HTTP exit codes while reporting recovery guidance and the original
+  server's diagnostic command.
+
 ## [2.5.0] - 2026-10-10
 
 ### Added

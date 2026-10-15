@@ -301,6 +301,23 @@ run_client "$LAPTOP_STATE" send desktop -m laptop-to-desktop
 DESKTOP_RECEIVED=$(run_client "$DESKTOP_STATE" receive laptop --wait 30s)
 printf '%s\n' "$DESKTOP_RECEIVED" | grep -q '^laptop-to-desktop$'
 
+e2e_section "Refresh peer capabilities" \
+  "Renew valid grants through the client and drain pending confirmations."
+
+for direction in desktop laptop; do
+  if [ "$direction" = desktop ]; then
+    REFRESH_STATE=$DESKTOP_STATE
+    REFRESH_PEER=laptop
+  else
+    REFRESH_STATE=$LAPTOP_STATE
+    REFRESH_PEER=desktop
+  fi
+  REFRESH_RESULT=$(run_client "$REFRESH_STATE" sync "$REFRESH_PEER" --refresh-capabilities --json)
+  printf '%s\n' "$REFRESH_RESULT" | grep -q '"ok": true'
+  REFRESH_STATUS=$(run_client "$REFRESH_STATE" peer show "$REFRESH_PEER" --json)
+  printf '%s\n' "$REFRESH_STATUS" | grep -q '"capability_reissues": 1'
+done
+
 e2e_section "Transfer peer files" \
   "Round-trip a file and accept the same bytes at an existing output path."
 
@@ -569,6 +586,36 @@ if [ -z "$NEW_DESKTOP_RELATIONSHIP" ] ||
   echo "peer reset did not converge on one fresh relationship ID" >&2
   exit 1
 fi
+
+e2e_section "Repeat reset recovery commands" \
+  "Keep completed generations stable and require explicit consent to start another reset."
+
+RESET_REPEATED=$(run_client "$DESKTOP_STATE" peer reset laptop --yes --json)
+printf '%s\n' "$RESET_REPEATED" | grep -q '"generation": 1'
+printf '%s\n' "$RESET_REPEATED" | grep -q '"phase": "active"'
+printf '%s\n' "$RESET_REPEATED" | grep -q '"can_cancel": false'
+RESET_REPEATED=$(run_client "$LAPTOP_STATE" peer reset desktop --yes --json)
+printf '%s\n' "$RESET_REPEATED" | grep -q '"generation": 1'
+printf '%s\n' "$RESET_REPEATED" | grep -q '"phase": "active"'
+
+RESET_NEW=$(run_client "$DESKTOP_STATE" peer reset laptop --new --yes --json)
+printf '%s\n' "$RESET_NEW" | grep -q '"phase": "proposed"'
+printf '%s\n' "$RESET_NEW" | grep -q '"can_cancel": true'
+printf '%s\n' "$RESET_NEW" | grep -q '"next_device": "peer"'
+RESET_CANCELLED=$(run_client "$DESKTOP_STATE" peer reset laptop --cancel --yes --json)
+printf '%s\n' "$RESET_CANCELLED" | grep -q '"phase": "cancelled"'
+RESET_CANCELLED=$(run_client "$LAPTOP_STATE" peer reset desktop --yes --json)
+printf '%s\n' "$RESET_CANCELLED" | grep -q '"phase": "cancelled"'
+
+# Explicit creation also works after cancellation, and the peer adopts that
+# proposal through its recovery command without starting a competing reset.
+RESET_NEW=$(run_client "$DESKTOP_STATE" peer reset laptop --new --yes --json)
+printf '%s\n' "$RESET_NEW" | grep -q '"phase": "proposed"'
+RESET_ACCEPTANCE=$(run_client "$LAPTOP_STATE" peer reset desktop --yes --json)
+printf '%s\n' "$RESET_ACCEPTANCE" | grep -q '"phase": "active"'
+RESET_COMPLETION=$(run_client "$DESKTOP_STATE" peer reset laptop --yes --json)
+printf '%s\n' "$RESET_COMPLETION" | grep -q '"generation": 2'
+printf '%s\n' "$RESET_COMPLETION" | grep -q '"phase": "active"'
 
 # The laptop-to-desktop direction has not sent in this generation, so this
 # message must be its first data descriptor.

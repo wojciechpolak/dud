@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -363,6 +364,83 @@ func v2ResetServerContract(t *testing.T, state *v2PeerDeliveryState) {
 	state.ServerContract = contract
 }
 
+type resetDiscoveryTestTransport struct {
+	capabilities capabilitiesStubTransport
+	paths        []string
+}
+
+func (transport *resetDiscoveryTestTransport) Do(ctx context.Context, request v2Request) (*v2Response, error) {
+	transport.paths = append(transport.paths, request.Path)
+	if request.Path == "/v2/capabilities" {
+		return transport.capabilities.Do(ctx, request)
+	}
+	if request.Path != "/v2/relationships/reset" {
+		return nil, errors.New("unexpected reset discovery request")
+	}
+	var wrapper map[int]any
+	if err := v2DecMode.Unmarshal(request.Body, &wrapper); err != nil {
+		return nil, err
+	}
+	status := http.StatusOK
+	result := map[int]any{1: uint64(1), 2: wrapper[2], 3: wrapper[3]}
+	if v2UintEquals(wrapper[1], 2) {
+		status = http.StatusNotFound
+		result = map[int]any{1: uint64(4), 2: "Relationship reset is not available."}
+	}
+	body, err := v2EncMode.Marshal(result)
+	return &v2Response{StatusCode: status, ContentType: v2CBORContentType, Body: body}, err
+}
+
+func TestV2RelationshipResetDiscoversServerSupportBeforeConsent(t *testing.T) {
+	for _, supported := range []bool{true, false} {
+		t.Run(map[bool]string{true: "server adds reset", false: "server omits reset"}[supported], func(t *testing.T) {
+			paths, state := newPairedV2TestPeer(t, "laptop")
+			state.PeerFeatures = []uint64{12}
+			serverState := *state
+			if supported {
+				v2ResetServerContract(t, &serverState)
+			} else {
+				v2ResetServerContract(t, state)
+			}
+			if err := writeV2PeerDeliveryState(paths, state); err != nil {
+				t.Fatal(err)
+			}
+			capabilities, err := serverState.ServerContract.capabilities()
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := v2CapabilityDocumentBytes(capabilities)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := &resetDiscoveryTestTransport{capabilities: capabilitiesStubTransport{body: body}}
+			var output bytes.Buffer
+			a := newDrainingV2TestApp(t, transport, &output, &bytes.Buffer{})
+			err = a.cmdPeerReset([]string{"laptop", "--yes"})
+			stored, loadErr := loadV2PeerDeliveryState(paths, state.RelationshipID)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if !supported {
+				if err == nil || !strings.Contains(err.Error(), "relationship-reset") || stored.Reset != nil || !slices.Equal(transport.paths, []string{"/v2/capabilities"}) {
+					t.Fatalf("reset ignored live server refusal: %v, paths %v", err, transport.paths)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(transport.paths, []string{"/v2/capabilities", "/v2/relationships/reset", "/v2/relationships/reset"}) {
+				t.Fatalf("reset discovery order = %v", transport.paths)
+			}
+			cached, err := stored.ServerContract.capabilities()
+			if err != nil || !hasV2Feature(cached.Features, 12) || stored.Reset == nil || stored.Reset.Phase != "proposed" {
+				t.Fatalf("reset did not retain the live server contract: %v", err)
+			}
+		})
+	}
+}
+
 func TestV2RelationshipResetRejectsMixedVersionsWithoutWritingState(t *testing.T) {
 	paths, state := newPairedV2TestPeer(t, "laptop")
 	state.PeerFeatures = []uint64{12}
@@ -375,6 +453,13 @@ func TestV2RelationshipResetRejectsMixedVersionsWithoutWritingState(t *testing.T
 		t.Fatal(err)
 	}
 	a := newApp(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{})
+	capabilityBody, err := hex.DecodeString(v2CapabilitiesVectorHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.newV2Transport = func(v2TransportOptions) (v2Transport, error) {
+		return &capabilitiesStubTransport{body: capabilityBody}, nil
+	}
 	if err := a.cmdPeerReset([]string{"laptop", "--yes"}); err == nil || !strings.Contains(err.Error(), "server does not support") {
 		t.Fatalf("missing server feature error = %v", err)
 	}
@@ -410,7 +495,7 @@ func TestV2RelationshipResetPreviewRemainsAvailableWhileHalted(t *testing.T) {
 	var output bytes.Buffer
 	a := newApp(bytes.NewReader(nil), &output, &bytes.Buffer{})
 	err := a.cmdPeerReset([]string{"laptop"})
-	if err == nil || !strings.Contains(err.Error(), "rerun with --yes") || !strings.Contains(output.String(), "Peer relationship reset") {
+	if err == nil || !strings.Contains(err.Error(), "confirm here with 'dud peer reset laptop --yes'") || !strings.Contains(output.String(), "Peer relationship reset") {
 		t.Fatalf("halted reset preview = %q, %v", output.String(), err)
 	}
 }

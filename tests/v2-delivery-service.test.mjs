@@ -17,6 +17,10 @@ import {
 } from '../dist/src/v2-memory-repository.js';
 import { sha256 } from '../dist/src/sha256.js';
 import { R2V2BodyStore } from '../dist/src/v2-r2.js';
+import {
+  buildCapabilityReplacement,
+  prepareReissueCapabilities,
+} from '../dist/src/v2-reissue-capabilities.js';
 import { createMigratedLocalD1, LocalD1Database } from './d1-local.mjs';
 import {
   attachHandler,
@@ -27,6 +31,7 @@ import {
   hex,
   registerCapability,
   V2_CONTROL_SLOT,
+  V2_DELIVERY_DEPLOYMENT_KEY,
   V2_EPOCH,
   V2_NOW,
   V2_REPOSITORY_BACKENDS,
@@ -37,6 +42,75 @@ import {
 import { MockR2Bucket } from './v2-helpers.mjs';
 
 const MEMORY_BACKEND = V2_REPOSITORY_BACKENDS[0][1];
+
+for (const [name, createRepository] of V2_REPOSITORY_BACKENDS) {
+  test(`${name} renewed capabilities authorize delivery with past control slots`, async (t) => {
+    const relationship = fill(88);
+    const fixture = await createDeliveryFixture(t, createRepository, {
+      relationshipId: hex(relationship),
+    });
+    const prepared = await prepareReissueCapabilities({
+      deploymentKey: V2_DELIVERY_DEPLOYMENT_KEY,
+      relationship,
+      relationshipId: fixture.relationshipId,
+      role: 0,
+      scopes: ['ack', 'read', 'write'],
+      now: V2_NOW,
+      limits: { maxTtlSeconds: 30 * 86_400 },
+      randomBytes: (length) => crypto.getRandomValues(new Uint8Array(length)),
+    });
+    await fixture.repository.replaceCapabilities({
+      ...(await buildCapabilityReplacement(prepared.items)),
+      now: V2_NOW,
+    });
+    const epoch = Math.floor(V2_NOW / 86_400);
+    const read = prepared.items.find((item) => item.scope === 'read');
+    const write = prepared.items.find((item) => item.scope === 'write');
+    const refusals = [];
+    const handler = attachHandler(fixture.repository, fixture.bodyStore, {
+      handler: { observeRejection: ({ reason }) => refusals.push(reason) },
+    });
+    const response = await handler.deliver({
+      epoch,
+      tokenSecret: write.tokenSecret,
+      controlQueries: [1, 30, 0].map((days, index) => ({
+        tokenSecret: read.tokenSecret,
+        direction: read.direction,
+        slot: fill(100 + index),
+        epoch: epoch - days,
+        nonce: fill(30 + index),
+      })),
+    });
+    assert.equal(response.status, 200, refusals.join('; '));
+    assert.equal((await decodeBody(response)).get(4).length, 3);
+    for (const item of prepared.items) {
+      const oldestLookup = await deriveV2DailyCapabilityLookupId(
+        item.tokenSecret,
+        epoch - 30,
+      );
+      assert.equal(
+        (
+          await fixture.repository.findCapabilityLookup(
+            oldestLookup,
+            epoch - 30,
+          )
+        ).id,
+        item.record.id,
+      );
+      const outsideLookup = await deriveV2DailyCapabilityLookupId(
+        item.tokenSecret,
+        epoch - 31,
+      );
+      assert.equal(
+        await fixture.repository.findCapabilityLookup(
+          outsideLookup,
+          epoch - 31,
+        ),
+        null,
+      );
+    }
+  });
+}
 
 test('delivery admission enforces the configured encrypted descriptor limit', async (t) => {
   const fixture = await createDeliveryFixture(t, MEMORY_BACKEND, {

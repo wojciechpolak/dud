@@ -317,7 +317,7 @@ func ensureV2PeerStateDirectories(paths v2Paths) error {
 
 func writeV2PendingPairing(paths v2Paths, pending *v2PendingPairing) error {
 	if pending.Version != v2PairingStateVersion {
-		return fmt.Errorf("pending pairing state has an unsupported schema version; %s", v2LocalStateResetInstruction)
+		return fmt.Errorf("pending pairing state has an unsupported schema version; %s", v2LocalStateResetInstruction())
 	}
 	if err := ensureV2PeerStateDirectories(paths); err != nil {
 		return err
@@ -347,7 +347,7 @@ func loadV2PendingPairing(paths v2Paths, alias string) (*v2PendingPairing, error
 		return nil, fmt.Errorf("parse pending pairing state: %w", err)
 	}
 	if pending.Version != v2PairingStateVersion || pending.Alias != alias {
-		return nil, fmt.Errorf("pending pairing state is invalid; %s", v2LocalStateResetInstruction)
+		return nil, fmt.Errorf("pending pairing state is invalid; %s", v2LocalStateResetInstruction())
 	}
 	return &pending, nil
 }
@@ -406,7 +406,7 @@ func newV2PeerDeliveryState(pending *v2PendingPairing, capabilities map[string]s
 // trusts that a state which reached it is addressed to this relationship.
 func validateV2PeerDeliveryIdentity(state *v2PeerDeliveryState, relationshipID string) error {
 	if state.Version != v2DeliveryStateVersion || state.RelationshipID != relationshipID || (state.Role != 0 && state.Role != 1) {
-		return fmt.Errorf("peer delivery state identity is invalid; %s", v2LocalStateResetInstruction)
+		return fmt.Errorf("peer delivery state identity is invalid; %s", v2LocalStateResetInstruction())
 	}
 	if decoded, err := hex.DecodeString(relationshipID); err != nil || len(decoded) != 16 {
 		return errors.New("peer delivery relationship ID is invalid")
@@ -423,7 +423,7 @@ func validateV2PeerDeliveryIdentity(state *v2PeerDeliveryState, relationshipID s
 		return errors.New("peer delivery state is incomplete")
 	}
 	if _, err := state.ServerContract.capabilities(); err != nil {
-		return fmt.Errorf("peer delivery server contract is invalid; re-pair this peer to refresh its protocol contract: %w", err)
+		return &v2StoredContractError{cause: err}
 	}
 	for name, value := range state.Capabilities {
 		if _, err := decodeV2Base64URL(value, 32); err != nil {

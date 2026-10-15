@@ -81,7 +81,7 @@ func validateKeygenOptions(opts keygenOptions) error {
 func (a *app) cmdKeygen(args []string) error {
 	opts, err := parseKeygenOptions(args)
 	if err != nil {
-		return err
+		return cliUsageHint(err)
 	}
 	if err := validateKeygenOptions(opts); err != nil {
 		return err

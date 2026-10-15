@@ -111,13 +111,30 @@ func (a *app) dropRequest(ctx context.Context, targetURL string, request v2Reque
 	request.Path = path
 	response, err := transport.Do(ctx, request)
 	if err != nil {
-		return nil, err
+		return nil, withCLISteps(err, deadDropDiagnosticStep(origin))
 	}
 	if response.StatusCode >= 400 {
 		if response.Stream != nil {
 			_ = response.Stream.Close()
 		}
-		return nil, &dropStatusError{StatusCode: response.StatusCode, URL: targetURL}
+		failure := &dropStatusError{StatusCode: response.StatusCode, URL: targetURL}
+		action := "Check this dead drop server's status and settings; if it remains unavailable, inspect its logs on the server."
+		if response.StatusCode == 401 || response.StatusCode == 403 {
+			action = "On this device, verify DUD_DROP_SECRET with the server operator; do not put the secret in command arguments. Check the selected server."
+		}
+		if response.StatusCode == 404 || response.StatusCode == 410 {
+			action = "Verify the dead drop ID and original server with the sender. If the payload expired or was deleted, the sender must upload it again and share the new ID. Check the server here."
+		}
+		if response.StatusCode == 429 {
+			action = "Wait for the server's rate or storage limit to clear. Check its status before retrying; do not blindly repeat an upload."
+		}
+		step := deadDropDiagnosticStep(origin)
+		step.Action = action
+		return nil, withCLISteps(failure, step)
 	}
 	return response, nil
+}
+
+func deadDropDiagnosticStep(origin string) cliNextStep {
+	return cliNextStep{Device: "local", Action: "Check dead drop connectivity and settings on this device. Preserve the original server and any explicit --doh-url; resolve the reported network or TLS error before retrying.", Command: "dud test --url " + cliShellArg(origin+"/v1/test") + " --json"}
 }

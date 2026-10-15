@@ -19,6 +19,8 @@ import type {
   V2Store,
 } from './v2-types.js';
 
+const CAPABILITY_RECOVERY_EPOCHS = 30;
+
 export interface PreparedReissueCapability {
   record: V2CapabilityRecord;
   direction: V2Direction;
@@ -136,7 +138,12 @@ export async function buildCapabilityReplacement(
       direction: item.direction,
       scope: item.scope,
     });
-    const firstEpoch = Math.floor(item.record.createdAt / 86_400);
+    // Rotation must preserve access to slots that can still hold deliveries
+    // or control events under the protocol's 30-day retention ceiling.
+    const firstEpoch = Math.max(
+      0,
+      Math.floor(item.record.createdAt / 86_400) - CAPABILITY_RECOVERY_EPOCHS,
+    );
     const lastEpoch = Math.floor((item.record.expiresAt - 1) / 86_400);
     for (let epoch = firstEpoch; epoch <= lastEpoch; epoch++) {
       registrations.push({
