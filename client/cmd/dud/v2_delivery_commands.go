@@ -63,7 +63,7 @@ func v2GapRecoveryHint(err error, alias string, commands ...string) error {
 	if len(commands) != 0 {
 		command = commands[0]
 	}
-	return withCLISteps(err, localCLIStep("Review and explicitly approve one forward jump only if you accept losing the skipped deliveries; ask the sender to resend the skipped deliveries.", "peer resume "+alias), localCLIStep("After approving the gap, continue here.", command))
+	return withCLISteps(err, localCLIStep("Skipping loses deliveries; ask the sender to resend them.", "peer resume "+alias), localCLIStep("After approving the gap, continue.", command))
 }
 
 func v2PeerRequestRefused(err error) bool {
@@ -82,7 +82,7 @@ func v2PeerCapabilityRecoveryHint(err error, alias string) error {
 	}
 	// The uniform refusal does not identify capability state, replay, or quota
 	// as the cause, so refresh is a recovery option rather than a diagnosis.
-	return withCLISteps(err, localCLIStep("If peer authorization is out of date, refresh it and retry queued work. If the refusal persists, inspect the logs on the server.", "sync "+alias+" --refresh-capabilities"))
+	return withCLISteps(err, localCLIStep("Try refreshing authorization; ask the operator if refused again.", "sync "+alias+" --refresh-capabilities"))
 }
 
 type v2PeerSendOptions struct {
@@ -147,7 +147,7 @@ func (a *app) openV2PeerDeliveryState(paths v2Paths, peer v2PeerProfile, alias s
 		}
 	}
 	for _, problem := range pruneProblems {
-		fmt.Fprintf(a.errOut, "WARNING: %v; the plaintext stays on disk; on this device, resume cleanup with '%s'\n", problem, v2ProfiledCommand("sync "+alias))
+		fmt.Fprintf(a.errOut, "WARNING: %v\nPlaintext remains on disk.\nCleanup: %s\n", problem, v2ProfiledCommand("sync "+alias))
 	}
 	if allowHalted {
 		return state, nil
@@ -254,7 +254,7 @@ func (a *app) withV2PeerMode(alias string, timeout time.Duration, allowHalted, p
 		if pending, pendingErr := loadV2PendingPairing(paths, alias); pendingErr == nil {
 			return v2PairingFailureHint(fmt.Errorf("peer %q is not active; complete pairing first", alias), pending)
 		}
-		return withCLISteps(fmt.Errorf("peer %q is not active (status %s)", alias, peer.Status), localCLIStep("Inspect this peer before starting another pairing.", "peer show "+alias))
+		return withCLISteps(fmt.Errorf("peer %q is not active (status %s)", alias, peer.Status), localCLIStep("Inspect this peer before pairing again.", "peer show "+alias))
 	}
 	unlock, err := acquireV2ConfigLock(paths)
 	if err != nil {
@@ -2606,7 +2606,7 @@ func (runtime *v2PeerRuntime) commitV2FileOutput(opts v2PeerReceiveOptions, head
 	case v2ExistingOutputMatches(target, received.digest[:]):
 		return target, "", nil
 	case received.resume:
-		return "", "", withCLISteps(fmt.Errorf("existing output %s conflicts with the durable transfer", safeTerminalText(target)), localCLIStep("Choose a new path for the saved payload; replace PATH_TO_NEW_OUTPUT.", v2ReceiveOutputRecoveryCommand(opts, header.payloadType)))
+		return "", "", withCLISteps(fmt.Errorf("existing output %s conflicts with the durable transfer", safeTerminalText(target)), localCLIStep("Choose an unused output path.", v2ReceiveOutputRecoveryCommand(opts, header.payloadType)))
 	case opts.onConflict == "overwrite":
 		if err := atomicCopyV2File(target, received.durableOutput); err != nil {
 			return "", "", err
@@ -2674,7 +2674,7 @@ func (runtime *v2PeerRuntime) commitV2DataDelivery(ctx context.Context, a *app, 
 	}
 	if err := runtime.flushPendingCompletions(ctx); err != nil {
 		runtime.clearProgress()
-		fmt.Fprintf(a.errOut, "WARNING: output committed; atomic completion queued: %v; on this device, resume with '%s'\n", err, v2ProfiledCommand("sync "+runtime.alias))
+		fmt.Fprintf(a.errOut, "WARNING: output committed; acknowledgement queued: %v\nResume: %s\n", err, v2ProfiledCommand("sync "+runtime.alias))
 	}
 	return discarded, nil
 }

@@ -376,7 +376,7 @@ func (status v2DeliveryStatus) compactReport(quarantinedGit, rejectedGit int, ne
 				}
 			}
 			if !status.needsAttention() && !status.InboundWaiting && status.UnacknowledgedDeliveries != 0 {
-				label = "After peer receipt, collect the acknowledgement (local): "
+				label = "After receipt: "
 			}
 		}
 		if command != "" && !(len(nextReported) != 0 && nextReported[0] && !status.needsAttention()) {
@@ -405,20 +405,20 @@ func (status v2DeliveryStatus) nextSteps() []cliNextStep {
 		return v2ResetNextSteps(alias, reset)
 	}
 	if status.Halted {
-		return []cliNextStep{localCLIStep("Inspect the halt evidence and verify both devices before choosing recovery.", "peer show "+alias), localCLIStep("If both devices are trusted, preview the work a reset would abandon.", "peer reset "+alias)}
+		return []cliNextStep{localCLIStep("Check peer state and verify both devices.", "peer show "+alias), localCLIStep("If both devices are trusted, preview reset losses.", "peer reset "+alias)}
 	}
 	if len(status.QuarantinedChains) != 0 {
-		return []cliNextStep{localCLIStep("Review the sequence gap. This command asks for consent to abandon skipped deliveries; ask the sender to resend their contents afterwards.", "peer resume "+alias)}
+		return []cliNextStep{localCLIStep("Skipping loses deliveries; ask the sender to resend them.", "peer resume "+alias)}
 	}
 	steps := []cliNextStep{}
 	if status.PendingDeliveries != 0 || status.PendingCompletions != 0 || status.PendingControlPublications != 0 || status.UndrainedControl {
-		steps = append(steps, localCLIStep("Resume saved publications and acknowledgements; respect any reported retry time. Do not repeat send or Git push.", "sync "+alias))
+		steps = append(steps, localCLIStep("Resume after any retry delay; do not repeat send or Git push.", "sync "+alias))
 	}
 	if status.InboundWaiting || status.InboundChunkTransfers != 0 {
-		steps = append(steps, localCLIStep("Inspect the waiting delivery; use receive for messages/files or git fetch inside the matching repository for a Git checkpoint.", "inbox "+alias))
+		steps = append(steps, localCLIStep("Check whether receive or git fetch is needed.", "inbox "+alias))
 	}
 	if status.UnacknowledgedDeliveries != 0 {
-		steps = append(steps, peerCLIStep("Receive the waiting messages/files. For a Git checkpoint use git fetch instead, inside the matching repository.", "receive NAME_FOR_THIS_DEVICE"), localCLIStep("After the other device receives and publishes its acknowledgement, collect it here.", "sync "+alias))
+		steps = append(steps, peerCLIStep("Receive files/messages; use git fetch for checkpoints.", "receive PEER"), localCLIStep("After peer receipt, collect the acknowledgement.", "sync "+alias))
 	}
 	return steps
 }

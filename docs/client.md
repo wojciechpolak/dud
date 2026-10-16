@@ -273,17 +273,16 @@ intact; revoked relationships stay blocked. See `recovery-v2.md` §5.
 
 Peer status reports include next steps for queued publications, pending
 acknowledgements, waiting inbox deliveries, sequence gaps, halted relationships,
-and relationship resets. Each step names `local` or `peer` as its device. Text
-output prints the command on its own line; JSON uses `next_steps` entries with
-`device`, `action`, and `command`. An inbox preview also provides
-`delivery_next_steps` for the payload at the head of its queue.
+and relationship resets. Hints label commands with `Here` or `Other device` and
+put each command on its own line. JSON uses `next_steps` entries with `device`,
+`action`, and `command`. An inbox preview also provides `delivery_next_steps`
+for the payload at the head of its queue.
 
-Local commands preserve the invocation's `DUD_PROFILE`. The other device's
-profile and alias are private local names, so commands for it use
-`PROFILE_ON_OTHER_DEVICE` and `NAME_FOR_THIS_DEVICE`. Replace those placeholders
-on that device; use `default` for its default profile. List its aliases with
-`DUD_PROFILE=PROFILE_ON_OTHER_DEVICE dud peer list`. Git fetch commands run
-inside the repository receiving that checkpoint.
+Local commands preserve the invocation's `DUD_PROFILE`. `PEER` in a remote
+command means that device's local alias; find it with `dud peer list`. Select
+its paired profile if needed. `NAME` is a device name or unused alias, and
+`PATH` is a path you choose. Command help explains these placeholders. Git fetch
+commands run inside the repository receiving that checkpoint.
 
 A saved send or Git push resumes with `dud sync PEER`; repeating the original
 send or push creates a separate delivery. A backoff reports its retry time in
@@ -293,12 +292,12 @@ explicit consent before skipping lost deliveries. A halted relationship offers a
 reset preview after verification of both devices. Neither condition is bypassed
 by a queue retry.
 
-Pairing waits print the acceptance command for the other device, the local
-resume command, and the local cancellation command. A terminal cancellation or
-expiry discards its pending rendezvous record so the restart command can create
-a fresh invitation. Destructive commands print a scoped preview or an explicit
-confirmation command. An unsupported saved schema first calls for a compatible
-client version; choosing erasure starts with a preview of the affected files.
+An invitation prints the acceptance command for the other device. Acceptance
+shows the waiting state; interruptions show local resume and cancellation
+commands. Cancellation or expiry removes the pending rendezvous record so a
+fresh invitation can start. Destructive commands show a preview or an explicit
+confirmation command. An unsupported saved schema calls for a compatible client;
+erasure starts with a preview of the affected files.
 
 Dead drop errors retain their HTTP exit code and point diagnostics at the
 original server. Their settings come from the dead drop environment and `--url`,

@@ -238,10 +238,8 @@ func (a *app) displayV2PairingCode(pending *v2PendingPairing, jsonOutput bool) e
 		if err := a.runCommand(a.cfg.QREncodeBin, []string{"-t", "ansiutf8", pending.PairingCode}, nil, a.out, a.errOut); err != nil {
 			return err
 		}
-		fmt.Fprintln(a.out, "Waiting for the peer to accept...")
-		for _, step := range v2PairingNextSteps(pending) {
-			fmt.Fprintln(a.out, step.text())
-		}
+		fmt.Fprintln(a.out, peerCLIStep("", "peer accept PEER").text())
+		fmt.Fprintf(a.out, "Waiting for %s...\n", safeTerminalText(pending.Alias))
 	}
 	return nil
 }
@@ -737,10 +735,7 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 		return err
 	}
 	if !jsonOutput {
-		fmt.Fprintf(a.out, "Pairing response sent for %q. Waiting for authentication to finish...\n", alias)
-		for _, step := range v2PairingNextSteps(pending) {
-			fmt.Fprintln(a.out, step.text())
-		}
+		fmt.Fprintf(a.out, "Waiting for %s. Keep the invite running there.\n", safeTerminalText(alias))
 	}
 	return a.waitV2Pairing(cfg, paths, pending, transport, jsonOutput)
 }
@@ -1406,7 +1401,7 @@ func (a *app) finalizeV2PairingStatus(cfg *v2LocalConfig, paths v2Paths, pending
 			"canonical_origin": pending.CanonicalOrigin,
 		})
 	}
-	fmt.Fprintf(a.out, "Peer %q is active after mutual pairing-code authentication.\n", pending.Alias)
+	fmt.Fprintf(a.out, "Paired with %s.\n", safeTerminalText(pending.Alias))
 	return nil
 }
 
@@ -1458,7 +1453,7 @@ func (a *app) cmdPeerRevoke(args []string) error {
 		}
 	}
 	if !confirmed {
-		return withCLISteps(fatalError("peer revocation preserves but disables pending delivery state"), localCLIStep("If you intend to revoke this relationship, confirm here. Pair again to establish another relationship.", "peer revoke "+cliShellArg(alias)+" --yes"))
+		return withCLISteps(fatalError("peer revocation preserves but disables pending delivery state"), localCLIStep("Confirm revocation; using this peer again requires pairing.", "peer revoke "+cliShellArg(alias)+" --yes"))
 	}
 	if err := a.withV2PeerForRecovery(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
 		ctx := context.Background()
@@ -1633,7 +1628,7 @@ func parseV2PeerAbandonOptions(args []string) (v2PeerAbandonOptions, error) {
 		return opts, errors.New("--id must be a 64-character descriptor digest")
 	}
 	if !confirmed {
-		return opts, withCLISteps(fatalError("dud peer abandon is destructive"), localCLIStep("Only if you intend to discard this resumable transfer, confirm here.", "peer abandon "+cliShellArg(opts.alias)+" --id "+opts.digest+" --yes"))
+		return opts, withCLISteps(fatalError("dud peer abandon is destructive"), localCLIStep("Confirm discarding this resumable transfer.", "peer abandon "+cliShellArg(opts.alias)+" --id "+opts.digest+" --yes"))
 	}
 	return opts, nil
 }

@@ -17,6 +17,10 @@ and this project follows
 
 ### Changed
 
+- Shorten CLI recovery hints and put commands on separate lines. Pairing shows
+  resume and cancel commands after interruptions; remote commands use `PEER`
+  without a fabricated profile prefix. Reset hints follow the phase and device,
+  and preserve consent and cancellation conditions.
 - Report peer transfer status in one to three lines after `send`, `receive`,
   `git push`, and `git fetch`, including transfers from the interactive menu.
   Summaries distinguish queued work from unacknowledged deliveries and include

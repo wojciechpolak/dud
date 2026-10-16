@@ -64,7 +64,7 @@ func TestCLIStatusGuidancePrioritizesRecoveryGuards(t *testing.T) {
 		})
 	}
 	status := v2DeliveryStatus{Alias: "ak2", UnacknowledgedDeliveries: 1}
-	peer := requireCLIStep(t, status.nextSteps(), "peer", "DUD_PROFILE=PROFILE_ON_OTHER_DEVICE dud receive NAME_FOR_THIS_DEVICE")
+	peer := requireCLIStep(t, status.nextSteps(), "peer", "dud receive PEER")
 	if !peer.PeerAliasRequired || !peer.ProfileRequired || strings.Contains(peer.Command, "ak2") {
 		t.Fatal("remote recipe assumed local alias or profile")
 	}
@@ -84,7 +84,7 @@ func TestCLIPairingWaitAndCancellationRetainTheSelectedProfile(t *testing.T) {
 		requireCLIStep(t, steps, "local", "DUD_PROFILE=ak dud peer remove ak2 --yes")
 		cause := context.DeadlineExceeded
 		failure := v2PairingFailureHint(cause, pending)
-		if !errors.Is(failure, cause) || !strings.Contains(failure.Error(), "other device") {
+		if !errors.Is(failure, cause) || !strings.Contains(failure.Error(), "Resume:") || !strings.Contains(failure.Error(), "Cancel:") {
 			t.Fatal("pairing interruption lost its cause or actor")
 		}
 	}
@@ -183,7 +183,7 @@ func TestCLIOutputRecoveryRecipesParseAndPreservePayloadType(t *testing.T) {
 		noExtract bool
 		want      string
 	}{
-		{2, false, "--out PATH_TO_NEW_OUTPUT"}, {3, true, "--no-extract --out PATH_TO_NEW_OUTPUT"}, {3, false, "--out-dir PATH_TO_NEW_DIRECTORY"},
+		{2, false, "--out PATH"}, {3, true, "--no-extract --out PATH"}, {3, false, "--out-dir PATH"},
 	} {
 		opts := v2PeerReceiveOptions{alias: "ak2", noExtract: test.noExtract}
 		command := v2ReceiveOutputRecoveryCommand(opts, test.payload)

@@ -23,8 +23,8 @@ func TestParseUploadResponse(t *testing.T) {
 
 func TestParseUploadResponseRejectsInvalidShape(t *testing.T) {
 	_, err := parseUploadResponse([]byte(`{"id":"abc"}`))
-	if err == nil || !strings.Contains(err.Error(), "unexpected JSON response") {
-		t.Fatalf("expected unexpected JSON response error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid response") {
+		t.Fatalf("expected invalid response error, got %v", err)
 	}
 }
 

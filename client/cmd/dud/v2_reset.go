@@ -999,25 +999,14 @@ func (a *app) reportV2PeerReset(opts v2PeerResetOptions, reset *v2RelationshipRe
 	if opts.json {
 		return writeJSON(a.out, output)
 	}
-	if reset.Phase == "cancelled" {
-		fmt.Fprintf(a.out, "Cancelled peer relationship reset %s for %q.\n", reset.ResetID, opts.alias)
-	} else if reset.Phase == "active" {
-		fmt.Fprintf(a.out, "Activated peer relationship reset %s for %q at generation %d.\n", reset.ResetID, opts.alias, reset.Generation)
-	} else {
-		fmt.Fprintf(a.out, "Peer relationship reset %s for %q is %s.\n", reset.ResetID, opts.alias, reset.Phase)
-	}
-	fmt.Fprintln(a.out, v2ResetStatusGuidance(reset))
-	fmt.Fprintln(a.out, "\nNext steps:")
-	for index, step := range steps {
-		fmt.Fprintf(a.out, "%d. [%s device] %s\n   %s\n", index+1, step.Device, step.Action, step.Command)
+	fmt.Fprintf(a.out, "Reset for %s: %s (generation %d).\n", safeTerminalText(opts.alias), safeTerminalText(reset.Phase), reset.Generation)
+	for _, step := range steps {
+		fmt.Fprintln(a.out, step.text())
 	}
 	if canCancel {
-		fmt.Fprintf(a.out, "\nCancel here before server activation:\n  %s\n", output["cancel_command"])
+		fmt.Fprintf(a.out, "Cancel before activation: %s\n", output["cancel_command"])
 	} else if reset.ServerActivated {
-		fmt.Fprintln(a.out, "\nCancellation is unavailable after server activation.")
-	}
-	if preview, ok := output["new_reset_preview"]; ok {
-		fmt.Fprintf(a.out, "\nTo deliberately start another reset, preview it with:\n  %s\n", preview)
+		fmt.Fprintln(a.out, "Cancellation is unavailable after server activation.")
 	}
 	return nil
 }

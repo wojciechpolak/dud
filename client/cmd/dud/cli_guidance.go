@@ -18,6 +18,7 @@ type cliNextStep struct {
 	Command           string `json:"command"`
 	PeerAliasRequired bool   `json:"peer_alias_required,omitempty"`
 	ProfileRequired   bool   `json:"profile_required,omitempty"`
+	label             string
 }
 
 // cliShellArg quotes values outside the portable alias grammar before a
@@ -34,21 +35,30 @@ func localCLIStep(action, command string) cliNextStep {
 }
 
 func peerCLIStep(action, command string) cliNextStep {
-	return cliNextStep{Device: "peer", Action: action + " Replace PROFILE_ON_OTHER_DEVICE and NAME_FOR_THIS_DEVICE with that device's paired profile and local alias; list aliases there with 'DUD_PROFILE=PROFILE_ON_OTHER_DEVICE dud peer list'.", Command: "DUD_PROFILE=PROFILE_ON_OTHER_DEVICE dud " + command, PeerAliasRequired: true, ProfileRequired: true}
+	return cliNextStep{Device: "peer", Action: action, Command: "dud " + command, PeerAliasRequired: true, ProfileRequired: true}
 }
 
 func (step cliNextStep) text() string {
-	device := "On this device"
-	if step.Device == "peer" {
-		device = "On the other device"
+	if step.label != "" {
+		return step.label + ": " + safeTerminalText(step.Command)
 	}
-	return fmt.Sprintf("%s: %s Run '%s'.", device, step.Action, step.Command)
+	device := "Here"
+	if step.Device == "peer" {
+		device = "Other device"
+	}
+	command := device + ": " + safeTerminalText(step.Command)
+	if step.Action == "" {
+		return command
+	}
+	return safeTerminalText(step.Action) + "\n" + command
 }
 
 func cliStepRows(steps []cliNextStep) []textRow {
-	rows := make([]textRow, 0, len(steps))
+	rows := make([]textRow, 0, 2*len(steps))
 	for _, step := range steps {
-		rows = append(rows, textRow{Label: "next (" + step.Device + ")", Value: step.Action, Items: []string{step.Command}})
+		for _, line := range strings.Split(step.text(), "\n") {
+			rows = append(rows, textRow{Value: line, plain: true})
+		}
 	}
 	return rows
 }
@@ -63,7 +73,7 @@ func (err *cliGuidanceError) Error() string {
 	for _, step := range err.steps {
 		parts = append(parts, step.text())
 	}
-	return strings.Join(parts, "; ")
+	return strings.Join(parts, "\n")
 }
 func (err *cliGuidanceError) Unwrap() error { return err.cause }
 func withCLISteps(err error, steps ...cliNextStep) error {
@@ -74,13 +84,13 @@ func withCLISteps(err error, steps ...cliNextStep) error {
 }
 
 func unknownV2Peer(alias string) error {
-	return withCLISteps(fmt.Errorf("unknown peer %q", alias), localCLIStep("Check the aliases in this profile; select the profile containing the paired device.", "peer list"))
+	return withCLISteps(fmt.Errorf("unknown peer %q", alias), localCLIStep("List peers in this profile.", "peer list"))
 }
 
 func v2HaltedPeerHint(reason, alias string) error {
 	return withCLISteps(fmt.Errorf("peer relationship is halted: %s", reason),
-		localCLIStep("Inspect the halt evidence. Verify the other device and its state before approving any reset or abandoning work.", "peer show "+alias),
-		localCLIStep("If both devices are trusted, preview a reset and its abandoned work; the preview prints confirmation and cancellation commands.", "peer reset "+alias))
+		localCLIStep("Check peer state and verify both devices.", "peer show "+alias),
+		localCLIStep("If both devices are trusted, preview reset losses.", "peer reset "+alias))
 }
 
 // scheduledV2RetryError keeps a durable backoff distinct from a failed new
@@ -122,16 +132,16 @@ func v2PeerOperationHint(err error, alias string) error {
 	}
 	var retry *scheduledV2RetryError
 	if errors.As(err, &retry) {
-		return withCLISteps(err, localCLIStep("After the scheduled time, resume the saved queue. Do not repeat send or Git push: that creates another delivery.", "sync "+alias))
+		return withCLISteps(err, localCLIStep("Wait until the retry time; do not repeat send or Git push.", "sync "+alias))
 	}
 	var protocol *v2ProtocolError
 	if errors.As(err, &protocol) && protocol.Status == 429 {
-		return withCLISteps(err, localCLIStep("Wait for the server's rate or quota limit to clear, then resume saved work; do not repeat send or Git push.", "sync "+alias))
+		return withCLISteps(err, localCLIStep("Wait for the limit to clear; do not repeat send or Git push.", "sync "+alias))
 	}
 	if isRetryableV2ConnectionError(err) {
-		return withCLISteps(err, localCLIStep("Check connectivity and the pinned server settings; restore connectivity before resuming saved work with '"+v2ProfiledCommand("sync "+alias)+"'.", "doctor --json"))
+		return withCLISteps(err, localCLIStep("Check connectivity before resuming queued work with sync.", "doctor"))
 	}
-	return withCLISteps(err, localCLIStep("Inspect this relationship and its pending work before retrying an operation.", "peer show "+alias))
+	return withCLISteps(err, localCLIStep("Inspect this peer before retrying.", "peer show "+alias))
 }
 
 func v2PairingResumeCommand(pending *v2PendingPairing) string {
@@ -145,11 +155,19 @@ func v2PairingResumeCommand(pending *v2PendingPairing) string {
 func v2PairingNextSteps(pending *v2PendingPairing) []cliNextStep {
 	steps := []cliNextStep{}
 	if pending.Role == 0 {
-		steps = append(steps, peerCLIStep("Accept the displayed pairing code through a trusted channel; enter it at the prompt. For a new pairing, choose the profile and alias to create on that device.", "peer accept NAME_FOR_THIS_DEVICE"))
+		steps = append(steps, peerCLIStep("Enter the pairing code shared through a trusted channel.", "peer accept PEER"))
 	} else {
-		steps = append(steps, peerCLIStep("Keep the invitation command running, or resume it to finish mutual authentication.", "peer invite NAME_FOR_THIS_DEVICE"))
+		steps = append(steps, peerCLIStep("Keep the invitation running.", "peer invite PEER"))
 	}
-	return append(steps, localCLIStep("Keep this command running. If interrupted before expiry, resume the same pairing.", v2PairingResumeCommand(pending)), localCLIStep("To cancel this pending pairing instead, remove its local entry and cancel the rendezvous.", "peer remove "+pending.Alias+" --yes"))
+	return append(steps, v2PairingRecoverySteps(pending)...)
+}
+
+func v2PairingRecoverySteps(pending *v2PendingPairing) []cliNextStep {
+	resume := localCLIStep("Resume pairing.", v2PairingResumeCommand(pending))
+	resume.label = "Resume"
+	cancel := localCLIStep("Cancel pairing.", "peer remove "+pending.Alias+" --yes")
+	cancel.label = "Cancel"
+	return []cliNextStep{resume, cancel}
 }
 
 type v2PairingTerminalError struct{ phase uint64 }
@@ -165,11 +183,11 @@ func v2PairingFailureHint(err error, pending *v2PendingPairing) error {
 	var terminal *v2PairingTerminalError
 	if errors.As(err, &terminal) || pending.ExpiresAt <= uint64(time.Now().Unix()) {
 		if pending.Role == 0 {
-			return withCLISteps(err, localCLIStep("Issue an invitation and share its new code with the other device.", "peer invite "+pending.Alias))
+			return withCLISteps(err, localCLIStep("Share a new pairing code.", "peer invite "+pending.Alias))
 		}
-		return withCLISteps(err, peerCLIStep("Issue an invitation and share its new code through a trusted channel.", "peer invite NAME_FOR_THIS_DEVICE"), localCLIStep("Accept the new code at the prompt.", "peer accept "+pending.Alias))
+		return withCLISteps(err, peerCLIStep("Share a new code through a trusted channel.", "peer invite PEER"), localCLIStep("Enter the new pairing code.", "peer accept "+pending.Alias))
 	}
-	return withCLISteps(err, v2PairingNextSteps(pending)...)
+	return withCLISteps(fmt.Errorf("pairing interrupted: %w", err), v2PairingRecoverySteps(pending)...)
 }
 
 func v2QueuedPublicationHint(err error, alias string) error {
@@ -177,7 +195,7 @@ func v2QueuedPublicationHint(err error, alias string) error {
 	if alias != "" {
 		command += " " + alias
 	}
-	return withCLISteps(fmt.Errorf("delivery committed locally and will retry publication: %w", err), localCLIStep("Resume the saved delivery here; do not repeat send or Git push because that creates another delivery. Respect any scheduled retry time.", command))
+	return withCLISteps(fmt.Errorf("delivery saved locally: %w", err), localCLIStep("Resume after any retry delay; do not repeat send or Git push.", command))
 }
 
 func v2PeerProfileNextSteps(paths v2Paths, alias string, peer v2PeerProfile) []cliNextStep {
@@ -188,33 +206,33 @@ func v2PeerProfileNextSteps(paths v2Paths, alias string, peer v2PeerProfile) []c
 		return v2PairingNextSteps(pending)
 	}
 	if peer.Status == "revoked" {
-		return []cliNextStep{localCLIStep("This relationship is revoked. To establish another one, choose an unused alias on both devices; replace NEW_PEER_ALIAS here and share the displayed pairing code.", "peer invite NEW_PEER_ALIAS")}
+		return []cliNextStep{localCLIStep("Pair again using an unused alias on each device.", "peer invite PEER")}
 	}
-	return []cliNextStep{localCLIStep("Start pairing here and share the displayed code through a trusted channel.", "peer invite "+alias)}
+	return []cliNextStep{localCLIStep("Share the code through a trusted channel.", "peer invite "+alias)}
 }
 
 func v2ReceiveOutputRecoveryCommand(opts v2PeerReceiveOptions, payloadType uint64) string {
 	command := "receive " + opts.alias
 	if opts.id != "" {
-		return command + " --id " + opts.id + " --out PATH_TO_NEW_OUTPUT"
+		return command + " --id " + opts.id + " --out PATH"
 	}
 	if payloadType == 3 {
 		if !opts.noExtract {
-			return command + " --out-dir PATH_TO_NEW_DIRECTORY"
+			return command + " --out-dir PATH"
 		}
 		command += " --no-extract"
 	}
-	return command + " --out PATH_TO_NEW_OUTPUT"
+	return command + " --out PATH"
 }
 
 func v2NetworkDiagnosticStep(settings v2NetworkSettings) cliNextStep {
 	baseURL, dohURL, echMode := settings.values()
 	command := "capabilities --url " + cliShellArg(baseURL) + " --doh-url " + cliShellArg(dohURL) + " --ech-mode " + cliShellArg(echMode) + " --json"
-	return localCLIStep("Resolve the reported network or TLS error on this device and repeat this probe with the displayed settings. If the endpoint still refuses it, ask the server operator to inspect the server and proxy logs.", command)
+	return localCLIStep("Check connectivity; ask the operator if the probe still fails.", command)
 }
 
 func v2PeerStateFailureHint(err error, alias string) error {
-	return withCLISteps(err, localCLIStep("Check the installed version and use one compatible with the saved state; retain the files if you intend to restore a backup.", "--version"), localCLIStep("If you choose to discard this pairing and its pending work, inspect the affected local files before confirming erasure. This preview does not remove them.", "erase peer "+alias+" --dry-run"))
+	return withCLISteps(err, localCLIStep("Use a client compatible with the saved state.", "--version"), localCLIStep("Preview erasure of this pairing and its pending work.", "erase peer "+alias+" --dry-run"))
 }
 
 func cliUsageHint(err error) error {
@@ -222,5 +240,5 @@ func cliUsageHint(err error) error {
 	if err == nil || errors.As(err, &guided) {
 		return err
 	}
-	return withCLISteps(err, localCLIStep("Correct the reported arguments; consult the supported command forms and options.", "help"))
+	return withCLISteps(err, localCLIStep("Check command syntax.", "help"))
 }

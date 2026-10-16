@@ -1094,7 +1094,8 @@ func TestV2GapErrorNamesTheRecoveryCommandsAndDataLoss(t *testing.T) {
 		"gap before sequence 9",
 		"DUD_PROFILE=ak dud peer resume ak2",
 		"DUD_PROFILE=ak dud receive ak2",
-		"resend the skipped deliveries",
+		"Skipping loses deliveries",
+		"ask the sender to resend",
 	} {
 		if !strings.Contains(message, fragment) {
 			t.Fatalf("gap recovery error %q omitted %q", message, fragment)

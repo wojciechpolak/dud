@@ -146,10 +146,10 @@ func validateUploadOptions(opts uploadOptions, cfg config) error {
 func parseUploadResponse(data []byte) (uploadResponse, error) {
 	var response uploadResponse
 	if err := json.Unmarshal(data, &response); err != nil {
-		return response, withCLISteps(fatalError("Upload succeeded but returned an unexpected JSON response; inspect the server logs before creating another upload because the first payload may already be stored"), localCLIStep("Check the upload response format supported by this client.", "--version"))
+		return response, withCLISteps(fatalError("upload returned an invalid response"), localCLIStep("Check server logs before uploading again.", "--version"))
 	}
 	if response.ID == "" || response.ExpiresAt == "" {
-		return response, withCLISteps(fatalError("Upload succeeded but returned an unexpected JSON response; inspect the server logs before creating another upload because the first payload may already be stored"), localCLIStep("Check the upload response format supported by this client.", "--version"))
+		return response, withCLISteps(fatalError("upload returned an invalid response"), localCLIStep("Check server logs before uploading again.", "--version"))
 	}
 	return response, nil
 }
@@ -159,7 +159,7 @@ func buildReceiveCommand(prefix, id, baseURL string, bundle bool) string {
 	if bundle {
 		cmd += " --extract"
 	} else if prefix == "dud receive" || prefix == "dud download" {
-		cmd += " --out PATH_TO_NEW_OUTPUT"
+		cmd += " --out PATH"
 	}
 	return cmd
 }
@@ -172,7 +172,7 @@ func (a *app) printUploadResponse(response uploadResponse, receiveCommand string
 	drop.add("Expires", response.ExpiresAt)
 	drop.add("Delete after read", v2YesNo(response.DeleteAfterRead))
 	drop.add("Receive", receiveCommand)
-	drop.note("On the receiving device, run the Receive command; replace PATH_TO_NEW_OUTPUT with a new output path when shown. Recipient encryption also requires --identity PATH_TO_PRIVATE_IDENTITY. Dead drops use the original --url, independently of DUD_PROFILE.")
+	drop.note("Receive on the other device; use --identity PATH for recipient encryption.")
 	return report.write(a.out)
 }
 

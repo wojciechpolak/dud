@@ -309,5 +309,5 @@ func parseV2NetworkOption(args []string, overrides *v2NetworkOverrides) (bool, [
 // paired relationship pins its own origin and ECH mode, and a per-invocation
 // override would silently break descriptor origin binding.
 func v2PeerNetworkOptionError(option string) error {
-	return withCLISteps(fmt.Errorf("%s conflicts with the paired peer profile; omit this override to use the pinned settings", option), localCLIStep("Inspect the effective and pinned network settings for each profile entry before changing configuration.", "doctor --json"))
+	return withCLISteps(fmt.Errorf("%s conflicts with the paired peer profile; omit this override to use the pinned settings", option), localCLIStep("Check the pinned network settings.", "doctor --json"))
 }

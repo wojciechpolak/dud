@@ -298,7 +298,7 @@ without expanding every counter or listing descriptor digests. For example:
 
 ```text
 Status: queued deliveries 0; unacknowledged deliveries 4.
-After peer receipt, collect the acknowledgement (local): dud sync laptop
+After receipt: dud sync laptop
 ```
 
 Use `-v` or `--verbose` on a transfer for the full status block. `sync`,

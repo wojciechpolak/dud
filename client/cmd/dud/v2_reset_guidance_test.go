@@ -27,10 +27,10 @@ func TestV2ResetReportsCommandsForBothDevices(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := output.String()
-			if !strings.Contains(text, "Next steps:") || !strings.Contains(text, "DUD_PROFILE=ak dud ") {
+			if !strings.Contains(text, "Reset for ak2:") || !strings.Contains(text, "DUD_PROFILE=ak dud ") {
 				t.Fatalf("reset omitted actionable steps: %s", text)
 			}
-			if phase == "proposed" && (!strings.Contains(text, "[peer device]") || !strings.Contains(text, "NAME_FOR_THIS_DEVICE --yes") || !strings.Contains(text, "DUD_PROFILE=ak dud peer reset ak2 --cancel --yes")) {
+			if phase == "proposed" && (!strings.Contains(text, "Other device:") || !strings.Contains(text, "PEER --yes") || !strings.Contains(text, "DUD_PROFILE=ak dud peer reset ak2 --cancel --yes")) {
 				t.Fatalf("waiting reset omitted consent, resume, or cancellation: %s", text)
 			}
 			if phase == "cancelled" && strings.Contains(text, "waiting for peer consent") {

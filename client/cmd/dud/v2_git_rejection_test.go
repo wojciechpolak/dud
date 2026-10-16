@@ -114,6 +114,9 @@ func TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues(t *testing.T) {
 			t.Fatalf("fetch of an unapplicable checkpoint failed instead of refusing it: %v", err)
 		}
 	})
+	if !strings.Contains(stdout.String(), "No refs changed.\n") || !strings.Contains(stdout.String(), "Other device: dud git push PEER --full\n") {
+		t.Fatalf("refusal guidance = %s", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "Refused Git checkpoint 1") {
 		t.Fatalf("first fetch output = %s", stdout.String())
 	}

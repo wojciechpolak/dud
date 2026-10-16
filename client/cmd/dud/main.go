@@ -123,7 +123,7 @@ func (a *app) run(args []string) (resultErr error) {
 		var syntax fatalError
 		var guided *cliGuidanceError
 		if errors.As(resultErr, &syntax) && syntax != "" && !errors.As(resultErr, &guided) {
-			resultErr = withCLISteps(resultErr, localCLIStep("Check the command syntax and required options.", "help"))
+			resultErr = withCLISteps(resultErr, localCLIStep("Check command syntax.", "help"))
 		}
 	}()
 	if len(args) == 0 {

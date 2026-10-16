@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+// Guidance uses the same short placeholders as command help. Remote aliases
+// and profiles belong to the device where the printed command is run.
+const cliPlaceholderHelp = "PEER is the alias on that device; select its profile if needed. NAME is a device name or unused alias. PATH is a path you choose."
+
 type helpTopic struct {
 	description string
 	options     string
@@ -159,7 +163,7 @@ func unknownHelpTopic(path, parent string) error {
 	if parent != "" {
 		command += " " + parent
 	}
-	return withCLISteps(fatalError("Unknown help topic: "+safeTerminalText(path)), localCLIStep("Choose a topic listed in this help.", command))
+	return withCLISteps(fatalError("Unknown help topic: "+safeTerminalText(path)), localCLIStep("Choose a help topic.", command))
 }
 
 func (a *app) helpPath(parts []string) error {
@@ -306,5 +310,11 @@ func (a *app) showCommandHelp(path string) error {
 		report.section("Notes").note(topic.notes)
 	}
 	report.section("Example").add(topic.example, "")
+	for _, placeholder := range []string{"PEER", "NAME", "PATH"} {
+		if strings.Contains(strings.Join(helpUsage(path), " "), placeholder) {
+			report.section("Placeholders").note(cliPlaceholderHelp)
+			break
+		}
+	}
 	return report.write(a.out)
 }

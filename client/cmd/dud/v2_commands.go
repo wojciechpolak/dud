@@ -155,7 +155,7 @@ func (a *app) cmdMigrate(args []string) error {
 		return err
 	}
 	if cfg.Version != v2ConfigSchemaVersion {
-		return fmt.Errorf("local peer state is at an unsupported schema version and cannot be migrated; %s", v2LocalStateResetInstruction())
+		return fmt.Errorf("local peer state is at an unsupported schema version and cannot be migrated\n%s", v2LocalStateResetInstruction())
 	}
 	if jsonOutput {
 		return writeJSON(a.out, map[string]any{"migrated": false, "from": cfg.Version, "to": cfg.Version})
@@ -256,7 +256,7 @@ func (a *app) cmdPeerAccept(args []string) error {
 		if errors.As(err, &guided) {
 			return err
 		}
-		return withCLISteps(err, peerCLIStep("Keep the invitation running and share its unexpired code through a trusted channel. Reissue it if expired.", "peer invite NAME_FOR_THIS_DEVICE"), localCLIStep("Check that both devices use the same server; then enter the code again at the prompt.", "peer accept "+alias))
+		return withCLISteps(err, peerCLIStep("Keep the invite running; share a fresh code if expired.", "peer invite PEER"), localCLIStep("Check the server on both devices and enter the code again.", "peer accept "+alias))
 	}
 	return nil
 }
@@ -451,7 +451,7 @@ func (a *app) cmdPeerRemove(args []string) error {
 		}
 	}
 	if !confirmed {
-		return withCLISteps(fatalError("dud peer remove is destructive"), localCLIStep("If you intend to remove this pairing and its local state, confirm here.", "peer remove "+cliShellArg(alias)+" --yes"))
+		return withCLISteps(fatalError("dud peer remove is destructive"), localCLIStep("Confirm removal of this pairing and its local state.", "peer remove "+cliShellArg(alias)+" --yes"))
 	}
 	cfg, paths, err := loadV2Config()
 	if err != nil {

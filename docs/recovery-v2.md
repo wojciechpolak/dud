@@ -133,9 +133,9 @@ dud peer reset PEER --yes
 
 Every reset result lists the next steps in order, names the device that must
 perform each step, and prints commands. Commands for this device include its
-`DUD_PROFILE`. Commands for the other device use `NAME_FOR_THIS_DEVICE`: select
-that device's paired profile and find its local alias with `dud peer list`. Peer
-aliases and profiles are local, so the other device can use different names.
+`DUD_PROFILE`. Commands for the other device use `PEER`: select its paired
+profile if needed and find its local alias with `dud peer list`. Peer aliases
+and profiles are local, so the other device can use different names.
 
 An `active` result means activation is complete on the device that printed it.
 If the other device still shows waiting, run its displayed recovery command

@@ -35,6 +35,7 @@ type textRow struct {
 	Value string
 	Note  string
 	Items []string
+	plain bool // Render Value without participating in column alignment.
 }
 
 // textSection is a titled block of aligned rows. Sections nest, so a report can
@@ -149,6 +150,9 @@ func (s *textSection) render(buffer *strings.Builder, depth int) {
 	valueWidth := 0
 	noted := false
 	for _, row := range s.rows {
+		if row.plain {
+			continue
+		}
 		labelWidth = max(labelWidth, len(row.Label))
 		if row.Note != "" {
 			noted = true
@@ -157,6 +161,11 @@ func (s *textSection) render(buffer *strings.Builder, depth int) {
 	}
 	for _, row := range s.rows {
 		buffer.WriteString(indent)
+		if row.plain {
+			buffer.WriteString(row.Value)
+			buffer.WriteByte('\n')
+			continue
+		}
 		if row.Value == "" && row.Note == "" && len(row.Items) == 0 {
 			// A bare label is a standalone line, not a padded column.
 			buffer.WriteString(row.Label)

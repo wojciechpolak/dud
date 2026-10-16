@@ -44,18 +44,16 @@ type v2ReceiveStop struct {
 	Next     string // the command that unblocks the queue, when one exists
 }
 
-// Error keeps the wording each stop had when it was an outright failure, which
-// is still how a run that committed nothing reports it. A conflict names a path
-// the peer chose the last component of, so it is escaped here: this string is
-// written straight to the terminal.
+// Error names the command that can unblock a stopped receive. Conflict paths
+// come from peer metadata and must be escaped before terminal output.
 func (stop *v2ReceiveStop) Error() string {
 	switch stop.Reason {
 	case "git_checkpoint":
-		return fmt.Sprintf("next delivery is a Git checkpoint; on this device, inside the matching repository, receive it with %s", stop.Next)
+		return fmt.Sprintf("next delivery is a Git checkpoint.\nIn the matching repository: %s", stop.Next)
 	case "conflict":
 		message := fmt.Sprintf("refusing to overwrite existing output %s", safeTerminalText(stop.Detail))
 		if stop.Next != "" {
-			message += "; on this device, choose a new output path and run '" + stop.Next + "'"
+			message += "\nChoose an unused output path.\nHere: " + stop.Next
 		}
 		return message
 	}
@@ -172,7 +170,7 @@ func v2ReceivedItemRow(alias string, item v2ReceivedItem) textRow {
 			Value: fmt.Sprintf("skipped: %s already exists", safeTerminalText(item.Conflict)),
 			Items: []string{fmt.Sprintf(
 				"on this device, recover with: %s",
-				v2ProfiledCommand("receive "+alias+" --id "+item.DescriptorDigest+" --out PATH_TO_NEW_OUTPUT"),
+				v2ProfiledCommand("receive "+alias+" --id "+item.DescriptorDigest+" --out PATH"),
 			)},
 		}
 	}
@@ -193,7 +191,7 @@ func v2ReceiveJSON(alias string, drained []v2ReceivedItem, stop *v2ReceiveStop, 
 	drained = append([]v2ReceivedItem{}, drained...)
 	for index := range drained {
 		if drained[index].Outcome == "skipped" {
-			drained[index].NextSteps = []cliNextStep{localCLIStep("Recover the saved payload to a new output path; replace PATH_TO_NEW_OUTPUT.", "receive "+alias+" --id "+drained[index].DescriptorDigest+" --out PATH_TO_NEW_OUTPUT")}
+			drained[index].NextSteps = []cliNextStep{localCLIStep("Recover the saved payload to an unused path.", "receive "+alias+" --id "+drained[index].DescriptorDigest+" --out PATH")}
 		}
 	}
 	payload := map[string]any{

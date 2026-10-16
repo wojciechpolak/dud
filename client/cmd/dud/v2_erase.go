@@ -96,7 +96,7 @@ func parseV2EraseOptions(args []string) (v2EraseOptions, error) {
 		if opts.IncludeRepo {
 			command += " --repo"
 		}
-		return opts, withCLISteps(fatalError("dud erase is destructive"), localCLIStep("Preview the files and state that erasure would remove before confirming with --yes.", command+" --dry-run"))
+		return opts, withCLISteps(fatalError("dud erase is destructive"), localCLIStep("Preview the files and state that erasure removes.", command+" --dry-run"))
 	}
 	return opts, nil
 }
@@ -150,9 +150,9 @@ func (a *app) cmdErase(args []string) error {
 		if opts.IncludeRepo {
 			command += " --repo"
 		}
-		result.NextSteps = []cliNextStep{localCLIStep("Only after reviewing and accepting the listed losses, confirm erasure here.", command+" --yes")}
+		result.NextSteps = []cliNextStep{localCLIStep("Confirm erasure only if you accept the listed losses.", command+" --yes")}
 	} else if eraseErr == nil && opts.Scope == "all" {
-		result.NextSteps = []cliNextStep{localCLIStep("To use peer transfers, initialize this profile and pair the devices again; replace DEVICE_NAME.", "init --device DEVICE_NAME")}
+		result.NextSteps = []cliNextStep{localCLIStep("Initialize this profile, then pair again.", "init --device NAME")}
 	}
 	if renderErr := a.renderV2EraseResult(result, opts.DryRun, opts.JSON); renderErr != nil {
 		return renderErr
@@ -575,7 +575,7 @@ func acquireV2EraseLock(paths v2Paths) (func(), error) {
 	}
 	if err := lockLocalFile(file); err != nil {
 		_ = file.Close()
-		return nil, errors.New("another DUD process is using local state; on this device, wait for it to finish or stop it, then repeat erasure; do not delete lock files")
+		return nil, errors.New("another DUD process is using local state.\nWait for it to finish; do not delete lock files.")
 	}
 	return func() {
 		_ = unlockLocalFile(file)
@@ -876,7 +876,7 @@ func acquireV2EraseRepositoryLocks(repository *v2GitRepository) (func(), error) 
 		if err := lockLocalFile(file); err != nil {
 			_ = file.Close()
 			unlock()
-			return nil, errors.New("another DUD Git operation is using repository state; on this device, wait for it to finish or stop it, then repeat this command; do not delete lock files")
+			return nil, errors.New("another DUD Git operation is using repository state.\nWait for it to finish; do not delete lock files.")
 		}
 		files = append(files, file)
 	}

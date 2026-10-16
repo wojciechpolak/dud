@@ -609,7 +609,7 @@ func (repository *v2GitRepository) loadPeerState(repositoryID []byte, peerID str
 		state.RepositoryID != hex.EncodeToString(repositoryID) ||
 		state.PeerDeviceID != peerID ||
 		state.RelationshipKeyEpoch != 0 {
-		return nil, fmt.Errorf("per-peer Git state identity is invalid; %s", v2LocalStateResetInstruction())
+		return nil, fmt.Errorf("per-peer Git state identity is invalid\n%s", v2LocalStateResetInstruction())
 	}
 	if state.LastReceivedRefs == nil {
 		state.LastReceivedRefs = map[string]string{}
@@ -628,7 +628,7 @@ func (repository *v2GitRepository) loadPeerState(repositoryID []byte, peerID str
 
 func (repository *v2GitRepository) writePeerState(state *v2GitPeerState) error {
 	if state.Version != v2GitStateVersion || state.RelationshipKeyEpoch != 0 {
-		return fmt.Errorf("refusing to write invalid per-peer Git state; %s", v2LocalStateResetInstruction())
+		return fmt.Errorf("refusing to write invalid per-peer Git state\n%s", v2LocalStateResetInstruction())
 	}
 	if len(state.History) > v2GitHistoryLimit {
 		state.History = append([]v2GitHistoryEntry(nil), state.History[len(state.History)-v2GitHistoryLimit:]...)
@@ -1593,7 +1593,7 @@ func fprintV2GitPushResult(a *app, opts v2GitPushOptions, sequence uint64, check
 	}
 	fmt.Fprintln(a.out, "Not acknowledged yet.")
 	if len(refused) != 0 {
-		fmt.Fprintf(a.out, "%d earlier checkpoint(s) were refused by %s; on this device, inspect them with '%s'.\n", len(refused), opts.Alias, v2ProfiledCommand("git status "+opts.Alias))
+		fmt.Fprintf(a.out, "%d earlier checkpoint(s) refused by %s.\nInspect: %s\n", len(refused), opts.Alias, v2ProfiledCommand("git status "+opts.Alias))
 	}
 	return v2GitStatusReport(opts.Verbose, status, quarantined, rejected).write(a.out)
 }
@@ -2529,7 +2529,7 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 		if runtime.progress != nil {
 			runtime.progress.Clear()
 		}
-		fmt.Fprintf(a.errOut, "WARNING: Git checkpoint refused; refusal queued: %v; on this device, resume with '%s'\n", err, v2ProfiledCommand("sync "+opts.Alias))
+		fmt.Fprintf(a.errOut, "WARNING: Git checkpoint refused; acknowledgement queued: %v\nResume: %s\n", err, v2ProfiledCommand("sync "+opts.Alias))
 	}
 	if runtime.progress != nil {
 		runtime.progress.Phase("completion", 0)
@@ -2546,11 +2546,11 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 		}))
 	}
 	fmt.Fprintf(a.out, "Refused Git checkpoint %d: %v\n", sequence, cause)
-	fmt.Fprintln(a.out, "The peer was told the checkpoint was refused, and the chain advanced past it.")
+	fmt.Fprintln(a.out, "No refs changed.")
 	if isFullV2GitCheckpointRequired(cause) {
-		fmt.Fprintln(a.out, "No refs were changed. The peer was asked to send a complete Git checkpoint. "+peerCLIStep("In the matching repository, collect the refusal and push a complete checkpoint.", "git push NAME_FOR_THIS_DEVICE --full").text())
+		fmt.Fprintln(a.out, peerCLIStep("Sync, then send a full checkpoint from its repository.", "git push PEER --full").text())
 	} else {
-		fmt.Fprintln(a.out, "No refs were changed. "+peerCLIStep("After checking the refusal reason, push a compatible checkpoint from the matching repository.", "git push NAME_FOR_THIS_DEVICE --full").text())
+		fmt.Fprintln(a.out, peerCLIStep("Review the refusal before sending a compatible checkpoint.", "git push PEER --full").text())
 	}
 	return true, nil
 }
@@ -2590,7 +2590,7 @@ func (runtime *v2PeerRuntime) readV2GitDeliveryHeader(opts v2GitFetchOptions, de
 		return header, err
 	}
 	if payloadType != 4 {
-		return header, withCLISteps(fmt.Errorf("next delivery is payload type %d", payloadType), localCLIStep("Receive messages or files here before fetching the Git checkpoint.", "receive "+opts.Alias))
+		return header, withCLISteps(fmt.Errorf("next delivery is payload type %d", payloadType), localCLIStep("Receive the messages or files first.", "receive "+opts.Alias))
 	}
 	next, err := runtime.validateNextDescriptor(runtime.state.Chains["in:data"], envelope)
 	if err != nil {
@@ -2834,7 +2834,7 @@ func (runtime *v2PeerRuntime) commitV2GitDelivery(ctx context.Context, a *app, r
 		if runtime.progress != nil {
 			runtime.progress.Clear()
 		}
-		fmt.Fprintf(a.errOut, "WARNING: Git refs committed; atomic completion queued: %v; on this device, resume with '%s'\n", err, v2ProfiledCommand("sync "+runtime.alias))
+		fmt.Fprintf(a.errOut, "WARNING: Git refs committed; acknowledgement queued: %v\nResume: %s\n", err, v2ProfiledCommand("sync "+runtime.alias))
 	}
 	return nil
 }
@@ -2901,7 +2901,7 @@ func checkV2GitDeliveryRepository(repositoryID []byte, loadErr error, opts v2Git
 	case loadErr == nil && !bytes.Equal(repositoryID, metadata.RepositoryID):
 		return errors.New("Git delivery belongs to a different repository")
 	case errors.Is(loadErr, os.ErrNotExist) && !opts.Associate:
-		return withCLISteps(errors.New("repository is not associated with this checkpoint"), localCLIStep("Verify this peer and that the working directory is the intended repository.", "peer show "+opts.Alias), localCLIStep("After verification, explicitly associate the incoming repository identity here.", "git fetch "+opts.Alias+" --associate"))
+		return withCLISteps(errors.New("repository is not associated with this checkpoint"), localCLIStep("Verify this peer and the working repository.", "peer show "+opts.Alias), localCLIStep("After verification, associate this repository.", "git fetch "+opts.Alias+" --associate"))
 	case loadErr != nil && !errors.Is(loadErr, os.ErrNotExist):
 		return loadErr
 	}
@@ -3272,7 +3272,7 @@ func (a *app) cmdV2GitStatus(args []string) error {
 	repositoryID, err := repository.loadRepositoryID()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return withCLISteps(errors.New("Git repository has no DUD identity"), localCLIStep("Select a peer alias from this profile before publishing or importing a checkpoint in this repository.", "peer list"), localCLIStep("To import a trusted peer checkpoint into this repository, explicitly associate it; replace PEER with its local alias. To publish this repository instead, use git push PEER.", "git fetch PEER --associate"))
+			return withCLISteps(errors.New("Git repository has no DUD identity"), localCLIStep("Choose a peer for this repository.", "peer list"), localCLIStep("To import, verify the peer and associate this repository.", "git fetch PEER --associate"))
 		}
 		return err
 	}
@@ -3369,14 +3369,14 @@ func (a *app) cmdV2GitStatus(args []string) error {
 }
 
 func v2GitPromotionHint(err error, opts v2GitFetchOptions) error {
-	steps := []cliNextStep{localCLIStep("In this repository, inspect the checkpoint and verify the peer before accepting changes to its refs.", "git status "+opts.Alias)}
+	steps := []cliNextStep{localCLIStep("Inspect the checkpoint and verify the peer.", "git status "+opts.Alias)}
 	var rewrite *v2GitRewriteConsentError
 	if errors.As(err, &rewrite) {
 		command := "git fetch " + opts.Alias + " --allow-rewrite"
 		if opts.Associate {
 			command += " --associate"
 		}
-		steps = append(steps, localCLIStep("Only if you accept the reported history rewrite or branch deletion, confirm it here.", command))
+		steps = append(steps, localCLIStep("Confirm only if you accept the rewrite or branch deletion.", command))
 	}
 	return withCLISteps(err, steps...)
 }

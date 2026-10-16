@@ -18,7 +18,7 @@ func TestV2CompactStatusReportsWorkAndRecoveryInThreeLines(t *testing.T) {
 		absent                      []string
 	}{
 		{name: "healthy", want: []string{"Status: queued deliveries 0; unacknowledged deliveries 0."}, absent: []string{"Warning:", "Next", "active generation"}},
-		{name: "awaiting signed acknowledgement", status: v2DeliveryStatus{UnacknowledgedDeliveries: 2}, want: []string{"unacknowledged deliveries 2", "After peer receipt", "DUD_PROFILE=work dud sync laptop"}, absent: []string{"Warning:"}},
+		{name: "awaiting signed acknowledgement", status: v2DeliveryStatus{UnacknowledgedDeliveries: 2}, want: []string{"unacknowledged deliveries 2", "After receipt", "DUD_PROFILE=work dud sync laptop"}, absent: []string{"Warning:"}},
 		{name: "saved publications", status: v2DeliveryStatus{PendingDeliveries: 2, PendingCompletions: 1, PendingControlPublications: 3}, want: []string{"queued deliveries 2", "queued completions 1", "queued control events 3", "dud sync laptop"}},
 		{name: "resumable transfers", status: v2DeliveryStatus{PendingChunkTransfers: 1, PendingDeliveries: 1, InboundChunkTransfers: 2, ResumableTransfers: []v2ResumableTransfer{{DescriptorDigest: "private-digest"}}}, want: []string{"resumable uploads 1", "resumable downloads 2", "dud sync laptop"}, absent: []string{"private-digest"}},
 		{name: "partial inbox drain", status: v2DeliveryStatus{InboundWaiting: true}, want: []string{"inbound waiting at last check", "dud inbox laptop"}},

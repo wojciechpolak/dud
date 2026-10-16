@@ -191,7 +191,8 @@ func (a *app) choosePeer(r *bufio.Reader, picker peerPicker) (string, bool, erro
 		fmt.Fprintf(a.out, "  %d) %s\n", entries, picker.extraLabel)
 	}
 	if len(aliases) == 0 {
-		fmt.Fprintf(a.out, "No peers available (%s); use setup to initialize this device and peers to pair one.\n", unavailable)
+		fmt.Fprintf(a.out, "No peers available: %s.\n", strings.TrimSuffix(unavailable, "."))
+		fmt.Fprintln(a.out, "Use setup, then peers to pair.")
 	}
 	// With nothing listed the only selection left is a typed alias, so the
 	// prompt requires one rather than defaulting to an entry that is not there.
@@ -232,7 +233,9 @@ func (a *app) choosePeer(r *bufio.Reader, picker peerPicker) (string, bool, erro
 func interactivePeerAliases(includeAll bool) ([]string, string) {
 	cfg, _, err := loadV2Config()
 	if err != nil {
-		return nil, err.Error()
+		// The picker supplies navigation hints separately from the error summary.
+		reason, _, _ := strings.Cut(err.Error(), "\n")
+		return nil, reason
 	}
 	aliases := make([]string, 0, len(cfg.Peers))
 	for alias, peer := range cfg.Peers {

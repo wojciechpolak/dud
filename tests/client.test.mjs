@@ -469,7 +469,7 @@ test('interactive transfer degrades to the dead drop entry without a device', as
   assert.match(typedAlias.stdout, /1\) dead drop — share by ID/);
   assert.match(
     typedAlias.stdout,
-    /No peers available \(this device is not initialized for peer transfers.*use setup to initialize this device and peers to pair one\./,
+    /No peers available: this device is not initialized for peer transfers\.\nUse setup, then peers to pair\./,
   );
   assert.match(
     typedAlias.stderr,

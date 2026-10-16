@@ -55,6 +55,10 @@ func TestV2HumanPairingOutputAlwaysIncludesTextAndQR(t *testing.T) {
 	if err := a.displayV2PairingCode(pending, false); err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(output.String(), "Resume:") || strings.Contains(output.String(), "Cancel:") ||
+		!strings.Contains(output.String(), "Other device: dud peer accept PEER\nWaiting for laptop...\n") {
+		t.Fatalf("pairing invitation = %s", output.String())
+	}
 	for _, fragment := range []string{"Pairing code: " + pending.PairingCode, "QR Code:", "QR:" + pending.PairingCode} {
 		if !strings.Contains(output.String(), fragment) {
 			t.Fatalf("human output omitted %q: %s", fragment, output.String())
@@ -85,71 +89,78 @@ func TestNewV2InvitationNeedsNoAdminCapability(t *testing.T) {
 }
 
 func TestFinalizeV2PairingPersistsActivePeerAndDeliveryState(t *testing.T) {
-	setTestV2Homes(t)
-	cfg, paths, err := initializeV2Config("desktop", "https://dud.example.com", "https://dns.google/dns-query", "hard")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
-	pending, _, _, err := a.newV2Invitation(cfg, paths, "laptop", cfg.BaseURL, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ensureV2InviterPendingProfile("laptop", pending, cfg.ECHMode); err != nil {
-		t.Fatal(err)
-	}
-	pending.PeerPairingID = v2Base64URL(bytes.Repeat([]byte{0x71}, 16))
-	pending.PeerAgeRecipient = v2Base64URL(bytes.Repeat([]byte{0x72}, 1216))
-	pending.PeerSigningPublicKey = v2Base64URL(bytes.Repeat([]byte{0x73}, 32))
-	pending.OutboundRelationshipSecret = v2Base64URL(bytes.Repeat([]byte{0x74}, 32))
-	pending.InboundRelationshipSecret = v2Base64URL(bytes.Repeat([]byte{0x75}, 32))
-	pending.ServerContract = mustV2TestServerContract(t)
-	relationshipID, err := hex.DecodeString(pending.RelationshipID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, err := loadV2MasterSeed(paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity, err := deriveV2RelationshipIdentity(seed, relationshipID, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	grant, err := v2EncMode.Marshal(map[int]any{
-		1: uint64(2), 2: relationshipID, 3: uint64(0), 4: uint64(0), 5: pending.CanonicalOrigin,
-		6: []any{
-			map[int]any{1: uint64(0), 2: "write", 3: bytes.Repeat([]byte{1}, 32)},
-			map[int]any{1: uint64(0), 2: "read", 3: bytes.Repeat([]byte{2}, 32)},
-			map[int]any{1: uint64(0), 2: "ack", 3: bytes.Repeat([]byte{3}, 32)},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var encrypted bytes.Buffer
-	writer, err := age.Encrypt(&encrypted, identity.Recipient())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write(grant); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.finalizeV2PairingStatus(cfg, paths, pending, map[int]any{1: uint64(3), 6: encrypted.Bytes()}, true); err != nil {
-		t.Fatal(err)
-	}
-	updated, _, err := loadV2Config()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Peers["laptop"].Status != "active" {
-		t.Fatalf("peer = %#v", updated.Peers["laptop"])
-	}
-	if _, err := loadV2PeerDeliveryState(paths, pending.RelationshipID); err != nil {
-		t.Fatal(err)
+	for name, jsonOutput := range map[string]bool{"text": false, "json": true} {
+		t.Run(name, func(t *testing.T) {
+			setTestV2Homes(t)
+			cfg, paths, err := initializeV2Config("desktop", "https://dud.example.com", "https://dns.google/dns-query", "hard")
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := newApp(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+			pending, _, _, err := a.newV2Invitation(cfg, paths, "laptop", cfg.BaseURL, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ensureV2InviterPendingProfile("laptop", pending, cfg.ECHMode); err != nil {
+				t.Fatal(err)
+			}
+			pending.PeerPairingID = v2Base64URL(bytes.Repeat([]byte{0x71}, 16))
+			pending.PeerAgeRecipient = v2Base64URL(bytes.Repeat([]byte{0x72}, 1216))
+			pending.PeerSigningPublicKey = v2Base64URL(bytes.Repeat([]byte{0x73}, 32))
+			pending.OutboundRelationshipSecret = v2Base64URL(bytes.Repeat([]byte{0x74}, 32))
+			pending.InboundRelationshipSecret = v2Base64URL(bytes.Repeat([]byte{0x75}, 32))
+			pending.ServerContract = mustV2TestServerContract(t)
+			relationshipID, err := hex.DecodeString(pending.RelationshipID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed, err := loadV2MasterSeed(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := deriveV2RelationshipIdentity(seed, relationshipID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			grant, err := v2EncMode.Marshal(map[int]any{
+				1: uint64(2), 2: relationshipID, 3: uint64(0), 4: uint64(0), 5: pending.CanonicalOrigin,
+				6: []any{
+					map[int]any{1: uint64(0), 2: "write", 3: bytes.Repeat([]byte{1}, 32)},
+					map[int]any{1: uint64(0), 2: "read", 3: bytes.Repeat([]byte{2}, 32)},
+					map[int]any{1: uint64(0), 2: "ack", 3: bytes.Repeat([]byte{3}, 32)},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var encrypted bytes.Buffer
+			writer, err := age.Encrypt(&encrypted, identity.Recipient())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write(grant); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.finalizeV2PairingStatus(cfg, paths, pending, map[int]any{1: uint64(3), 6: encrypted.Bytes()}, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if !jsonOutput && a.out.(*bytes.Buffer).String() != "Paired with laptop.\n" {
+				t.Fatalf("pairing success = %s", a.out.(*bytes.Buffer).String())
+			}
+			updated, _, err := loadV2Config()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.Peers["laptop"].Status != "active" {
+				t.Fatalf("peer = %#v", updated.Peers["laptop"])
+			}
+			if _, err := loadV2PeerDeliveryState(paths, pending.RelationshipID); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -703,6 +714,9 @@ func (flow *v2PairingFlow) acceptInvitation(t *testing.T) {
 	inviteePending, err := loadV2PendingPairing(inviteePaths, "desktop")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if text := flow.inviteeApp.out.(*bytes.Buffer).String(); text != "Waiting for desktop. Keep the invite running there.\n" {
+		t.Fatalf("pairing acceptance = %q", text)
 	}
 	flow.inviteePending = inviteePending
 	if !slices.Equal(inviteePending.PeerFeatures, v2LocalPeerFeatures) {
