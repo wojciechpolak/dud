@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-10-16
+
 ### Added
 
 - Add command-specific CLI help through `dud help COMMAND`, group help such as
