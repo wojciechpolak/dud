@@ -5,7 +5,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 )
@@ -179,12 +178,6 @@ func v2QueuedPublicationHint(err error, alias string) error {
 		command += " " + alias
 	}
 	return withCLISteps(fmt.Errorf("delivery committed locally and will retry publication: %w", err), localCLIStep("Resume the saved delivery here; do not repeat send or Git push because that creates another delivery. Respect any scheduled retry time.", command))
-}
-
-func writeCLISteps(out io.Writer, steps []cliNextStep) error {
-	report := &textReport{}
-	report.section("Next steps").addRows(cliStepRows(steps))
-	return report.write(out)
 }
 
 func v2PeerProfileNextSteps(paths v2Paths, alias string, peer v2PeerProfile) []cliNextStep {

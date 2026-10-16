@@ -480,6 +480,24 @@ out of the top-level verb, or end of input leaves it successfully, and a command
 that fails ends the session with that command's exit status. If stdin is not a
 TTY, it prints usage information and exits instead.
 
+## 8. Command help and transfer status
+
+`dud help` shows the complete CLI reference. Add a command or subcommand to
+narrow it: `dud help git push`, `dud git help push`, `dud git push --help`, and
+`dud peer reset -h` show the relevant syntax, options and examples. Groups also
+accept `help`, for example `dud peer help`. Help works offline without an
+initialized device and does not execute the selected operation.
+
+Peer `send`, `receive`, `git push`, and `git fetch` print a status footer of one
+to three lines, both from the shell and in the interactive menu. It
+distinguishes queued local work from deliveries awaiting the other device's
+acknowledgement. Active warnings and a next command appear when needed. Inbox
+state describes the last check. Use `-v` or `--verbose` for every counter and
+recovery detail; `sync`, `doctor`, `peer show`, and `git status` retain their
+detailed reports. `--json` includes the complete status. When receive writes a
+message to stdout, its report and status go to stderr so a pipe contains only
+the message.
+
 ## Related documents
 
 - [`dead-drops-v1.md`](dead-drops-v1.md): the drop commands in full

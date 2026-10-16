@@ -1592,9 +1592,6 @@ func fprintV2GitPushResult(a *app, opts v2GitPushOptions, sequence uint64, check
 		fmt.Fprintf(a.out, "Built from acknowledged checkpoint %d.\n", baseSequence)
 	}
 	fmt.Fprintln(a.out, "Not acknowledged yet.")
-	if err := writeCLISteps(a.out, []cliNextStep{peerCLIStep("In the matching repository, fetch the checkpoint.", "git fetch NAME_FOR_THIS_DEVICE"), localCLIStep("After the other device fetches it, collect the acknowledgement here.", "sync "+opts.Alias)}); err != nil {
-		return err
-	}
 	if len(refused) != 0 {
 		fmt.Fprintf(a.out, "%d earlier checkpoint(s) were refused by %s; on this device, inspect them with '%s'.\n", len(refused), opts.Alias, v2ProfiledCommand("git status "+opts.Alias))
 	}
@@ -3162,14 +3159,12 @@ func quarantinedV2GitDeliveries(state *v2GitPeerState) []map[string]any {
 	return quarantined
 }
 
-// v2GitStatusReport renders shared counters and Git-specific deliveries in one
-// block. send, receive, and sync use the same rows in the same order. It also
-// reports quarantined and refused deliveries when counters need no attention,
-// because both leave every v2DeliveryStatus counter at zero.
+// v2GitStatusReport includes Git-specific warnings in the compact transfer
+// footer and preserves their individual details in verbose output.
 func v2GitStatusReport(verbose bool, status v2DeliveryStatus, quarantined, rejected []map[string]any) *textReport {
 	report := &textReport{}
-	if !verbose && !status.needsAttention() && len(quarantined) == 0 && len(rejected) == 0 {
-		return report
+	if !verbose {
+		return status.compactReport(len(quarantined), len(rejected))
 	}
 	section := report.section("Status")
 	section.addRows(status.rows())

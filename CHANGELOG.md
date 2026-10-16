@@ -8,6 +8,21 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add command-specific CLI help through `dud help COMMAND`, group help such as
+  `dud peer help`, and `--help` or `-h` on commands and subcommands. Help lists
+  relevant syntax, options, and examples, works offline without an initialized
+  device, and preserves literal help text used as transfer data.
+
+### Changed
+
+- Report peer transfer status in one to three lines after `send`, `receive`,
+  `git push`, and `git fetch`, including transfers from the interactive menu.
+  Summaries distinguish queued work from unacknowledged deliveries and include
+  active warnings and a next command. `-v` and `--verbose` expose full status
+  details; diagnostic commands and JSON retain their complete reports.
+
 ## [2.6.0] - 2026-10-15
 
 ### Added

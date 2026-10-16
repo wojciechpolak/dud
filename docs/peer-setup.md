@@ -291,13 +291,20 @@ dud git status desktop
 
 ## 5. Reading the status block
 
-`sync`, `doctor`, `peer show`, and `git status` always end with the same status
-block, and `send`, `receive`, and the Git commands print it when `-v` is given
-or when something needs attention, such as queued, undrained, quarantined, or
-halted work. A routine transfer reports what it did in one line, and DUD reports
-a stalled relationship. Whenever the block is printed, every counter appears,
-including the zeros, so a healthy relationship and a stalled one use the same
-layout:
+`send`, `receive`, `git push`, and `git fetch` report status in one to three
+lines. Queued deliveries describe local work; unacknowledged deliveries await
+signed acknowledgement. Active warnings and the appropriate next command appear
+without expanding every counter or listing descriptor digests. For example:
+
+```text
+Status: queued deliveries 0; unacknowledged deliveries 4.
+After peer receipt, collect the acknowledgement (local): dud sync laptop
+```
+
+Use `-v` or `--verbose` on a transfer for the full status block. `sync`,
+`doctor`, `peer show`, and `git status` provide detailed reports directly.
+`--json` always includes the complete status. Full delivery reports include zero
+counters:
 
 ```text
 Status

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // v2QuarantinedChain names one halted delivery chain and why it stopped.
@@ -187,11 +188,9 @@ func (status v2DeliveryStatus) merge(target map[string]any) map[string]any {
 	return target
 }
 
-// needsAttention reports whether anything is queued, undrained, quarantined,
-// or halted, which is what decides whether an action command volunteers its
-// status block. Unacknowledged deliveries are excluded. Every successful send
-// remains unacknowledged until the peer receives it, so counting them would
-// raise the block during ordinary progress.
+// needsAttention identifies saved work and recovery guards that take priority
+// over waiting for a normal acknowledgement. Unacknowledged deliveries alone
+// do not indicate a stalled relationship.
 func (status v2DeliveryStatus) needsAttention() bool {
 	return status.PendingDeliveries != 0 ||
 		status.InboundChunkTransfers != 0 ||
@@ -203,13 +202,8 @@ func (status v2DeliveryStatus) needsAttention() bool {
 		(status.RelationshipReset != nil && status.RelationshipReset.Phase != "active" && status.RelationshipReset.Phase != "cancelled")
 }
 
-// rows renders the counters that send, receive, sync, doctor, peer show, and
-// the Git commands all report. Whenever the block is printed at all, every
-// counter is present, including the zeros: a healthy relationship and a stalled
-// one have the same shape, so an operator reads the same rows in the same order
-// in either case, and a missing row means a command forgot to report rather
-// than a queue being empty. Whether an action command prints the block in the
-// first place is a separate decision, made by reportWhen.
+// rows renders every counter and recovery detail for explicit diagnostics and
+// verbose transfer output. Zero counters keep these reports comparable.
 func (status v2DeliveryStatus) rows() []textRow {
 	uploads := textRow{Label: "resumable uploads", Value: strconv.Itoa(status.PendingChunkTransfers)}
 	downloads := textRow{Label: "resumable downloads", Value: strconv.Itoa(status.InboundChunkTransfers)}
@@ -309,17 +303,87 @@ func (status v2DeliveryStatus) report(title string) *textReport {
 	return out
 }
 
-// reportWhen renders the counters for a command whose result is one line and
-// whose status block is a footer. An operator running a send or a receive asked
-// to move data, not to read eight counters, so the block appears only when it
-// was asked for or when something is actually wrong. A stalled relationship
-// still announces itself without the flag, because silence there would be a
-// report that everything is fine.
-func (status v2DeliveryStatus) reportWhen(verbose bool, title string) *textReport {
-	if !verbose && !status.needsAttention() {
-		return &textReport{}
+// transferReport keeps routine results compact while verbose output includes
+// every counter and the evidence needed to diagnose a relationship.
+func (status v2DeliveryStatus) transferReport(verbose bool, title string, nextReported ...bool) *textReport {
+	if verbose {
+		return status.report(title)
 	}
-	return status.report(title)
+	return status.compactReport(0, 0, nextReported...)
+}
+
+// compactReport uses at most three lines. Lists and untrusted reason strings
+// belong in explicit diagnostics, so neither can grow a transfer's footer.
+func (status v2DeliveryStatus) compactReport(quarantinedGit, rejectedGit int, nextReported ...bool) *textReport {
+	parts := []string{
+		fmt.Sprintf("queued deliveries %d", status.PendingDeliveries),
+		fmt.Sprintf("unacknowledged deliveries %d", status.UnacknowledgedDeliveries),
+	}
+	for _, item := range []struct {
+		label string
+		count int
+	}{
+		{"resumable uploads", status.PendingChunkTransfers},
+		{"resumable downloads", status.InboundChunkTransfers},
+		{"queued completions", status.PendingCompletions},
+		{"queued control events", status.PendingControlPublications},
+	} {
+		if item.count != 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", item.label, item.count))
+		}
+	}
+	if status.InboundWaiting {
+		parts = append(parts, "inbound waiting at last check")
+	}
+	if status.UndrainedControl {
+		parts = append(parts, "undrained control")
+	}
+	warnings := []string{}
+	if status.Halted {
+		warnings = append(warnings, "relationship halted")
+	}
+	if reset := status.RelationshipReset; reset != nil && reset.Phase != "active" && reset.Phase != "cancelled" {
+		warnings = append(warnings, "relationship reset "+safeTerminalText(reset.Phase))
+	}
+	if len(status.QuarantinedChains) != 0 {
+		warnings = append(warnings, fmt.Sprintf("quarantined chains %d", len(status.QuarantinedChains)))
+	}
+	if quarantinedGit != 0 {
+		warnings = append(warnings, fmt.Sprintf("quarantined Git deliveries %d", quarantinedGit))
+	}
+	if rejectedGit != 0 {
+		warnings = append(warnings, fmt.Sprintf("refused Git deliveries %d", rejectedGit))
+	}
+	report := &textReport{}
+	section := report.section("")
+	section.add("Status: "+strings.Join(parts, "; ")+".", "")
+	if len(warnings) != 0 {
+		section.add("Warning: "+strings.Join(warnings, "; ")+".", "")
+	}
+	if status.Alias != "" {
+		command := ""
+		label := "Next (local): "
+		resetting := status.RelationshipReset != nil && status.RelationshipReset.Phase != "active" && status.RelationshipReset.Phase != "cancelled"
+		if resetting {
+			command = v2ProfiledCommand("peer reset " + status.Alias)
+		} else if (quarantinedGit != 0 || rejectedGit != 0) && !status.Halted && len(status.QuarantinedChains) == 0 {
+			command = v2ProfiledCommand("git status " + status.Alias)
+		} else {
+			for _, step := range status.nextSteps() {
+				if step.Device == "local" {
+					command = step.Command
+					break
+				}
+			}
+			if !status.needsAttention() && !status.InboundWaiting && status.UnacknowledgedDeliveries != 0 {
+				label = "After peer receipt, collect the acknowledgement (local): "
+			}
+		}
+		if command != "" && !(len(nextReported) != 0 && nextReported[0] && !status.needsAttention()) {
+			section.add(label+safeTerminalText(command), "")
+		}
+	}
+	return report
 }
 
 func v2YesNo(value bool) string {

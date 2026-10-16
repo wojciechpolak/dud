@@ -5,7 +5,12 @@ package main
 import "fmt"
 
 func (a *app) usage() {
-	fmt.Fprint(a.out, `Usage:
+	fmt.Fprint(a.out, usageText)
+}
+
+const usageText = `Usage:
+  dud help [COMMAND [SUBCOMMAND]]
+  dud COMMAND --help
   dud --version
   dud install        Print a host wrapper script to stdout
   dud shell-init     Print a shell function definition to stdout
@@ -74,9 +79,10 @@ Peer status reporting:
   server activation. Each result explains the next step and cancellation.
 
   'dud sync', 'dud doctor', 'dud peer show', and 'dud git status' always print
-  delivery counters. 'dud send', 'dud receive', and peer Git commands print them
-  only with -v or when work remains queued, undrained, quarantined, halted, or
-  in the inbox. --json always includes every counter.
+  delivery counters. 'dud send', 'dud receive', and peer Git commands use a
+  status footer of one to three lines for queued work, unacknowledged deliveries
+  and warnings. -v or --verbose prints every counter and recovery detail instead.
+  Inbox state describes the last check. --json always includes every counter.
 
   A send returns after publishing. It does not wait for the peer. The peer signs
   an acknowledgement when it receives the delivery. 'dud sync PEER' collects
@@ -149,5 +155,4 @@ Peer local state:
   Every network operation rejects DUD_CONNECT_TO. Both modes require a
   canonical HTTPS origin, HTTPS DoH, and TLS 1.3. ECH uses hard mode unless you
   select off.
-`)
-}
+`

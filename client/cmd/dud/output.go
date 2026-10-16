@@ -252,8 +252,8 @@ func markJSONOption(jsonOutput *bool) error {
 	return nil
 }
 
-// markVerboseOption records that -v or --verbose was seen. The commands whose
-// status footer is otherwise reported only when it matters all route through
+// markVerboseOption records that -v or --verbose requested full transfer
+// diagnostics. Both spellings share the duplicate-option check through
 // it, so a repeat is refused the same way --json is.
 func markVerboseOption(verbose *bool) error {
 	if *verbose {

@@ -134,6 +134,10 @@ func (a *app) run(args []string) (resultErr error) {
 		return fatalError("")
 	}
 
+	if handled, err := a.commandHelp(args); handled {
+		return err
+	}
+
 	command := args[0]
 	rest := args[1:]
 
@@ -180,8 +184,6 @@ func (a *app) run(args []string) (resultErr error) {
 		fmt.Fprint(a.out, installScript(a.cfg.Image))
 	case "shell-init":
 		fmt.Fprint(a.out, shellInitScript(a.cfg.Image))
-	case "help", "-h", "--help":
-		a.usage()
 	default:
 		return fatalError("Unknown command: " + command)
 	}

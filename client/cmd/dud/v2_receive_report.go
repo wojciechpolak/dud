@@ -89,16 +89,6 @@ func receiveContainsMessage(drained []v2ReceivedItem) bool {
 	return false
 }
 
-// v2ReceiveReportsStatus decides whether a receive prints its status block.
-// It adds inbound work to the shared rule, because receive is the command that
-// just refreshed that flag: a bounded or stopped drain leaves deliveries in the
-// inbox, and an operator who is told only what arrived would read a partial
-// drain as a complete one. After a send the same flag describes the previous
-// inbox check, which is why the shared rule leaves it out.
-func v2ReceiveReportsStatus(opts v2PeerReceiveOptions, status v2DeliveryStatus) bool {
-	return opts.verbose || status.needsAttention() || status.InboundWaiting
-}
-
 func (a *app) renderV2ReceiveReport(opts v2PeerReceiveOptions, drained []v2ReceivedItem, stop *v2ReceiveStop, status v2DeliveryStatus) error {
 	if opts.json {
 		return writeJSON(a.out, v2ReceiveJSON(opts.alias, drained, stop, status))
@@ -112,7 +102,7 @@ func (a *app) renderV2ReceiveReport(opts v2PeerReceiveOptions, drained []v2Recei
 	// only earns its extra lines once there is more than one outcome to report.
 	if stop == nil && len(drained) == 0 {
 		fmt.Fprintf(out, "No pending delivery from %s.\n", opts.alias)
-		return status.reportWhen(v2ReceiveReportsStatus(opts, status), "Status").write(out)
+		return status.transferReport(opts.verbose, "Status").write(out)
 	}
 	// A retained archive is a second thing to report about the same delivery, so
 	// it takes the sectioned form below rather than the one-line one: the whole
@@ -121,10 +111,10 @@ func (a *app) renderV2ReceiveReport(opts v2PeerReceiveOptions, drained []v2Recei
 		item := drained[0]
 		if item.Outcome == "received" {
 			fmt.Fprintf(out, "Received data sequence %d from %s at %s.\n", item.Sequence, opts.alias, safeTerminalText(item.Output))
-			return status.reportWhen(v2ReceiveReportsStatus(opts, status), "Status").write(out)
+			return status.transferReport(opts.verbose, "Status").write(out)
 		}
 		if item.Outcome == "message" {
-			return status.reportWhen(v2ReceiveReportsStatus(opts, status), "Status").write(out)
+			return status.transferReport(opts.verbose, "Status").write(out)
 		}
 	}
 	report := &textReport{}
@@ -142,13 +132,10 @@ func (a *app) renderV2ReceiveReport(opts v2PeerReceiveOptions, drained []v2Recei
 			stopped.add("next (local)", stop.Next)
 		}
 	}
-	// A section left empty is skipped when the report is written, so the same
-	// visibility rule reportWhen applies to the single-delivery forms holds here
-	// by declaring the section and filling it only when it earns its lines.
-	if v2ReceiveReportsStatus(opts, status) {
-		report.section("Status").addRows(status.rows())
+	if err := report.write(out); err != nil {
+		return err
 	}
-	return report.write(out)
+	return status.transferReport(opts.verbose, "Status", stop != nil && stop.Next != "").write(out)
 }
 
 // v2ReceiveHeadline opens the report with the one line an operator reads first:

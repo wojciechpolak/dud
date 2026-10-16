@@ -1716,10 +1716,7 @@ func (a *app) reportV2PeerSend(runtime *v2PeerRuntime, opts v2PeerSendOptions, p
 		return err
 	}
 	fmt.Fprintln(a.out, "Not acknowledged yet.")
-	if err := writeCLISteps(a.out, []cliNextStep{peerCLIStep("Receive this delivery, using the profile paired with this device.", "receive NAME_FOR_THIS_DEVICE"), localCLIStep("After the other device receives it, collect the acknowledgement here.", "sync "+opts.alias)}); err != nil {
-		return err
-	}
-	return status.reportWhen(opts.verbose, "Status").write(a.out)
+	return status.transferReport(opts.verbose, "Status").write(a.out)
 }
 
 func (a *app) cmdPeerSend(args []string) error {

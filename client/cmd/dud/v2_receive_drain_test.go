@@ -708,7 +708,7 @@ func TestV2ReceiveMaxOneKeepsTheSingleDeliveryReport(t *testing.T) {
 	if transport.inboxRequests != 1 || transport.completions != 1 {
 		t.Fatalf("bounded receive made %d reads and %d completions", transport.inboxRequests, transport.completions)
 	}
-	want := "Received data sequence 1 from laptop at " + filepath.Join(outDir, "LICENSE") + ".\nStatus\n"
+	want := "Received data sequence 1 from laptop at " + filepath.Join(outDir, "LICENSE") + ".\nStatus: queued deliveries 0; unacknowledged deliveries 0; inbound waiting at last check.\n"
 	if !strings.HasPrefix(stdout.String(), want) {
 		t.Fatalf("bounded receive text = %q", stdout.String())
 	}
@@ -771,7 +771,7 @@ func TestV2ReceiveStopsAtAGitCheckpointWithoutLosingEarlierDeliveries(t *testing
 		t.Fatalf("receive text = %s", text)
 	}
 	// The checkpoint is still queued, so the report must not claim otherwise.
-	if !strings.Contains(text, "inbound waiting            yes") {
+	if !strings.Contains(text, "inbound waiting at last check") || strings.Contains(text, "Next (local): dud inbox laptop") {
 		t.Fatalf("blocked receive reported an empty queue: %s", text)
 	}
 }
@@ -965,7 +965,8 @@ func TestV2ReceiveKeepsMessagePayloadsAloneOnStdout(t *testing.T) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "Received 3 deliveries from laptop.") ||
-		!strings.Contains(stderr.String(), "message written to stdout") {
+		!strings.Contains(stderr.String(), "message written to stdout") ||
+		!strings.Contains(stderr.String(), "Status: queued deliveries 0; unacknowledged deliveries 0.") {
 		t.Fatalf("stderr = %s", stderr.String())
 	}
 }

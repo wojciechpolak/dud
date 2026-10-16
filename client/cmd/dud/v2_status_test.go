@@ -371,8 +371,8 @@ func TestV2ReceiveReportsStatusWhenNothingIsPending(t *testing.T) {
 	if err := a.run([]string{"receive", "laptop"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "Status\n  queued deliveries          0\n  resumable uploads          0\n  resumable upload bytes     0\n  resumable downloads        0\n  resumable download bytes   0\n  queued completions         0") ||
-		!strings.Contains(stdout.String(), "- in:control (fork at sequence 3)") {
+	if !strings.Contains(stdout.String(), "Status: queued deliveries 0; unacknowledged deliveries 0; undrained control.") ||
+		!strings.Contains(stdout.String(), "Warning: quarantined chains 1.") {
 		t.Fatalf("receive text = %s", stdout.String())
 	}
 }
@@ -449,7 +449,7 @@ func TestV2SendReportsStatusInJSONAndText(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stdout.String(), "Sent to laptop as data sequence 2") ||
-		!strings.Contains(stdout.String(), "Status\n  queued deliveries          0\n  resumable uploads          0\n  resumable upload bytes     0\n  resumable downloads        0\n  resumable download bytes   0\n  queued completions         0\n  queued control events      0\n  unacknowledged deliveries  2\n  inbound waiting            no\n  undrained control          yes") {
+		!strings.Contains(stdout.String(), "Status: queued deliveries 0; unacknowledged deliveries 2; undrained control.") {
 		t.Fatalf("send text = %s", stdout.String())
 	}
 	if stderr.Len() != 0 {
@@ -585,7 +585,7 @@ func TestQuarantinedV2GitDeliveriesListUnpromotedCheckpoints(t *testing.T) {
 	// A quarantined checkpoint leaves every shared counter at zero, so the block
 	// has to raise itself here without -v or the condition goes unreported.
 	block := v2GitStatusReport(false, v2DeliveryStatus{}, quarantined, nil).String()
-	if !strings.Contains(block, "- aa (verified)") || !strings.Contains(block, "- cc (payload-verified)") {
+	if !strings.Contains(block, "quarantined Git deliveries 2") || strings.Contains(block, "aa") || strings.Contains(block, "cc (payload-verified)") {
 		t.Fatalf("quarantine block = %q", block)
 	}
 	empty := v2GitStatusReport(true, v2DeliveryStatus{}, nil, nil).String()
@@ -595,21 +595,20 @@ func TestQuarantinedV2GitDeliveriesListUnpromotedCheckpoints(t *testing.T) {
 	if strings.Contains(empty, "refused Git deliveries") {
 		t.Fatalf("empty report named refused deliveries: %q", empty)
 	}
-	if quiet := v2GitStatusReport(false, v2DeliveryStatus{}, nil, nil).String(); quiet != "" {
+	if quiet := v2GitStatusReport(false, v2DeliveryStatus{}, nil, nil).String(); quiet != "Status: queued deliveries 0; unacknowledged deliveries 0.\n" {
 		t.Fatalf("clean Git status block without --verbose = %q", quiet)
 	}
 	refused := v2GitStatusReport(false, v2DeliveryStatus{}, nil, []map[string]any{
 		{"descriptor_digest": "dd", "reason": "Git metadata is invalid"},
 	}).String()
-	if !strings.Contains(refused, "- dd (Git metadata is invalid)") {
+	if !strings.Contains(refused, "refused Git deliveries 1") || strings.Contains(refused, "Git metadata is invalid") {
 		t.Fatalf("refused block = %q", refused)
 	}
 }
 
-// A send that went cleanly has nothing to report beyond what it did. The
-// counters are still one flag away, and a relationship in trouble still raises
-// them without being asked, so the quiet default never hides a stalled peer.
-func TestV2SendKeepsStatusBehindVerboseUntilSomethingNeedsAttention(t *testing.T) {
+// Every send reports publication and acknowledgement state; verbose output
+// also exposes every delivery counter and recovery detail.
+func TestV2SendReportsCompactStatusAndVerboseDetails(t *testing.T) {
 	paths, state := newPairedV2TestPeer(t, "laptop")
 	if err := writeV2PeerDeliveryState(paths, state); err != nil {
 		t.Fatal(err)
@@ -624,7 +623,7 @@ func TestV2SendKeepsStatusBehindVerboseUntilSomethingNeedsAttention(t *testing.T
 	}
 	quiet := stdout.String()
 	if !strings.HasPrefix(quiet, "Sent to laptop as data sequence 1.\nNot acknowledged yet.\n") ||
-		!strings.Contains(quiet, "DUD_PROFILE=PROFILE_ON_OTHER_DEVICE dud receive NAME_FOR_THIS_DEVICE") ||
+		!strings.Contains(quiet, "Status: queued deliveries 0; unacknowledged deliveries 1.") ||
 		!strings.Contains(quiet, "dud sync laptop") || strings.Contains(quiet, "Status\n") {
 		t.Fatalf("send text = %q", quiet)
 	}
@@ -663,14 +662,15 @@ func TestV2SendReportsStatusWithoutVerboseWhenAChainIsQuarantined(t *testing.T) 
 	if err := a.run([]string{"send", "laptop", "-m", "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "quarantined chains         1") ||
-		!strings.Contains(stdout.String(), "- in:control (fork at sequence 3)") {
+	if !strings.Contains(stdout.String(), "Warning: quarantined chains 1.") ||
+		!strings.Contains(stdout.String(), "dud peer resume laptop") || strings.Contains(stdout.String(), "fork at sequence 3") {
 		t.Fatalf("send hid a quarantined chain: %q", stdout.String())
 	}
 }
 
-// A receive that empties the queue reports what arrived and stops there.
-func TestV2ReceiveKeepsStatusBehindVerboseWhenNothingIsPending(t *testing.T) {
+// An empty receive reports a compact local summary; verbose output contains
+// the complete diagnostic block.
+func TestV2ReceiveReportsCompactStatusAndVerboseDetails(t *testing.T) {
 	paths, state := newPairedV2TestPeer(t, "laptop")
 	if err := writeV2PeerDeliveryState(paths, state); err != nil {
 		t.Fatal(err)
@@ -683,7 +683,7 @@ func TestV2ReceiveKeepsStatusBehindVerboseWhenNothingIsPending(t *testing.T) {
 	if err := a.run([]string{"receive", "laptop"}); err != nil {
 		t.Fatal(err)
 	}
-	if stdout.String() != "No pending delivery from laptop.\n" {
+	if stdout.String() != "No pending delivery from laptop.\nStatus: queued deliveries 0; unacknowledged deliveries 0.\n" {
 		t.Fatalf("clean receive text = %q", stdout.String())
 	}
 

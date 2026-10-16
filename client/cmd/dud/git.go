@@ -96,8 +96,7 @@ func (a *app) cmdGit(args []string) error {
 	case "status":
 		return a.cmdV2GitStatus(rest)
 	case "help", "-h", "--help":
-		a.usage()
-		return nil
+		return a.showCommandHelp("git")
 	default:
 		return fatalError("Unknown git subcommand: " + subcommand)
 	}
