@@ -1701,7 +1701,7 @@ func TestV2GitFetchAppliesACompleteCheckpoint(t *testing.T) {
 	if got := runGitTestCommand(t, destination, "rev-parse", "refs/remotes/laptop/main"); got != wantOID {
 		t.Fatalf("remote-tracking ref = %s, want %s", got, wantOID)
 	}
-	if !strings.Contains(stdout.String(), "Fetched complete Git checkpoint") {
+	if stdout.String() != "Fetched Git checkpoint from laptop (remote: laptop).\nReceipt confirmation sent to laptop.\nLocal branches and working tree unchanged.\n" {
 		t.Fatalf("fetch output = %s", stdout.String())
 	}
 }

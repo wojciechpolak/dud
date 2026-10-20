@@ -487,15 +487,25 @@ narrow it: `dud help git push`, `dud git help push`, `dud git push --help`, and
 accept `help`, for example `dud peer help`. Help works offline without an
 initialized device and does not execute the selected operation.
 
-Peer `send`, `receive`, `git push`, and `git fetch` print a status footer of one
-to three lines, both from the shell and in the interactive menu. It
-distinguishes queued local work from deliveries awaiting the other device's
-acknowledgement. Active warnings and a next command appear when needed. Inbox
-state describes the last check. Use `-v` or `--verbose` for every counter and
-recovery detail; `sync`, `doctor`, `peer show`, and `git status` retain their
-detailed reports. `--json` includes the complete status. When receive writes a
-message to stdout, its report and status go to stderr so a pipe contains only
-the message.
+Peer `send` and `receive` print a status footer of one to three lines, both from
+the shell and in the interactive menu. It distinguishes queued local work from
+deliveries awaiting the other device's acknowledgement. Active warnings and a
+next command appear when needed. Inbox state describes the last check. Use `-v`
+or `--verbose` for every counter and recovery detail; `sync`, `doctor`,
+`peer show`, and `git status` retain their detailed reports. `--json` includes
+the complete status. When receive writes a message to stdout, its report and
+status go to stderr so a pipe contains only the message.
+
+Peer `git push` reports publication and awaiting receipt confirmation in two
+lines. `git fetch` reports the source and remote, confirmation publication, and
+unchanged local branches and working tree in three lines. An empty Git inbox
+produces one line. Warnings follow the result and identify the transfer
+direction: incoming checkpoints this device rejected, or outgoing checkpoints
+the peer rejected. Queued confirmations do not turn a committed fetch into a
+failed fetch. `Details:`, `Resume:`, and `Check:` identify diagnostics, saved
+work, and inbox inspection. Checkpoint metadata, counters, refusal reasons, and
+branch integration commands belong in `--verbose` and `git status`. Git progress
+clears before its result without a separate completion line.
 
 ## Related documents
 

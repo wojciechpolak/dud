@@ -44,6 +44,8 @@ type v2PeerRuntime struct {
 	transport      v2Transport
 	progress       *v2ProgressReporter
 	maxTTL         uint64
+
+	gitConfirmationErr error
 }
 
 type v2SequenceGapError struct {

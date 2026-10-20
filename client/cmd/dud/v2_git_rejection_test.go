@@ -49,10 +49,8 @@ func unapplicableV2GitMetadata(metadata map[int]any) {
 	metadata[5] = [][]byte{bytes.Repeat([]byte{0x11}, 20)}
 }
 
-// TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues is the regression
-// that justifies the refusal path: before it, a checkpoint the receiver could
-// not apply sat at the head of the data chain forever, and because dud receive
-// also refuses to step over a Git payload, the whole relationship went quiet.
+// A refusal advances the data chain so an unapplicable checkpoint cannot block
+// later checkpoints or file deliveries.
 func TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -69,9 +67,13 @@ func TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues(t *testing.T) {
 
 	paths, state := newPairedV2TestPeer(t, "laptop")
 	ackedDigest := bytes.Repeat([]byte{0x42}, 32)
+	encodedMetadata, err := v2EncMode.Marshal(encodeV2GitMetadata(*metadata))
+	if err != nil {
+		t.Fatal(err)
+	}
 	state.Chains["out:data"].SendSequence = 1
 	state.Sent[hex.EncodeToString(ackedDigest)] = v2SentDelivery{
-		Sequence: 1, DescriptorDigest: hex.EncodeToString(ackedDigest), PayloadType: 4,
+		Sequence: 1, DescriptorDigest: hex.EncodeToString(ackedDigest), PayloadType: 4, TypeMetadata: v2Base64URL(encodedMetadata),
 	}
 	if err := writeV2PeerDeliveryState(paths, state); err != nil {
 		t.Fatal(err)
@@ -114,10 +116,10 @@ func TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues(t *testing.T) {
 			t.Fatalf("fetch of an unapplicable checkpoint failed instead of refusing it: %v", err)
 		}
 	})
-	if !strings.Contains(stdout.String(), "No refs changed.\n") || !strings.Contains(stdout.String(), "Other device: dud git push PEER --full\n") {
+	if !strings.Contains(stdout.String(), "Remote-tracking refs unchanged.\n") || !strings.Contains(stdout.String(), "Other device: dud git push PEER --full\n") {
 		t.Fatalf("refusal guidance = %s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "Refused Git checkpoint 1") {
+	if !strings.HasPrefix(stdout.String(), "This device rejected an incoming Git checkpoint from laptop.\nRemote-tracking refs unchanged.\nRefusal notification sent to laptop.\n") {
 		t.Fatalf("first fetch output = %s", stdout.String())
 	}
 	if transport.completions != 1 {
@@ -133,7 +135,7 @@ func TestV2GitFetchRefusesAnUnapplicableCheckpointAndContinues(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(stdout.String(), "Fetched complete Git checkpoint") {
+	if !strings.Contains(stdout.String(), "Fetched Git checkpoint from laptop") {
 		t.Fatalf("second fetch output = %s", stdout.String())
 	}
 	if got := runGitTestCommand(t, destination, "rev-parse", "refs/remotes/laptop/main"); got != wantOID {

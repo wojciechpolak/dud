@@ -1001,13 +1001,6 @@ func checkpointModeV2Git(metadata *v2GitMetadata) v2GitCheckpointMode {
 	return v2GitCheckpointIncremental
 }
 
-func checkpointLabelV2Git(mode v2GitCheckpointMode) string {
-	if mode == v2GitCheckpointFull {
-		return "complete"
-	}
-	return string(mode)
-}
-
 func (a *app) selectedV2GitBranches(repository *v2GitRepository, opts v2GitPushOptions) ([]string, error) {
 	branches := append([]string(nil), opts.Branches...)
 	if opts.Current {
@@ -1490,15 +1483,9 @@ func (a *app) cmdV2GitPush(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) (resultErr error) {
+	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) error {
 		runtime.progress = a.newV2ProgressReporter(opts.Alias, opts.JSON, opts.Progress)
-		defer func() {
-			if resultErr != nil {
-				runtime.progress.Fail()
-			} else {
-				runtime.progress.Complete()
-			}
-		}()
+		defer runtime.progress.Stop()
 		if err := runtime.requireGitFeatures(); err != nil {
 			return err
 		}
@@ -1512,7 +1499,8 @@ func (a *app) cmdV2GitPush(args []string) error {
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
-		if err := runtime.flushPendingCompletions(ctx); err != nil {
+		runtime.gitConfirmationErr = runtime.flushPendingCompletions(ctx)
+		if err := runtime.gitConfirmationErr; err != nil && opts.JSON {
 			runtime.progress.Clear()
 			fmt.Fprintf(a.errOut, "WARNING: queued peer completions remain pending: %v\n", err)
 		}
@@ -1559,7 +1547,7 @@ func (a *app) cmdV2GitPush(args []string) error {
 		quarantined := quarantinedV2GitDeliveries(state)
 		rejected := rejectedV2GitDeliveries(runtime.state)
 		refused := refusedV2GitCheckpoints(state)
-		runtime.progress.Complete()
+		runtime.progress.Stop()
 		if opts.JSON {
 			result := status.merge(map[string]any{
 				"peer": opts.Alias, "repository_id": hex.EncodeToString(repositoryID),
@@ -1575,27 +1563,14 @@ func (a *app) cmdV2GitPush(args []string) error {
 			}
 			return writeJSON(a.out, result)
 		}
-		if checkpointMode == v2GitCheckpointIncremental {
-			return fprintV2GitPushResult(a, opts, sequence, checkpointMode, metadata.BaseSequence, refused, status, quarantined, rejected)
+		result := newV2GitTransferReport(runtime, state)
+		result.summary = []string{
+			fmt.Sprintf("Uploaded Git checkpoint for %s.", safeTerminalText(opts.Alias)),
+			fmt.Sprintf("Awaiting receipt confirmation from %s.", safeTerminalText(opts.Alias)),
 		}
-		return fprintV2GitPushResult(a, opts, sequence, checkpointMode, 0, refused, status, quarantined, rejected)
+		result.checkpoint = v2GitCheckpointRows(checkpointMode, sequence, metadata.BaseSequence, hex.EncodeToString(repositoryID), digest, state.Outbound[digest].Refs)
+		return result.report(opts.Verbose).write(a.out)
 	})
-}
-
-func fprintV2GitPushResult(a *app, opts v2GitPushOptions, sequence uint64, checkpointMode v2GitCheckpointMode, baseSequence uint64, refused []map[string]any, status v2DeliveryStatus, quarantined, rejected []map[string]any) error {
-	if err := fprintWrapped(a.out,
-		"Sent %s Git checkpoint to %s as data sequence %d.",
-		checkpointLabelV2Git(checkpointMode), opts.Alias, sequence); err != nil {
-		return err
-	}
-	if baseSequence != 0 {
-		fmt.Fprintf(a.out, "Built from acknowledged checkpoint %d.\n", baseSequence)
-	}
-	fmt.Fprintln(a.out, "Not acknowledged yet.")
-	if len(refused) != 0 {
-		fmt.Fprintf(a.out, "%d earlier checkpoint(s) refused by %s.\nInspect: %s\n", len(refused), opts.Alias, v2ProfiledCommand("git status "+opts.Alias))
-	}
-	return v2GitStatusReport(opts.Verbose, status, quarantined, rejected).write(a.out)
 }
 
 func (a *app) validateV2GitMetadata(repository *v2GitRepository, metadata *v2GitMetadata) error {
@@ -2491,7 +2466,7 @@ func (runtime *v2PeerRuntime) receiveAvailableV2Git(ctx context.Context, a *app,
 //
 // The method writes the refusal to state before queueing it. A crash between
 // those steps causes the sender to offer it again and produces the same refusal.
-func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, opts v2GitFetchOptions, envelope *validatedV2Envelope, delivery *v2GranularInboxDelivery, sourceSlotEpoch uint64, policyDigest []byte, sequence uint64, digest string, cause error) (bool, error) {
+func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, repository *v2GitRepository, opts v2GitFetchOptions, envelope *validatedV2Envelope, delivery *v2GranularInboxDelivery, sourceSlotEpoch uint64, policyDigest []byte, sequence uint64, digest string, cause error) (bool, error) {
 	now := uint64(time.Now().Unix())
 	transfer := runtime.state.InboundTransfers[digest]
 	if transfer.Phase == "output-committed" {
@@ -2525,16 +2500,14 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return false, err
 	}
-	if err := runtime.flushPendingCompletions(ctx); err != nil {
+	runtime.gitConfirmationErr = runtime.flushPendingCompletions(ctx)
+	if err := runtime.gitConfirmationErr; err != nil && opts.JSON {
 		if runtime.progress != nil {
 			runtime.progress.Clear()
 		}
 		fmt.Fprintf(a.errOut, "WARNING: Git checkpoint refused; acknowledgement queued: %v\nResume: %s\n", err, v2ProfiledCommand("sync "+opts.Alias))
 	}
-	if runtime.progress != nil {
-		runtime.progress.Phase("completion", 0)
-		runtime.progress.Complete()
-	}
+	runtime.progress.Stop()
 	status := v2DeliveryStatusOf(runtime.state, opts.Alias)
 	if opts.JSON {
 		return true, writeJSON(a.out, status.merge(map[string]any{
@@ -2545,14 +2518,33 @@ func (runtime *v2PeerRuntime) rejectV2GitDelivery(ctx context.Context, a *app, o
 			"acknowledgement":          len(runtime.state.PendingCompletions) == 0,
 		}))
 	}
-	fmt.Fprintf(a.out, "Refused Git checkpoint %d: %v\n", sequence, cause)
-	fmt.Fprintln(a.out, "No refs changed.")
-	if isFullV2GitCheckpointRequired(cause) {
-		fmt.Fprintln(a.out, peerCLIStep("Sync, then send a full checkpoint from its repository.", "git push PEER --full").text())
-	} else {
-		fmt.Fprintln(a.out, peerCLIStep("Review the refusal before sending a compatible checkpoint.", "git push PEER --full").text())
+	state, err := loadV2GitReportState(runtime, repository)
+	if err != nil {
+		return true, err
 	}
-	return true, nil
+	result := newV2GitTransferReport(runtime, state)
+	result.rejectedDigest = digest
+	result.confirmationQueued = v2GitConfirmationQueued(runtime.state, digest)
+	result.inboundWaiting = v2GitOtherInboxEpochsWaiting(runtime.state, sourceSlotEpoch)
+	confirmation := fmt.Sprintf("Refusal notification sent to %s.", safeTerminalText(opts.Alias))
+	if result.confirmationQueued {
+		confirmation = fmt.Sprintf("Refusal notification to %s is queued.", safeTerminalText(opts.Alias))
+	}
+	result.summary = []string{
+		fmt.Sprintf("This device rejected an incoming Git checkpoint from %s.", safeTerminalText(opts.Alias)),
+		"Remote-tracking refs unchanged.", confirmation,
+	}
+	result.checkpoint = []textRow{
+		{Label: "data sequence", Value: strconv.FormatUint(sequence, 10)},
+		{Label: "descriptor digest", Value: digest},
+		{Label: "refusal reason", Value: safeTerminalText(cause.Error())},
+	}
+	if isFullV2GitCheckpointRequired(cause) {
+		result.peerSteps = []cliNextStep{peerCLIStep("On the sending device, sync, then send a full checkpoint from its repository. Use that device's peer alias and profile.", "git push PEER --full")}
+	} else {
+		result.peerSteps = []cliNextStep{peerCLIStep("On the sending device, review the refusal before sending a compatible checkpoint. Use that device's peer alias and profile.", "git push PEER --full")}
+	}
+	return true, result.report(opts.Verbose).write(a.out)
 }
 
 // v2GitDeliveryHeader records what a Git checkpoint's signed descriptor fixes
@@ -2805,7 +2797,7 @@ func v2GitResultDigest(metadata *v2GitMetadata, fetchedRefs map[string][]byte) (
 // transfer record names the repository as the committed output, and the chain
 // watermark moves past this sequence only once the completion is queued, so an
 // interrupted fetch re-runs the acknowledgement rather than skipping it.
-func (runtime *v2PeerRuntime) commitV2GitDelivery(ctx context.Context, a *app, repository *v2GitRepository, delivery *v2GranularInboxDelivery, header v2GitDeliveryHeader, sourceSlotEpoch uint64, transfer v2InboundTransfer, metadata *v2GitMetadata, fetchedRefs map[string][]byte) error {
+func (runtime *v2PeerRuntime) commitV2GitDelivery(ctx context.Context, a *app, repository *v2GitRepository, delivery *v2GranularInboxDelivery, header v2GitDeliveryHeader, sourceSlotEpoch uint64, transfer v2InboundTransfer, metadata *v2GitMetadata, fetchedRefs map[string][]byte, jsonOutput bool) error {
 	resultMetadata := v2GitResultMetadata(metadata, fetchedRefs)
 	resultDigest, err := v2GitResultDigest(metadata, fetchedRefs)
 	if err != nil {
@@ -2830,7 +2822,8 @@ func (runtime *v2PeerRuntime) commitV2GitDelivery(ctx context.Context, a *app, r
 	if err := writeV2PeerDeliveryState(runtime.paths, runtime.state); err != nil {
 		return err
 	}
-	if err := runtime.flushPendingCompletions(ctx); err != nil {
+	runtime.gitConfirmationErr = runtime.flushPendingCompletions(ctx)
+	if err := runtime.gitConfirmationErr; err != nil && jsonOutput {
 		if runtime.progress != nil {
 			runtime.progress.Clear()
 		}
@@ -2839,20 +2832,17 @@ func (runtime *v2PeerRuntime) commitV2GitDelivery(ctx context.Context, a *app, r
 	return nil
 }
 
-// reportV2GitFetch renders a committed checkpoint. The refs it moved are
-// remote-tracking refs, so the report ends with the commands that would bring
-// them into a local branch: the fetch itself never touches one.
-func (a *app) reportV2GitFetch(runtime *v2PeerRuntime, repository *v2GitRepository, opts v2GitFetchOptions, state *v2GitPeerState, metadata *v2GitMetadata, header v2GitDeliveryHeader, repositoryID []byte, fetchedRefs map[string][]byte) error {
+// reportV2GitFetch reports committed remote-tracking refs independently of the
+// confirmation publication. Integration commands belong in verbose output
+// because moving a local branch requires a separate decision.
+func (a *app) reportV2GitFetch(runtime *v2PeerRuntime, repository *v2GitRepository, opts v2GitFetchOptions, state *v2GitPeerState, metadata *v2GitMetadata, header v2GitDeliveryHeader, repositoryID []byte, fetchedRefs map[string][]byte, sourceSlotEpoch uint64) error {
 	remote := runtime.peer.GitRemote
 	if remote == "" {
 		remote = opts.Alias
 	}
 	status := v2DeliveryStatusOf(runtime.state, opts.Alias)
 	quarantined := quarantinedV2GitDeliveries(state)
-	if runtime.progress != nil {
-		runtime.progress.Phase("completion", 0)
-		runtime.progress.Complete()
-	}
+	runtime.progress.Stop()
 	if opts.JSON {
 		result := status.merge(map[string]any{
 			"peer": opts.Alias, "received": true, "repository_id": hex.EncodeToString(repositoryID),
@@ -2867,11 +2857,27 @@ func (a *app) reportV2GitFetch(runtime *v2PeerRuntime, repository *v2GitReposito
 		}
 		return writeJSON(a.out, result)
 	}
-	fmt.Fprintf(a.out, "Fetched %s Git checkpoint into refs/remotes/%s/*.\n", checkpointLabelV2Git(checkpointModeV2Git(metadata)), remote)
-	if err := v2GitStatusReport(opts.Verbose, status, quarantined, rejectedV2GitDeliveries(runtime.state)).write(a.out); err != nil {
+	if err := reconcileV2GitAcknowledgements(runtime, repository, state); err != nil {
 		return err
 	}
-	fmt.Fprintln(a.out, "Local branches and the working tree were not changed.")
+	result := newV2GitTransferReport(runtime, state)
+	result.confirmationQueued = v2GitConfirmationQueued(runtime.state, header.digest)
+	result.inboundWaiting = v2GitOtherInboxEpochsWaiting(runtime.state, sourceSlotEpoch)
+	confirmation := fmt.Sprintf("Receipt confirmation sent to %s.", safeTerminalText(opts.Alias))
+	if result.confirmationQueued {
+		confirmation = fmt.Sprintf("Receipt confirmation to %s is queued.", safeTerminalText(opts.Alias))
+	}
+	result.summary = []string{
+		fmt.Sprintf("Fetched Git checkpoint from %s (remote: %s).", safeTerminalText(opts.Alias), safeTerminalText(remote)),
+		confirmation, "Local branches and working tree unchanged.",
+	}
+	result.checkpoint = v2GitCheckpointRows(checkpointModeV2Git(metadata), header.sequence, metadata.BaseSequence, hex.EncodeToString(repositoryID), header.digest, stringGitRefs(fetchedRefs))
+	if err := result.report(opts.Verbose).write(a.out); err != nil {
+		return err
+	}
+	if !opts.Verbose {
+		return nil
+	}
 	fmt.Fprintln(a.out, "Inspect with: git log --oneline --decorate --graph --all")
 	branchNames := make([]string, 0, len(fetchedRefs))
 	for name := range fetchedRefs {
@@ -2914,7 +2920,7 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 		return false, err
 	}
 	reject := func(cause error) (bool, error) {
-		return runtime.rejectV2GitDelivery(ctx, a, opts, header.envelope, delivery, sourceSlotEpoch, header.policyDigest, header.sequence, header.digest, cause)
+		return runtime.rejectV2GitDelivery(ctx, a, repository, opts, header.envelope, delivery, sourceSlotEpoch, header.policyDigest, header.sequence, header.digest, cause)
 	}
 	metadata, err := decodeV2GitMetadata(header.envelope.Descriptor[kTypeMetadata])
 	if err != nil {
@@ -2986,10 +2992,10 @@ func (runtime *v2PeerRuntime) applyV2GitDelivery(ctx context.Context, a *app, re
 	if err != nil {
 		return false, err
 	}
-	if err := runtime.commitV2GitDelivery(ctx, a, repository, delivery, header, sourceSlotEpoch, transfer, metadata, fetchedRefs); err != nil {
+	if err := runtime.commitV2GitDelivery(ctx, a, repository, delivery, header, sourceSlotEpoch, transfer, metadata, fetchedRefs, opts.JSON); err != nil {
 		return false, err
 	}
-	if err := a.reportV2GitFetch(runtime, repository, opts, state, metadata, header, repositoryID, fetchedRefs); err != nil {
+	if err := a.reportV2GitFetch(runtime, repository, opts, state, metadata, header, repositoryID, fetchedRefs, sourceSlotEpoch); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -3004,15 +3010,9 @@ func (a *app) cmdV2GitFetch(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) (resultErr error) {
+	return a.withV2Peer(opts.Alias, 2*time.Minute, func(runtime *v2PeerRuntime) error {
 		runtime.progress = a.newV2ProgressReporter(opts.Alias, opts.JSON, opts.Progress)
-		defer func() {
-			if resultErr != nil {
-				runtime.progress.Fail()
-			} else {
-				runtime.progress.Complete()
-			}
-		}()
+		defer runtime.progress.Stop()
 		if err := runtime.requireGitFeatures(); err != nil {
 			return err
 		}
@@ -3026,7 +3026,8 @@ func (a *app) cmdV2GitFetch(args []string) error {
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
-		if err := runtime.flushPendingCompletions(ctx); err != nil {
+		runtime.gitConfirmationErr = runtime.flushPendingCompletions(ctx)
+		if err := runtime.gitConfirmationErr; err != nil && opts.JSON {
 			runtime.progress.Clear()
 			fmt.Fprintf(a.errOut, "WARNING: queued peer completions remain pending: %v\n", err)
 		}
@@ -3045,7 +3046,7 @@ func (a *app) cmdV2GitFetch(args []string) error {
 		}
 		status := v2DeliveryStatusOf(runtime.state, opts.Alias)
 		rejected := rejectedV2GitDeliveries(runtime.state)
-		runtime.progress.Complete()
+		runtime.progress.Stop()
 		if opts.JSON {
 			return writeJSON(a.out, status.merge(map[string]any{
 				"peer": opts.Alias, "received": false,
@@ -3053,8 +3054,13 @@ func (a *app) cmdV2GitFetch(args []string) error {
 				"rejected_git_deliveries":    rejected,
 			}))
 		}
-		fmt.Fprintf(a.out, "No pending Git checkpoint from %s.\n", opts.Alias)
-		return v2GitStatusReport(opts.Verbose, status, quarantined, rejected).write(a.out)
+		state, err := loadV2GitReportState(runtime, repository)
+		if err != nil {
+			return err
+		}
+		result := newV2GitTransferReport(runtime, state)
+		result.summary = []string{fmt.Sprintf("No pending Git checkpoint from %s.", safeTerminalText(opts.Alias))}
+		return result.report(opts.Verbose).write(a.out)
 	})
 }
 
@@ -3157,34 +3163,6 @@ func quarantinedV2GitDeliveries(state *v2GitPeerState) []map[string]any {
 		})
 	}
 	return quarantined
-}
-
-// v2GitStatusReport includes Git-specific warnings in the compact transfer
-// footer and preserves their individual details in verbose output.
-func v2GitStatusReport(verbose bool, status v2DeliveryStatus, quarantined, rejected []map[string]any) *textReport {
-	report := &textReport{}
-	if !verbose {
-		return status.compactReport(len(quarantined), len(rejected))
-	}
-	section := report.section("Status")
-	section.addRows(status.rows())
-	if len(quarantined) == 0 {
-		section.add("quarantined Git deliveries", "none")
-	} else {
-		entries := make([]string, 0, len(quarantined))
-		for _, entry := range quarantined {
-			entries = append(entries, fmt.Sprintf("%v (%v)", entry["descriptor_digest"], entry["phase"]))
-		}
-		section.addList("quarantined Git deliveries", strconv.Itoa(len(entries)), entries)
-	}
-	if len(rejected) != 0 {
-		entries := make([]string, 0, len(rejected))
-		for _, entry := range rejected {
-			entries = append(entries, fmt.Sprintf("%v (%v)", entry["descriptor_digest"], entry["reason"]))
-		}
-		section.addList("refused Git deliveries", strconv.Itoa(len(entries)), entries)
-	}
-	return report
 }
 
 func countPendingV2GitOutbound(state *v2GitPeerState) int {

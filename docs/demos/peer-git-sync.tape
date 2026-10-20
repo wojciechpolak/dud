@@ -66,12 +66,12 @@ Sleep 1s
 
 Type "dud git push laptop --current"
 Enter
-Wait+Screen /Sent complete Git checkpoint to laptop as data sequence [0-9]+\./
+Wait+Screen /Uploaded Git checkpoint for laptop\./
 Sleep 1s
 
 Ctrl+B
 Right
 Type "dud git fetch desktop --associate"
 Enter
-Wait+Screen /Fetched complete Git checkpoint into refs\/remotes\/desktop\/\*\./
+Wait+Screen /Fetched Git checkpoint from desktop \(remote: desktop\)\./
 Sleep 6s

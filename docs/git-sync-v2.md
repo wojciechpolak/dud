@@ -71,9 +71,22 @@ persisted incremental checkpoints since the last complete one. Explicit
 contain no objects. Deletion-only and ref-only changes therefore use a complete
 checkpoint in automatic mode.
 
-Text output names a `complete Git checkpoint` or an
-`incremental Git checkpoint`. Push and fetch JSON include `checkpoint_mode` with
-value `full` or `incremental`. Incremental results also include `base_sequence`.
+The default result distinguishes publication from receipt:
+
+```text
+Uploaded Git checkpoint for laptop.
+Awaiting receipt confirmation from laptop.
+```
+
+Awaiting confirmation is an ordinary transfer state. The peer fetches the
+checkpoint, then `dud sync laptop` collects its signed confirmation here. A
+publication saved locally requires `sync` to resume; repeating `push` creates
+another checkpoint.
+
+Use `--verbose` for the checkpoint mode, sequence, acknowledged base,
+identifiers, refs, and delivery counters. Push and fetch JSON include
+`checkpoint_mode` with value `full` or `incremental`. Incremental results also
+include `base_sequence`.
 
 ## 3. Receiving a checkpoint
 
@@ -94,6 +107,34 @@ perform deliberately:
 ```sh
 git merge --ff-only laptop/main
 ```
+
+A successful fetch reports its source, remote, and receipt confirmation:
+
+```text
+Fetched Git checkpoint from laptop (remote: laptop).
+Receipt confirmation sent to laptop.
+Local branches and working tree unchanged.
+```
+
+If confirmation publication fails, the checkpoint remains fetched. The result
+says `Receipt confirmation to laptop is queued.` and provides a `Resume:`
+command using `dud sync laptop`. Sent confirmation means publication succeeded;
+it does not assert that the peer collected it. `--verbose` includes commands for
+inspecting and integrating the fetched branches.
+
+Warnings distinguish incoming checkpoints this device rejected from outgoing
+checkpoints the peer rejected. Incoming refusals cover the peer relationship;
+outgoing refusals cover this repository. Stored refusals remain visible as short
+reminders, with `Details:` pointing to `dud git status laptop`. Checkpoints
+needing review are reported separately from final refusals. A refused fetch
+reports unchanged remote-tracking refs and whether its refusal notification was
+sent or queued.
+
+`Resume:` identifies saved work, `Check:` identifies an inbox inspection, and
+`Details:` identifies diagnostics. Commands for the other device require its own
+local peer alias and profile. Inbox reminders describe the last check. After a
+fetch consumes a checkpoint, its occupied slot alone does not establish that
+another delivery is waiting; other occupied epochs still produce a reminder.
 
 For bidirectional sync, give each side the other's alias. Use `laptop` on the
 desktop and `desktop` on the laptop.
@@ -212,19 +253,19 @@ Peer laptop
     main  local-only 2, peer-only 0
 ```
 
-| Message                                                          | What it means                                                              |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `Git bundle exceeds the local limit`                             | over `dud.gitBundleBytes`; raise the local limit or push fewer branches    |
-| `Git bundle contains more than N objects`                        | over `dud.gitObjectCount`, counting unreachable objects                    |
-| `Git bundle delta depth D exceeds the limit`                     | over `dud.gitDeltaDepth`; the sender packed unusually deep chains          |
-| `Git operation exceeded the ... wall-time limit`                 | the repository is larger than the local time budget allows                 |
-| `git ... does not support shallow repositories`                  | fetch the missing Git history and retry                                    |
-| `Git quarantine requires N free bytes`                           | not enough free space for the 3x reservation                               |
-| `Git bundle header does not match the signed encrypted metadata` | the bundle and its signed metadata disagree; treat the sender as hostile   |
-| `Refused Git checkpoint N: ...`                                  | the checkpoint cannot be applied; the peer was told and the chain advanced |
-| `incremental Git base checkpoint is unavailable`                 | the peer receives a signed request for a complete checkpoint               |
-| `requires --allow-rewrite`                                       | the incoming history is not a descendant of what you have                  |
-| `No pending Git checkpoint from PEER`                            | nothing to fetch; the sender has not pushed since your last fetch          |
+| Message                                                          | What it means                                                                                       |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `Git bundle exceeds the local limit`                             | over `dud.gitBundleBytes`; raise the local limit or push fewer branches                             |
+| `Git bundle contains more than N objects`                        | over `dud.gitObjectCount`, counting unreachable objects                                             |
+| `Git bundle delta depth D exceeds the limit`                     | over `dud.gitDeltaDepth`; the sender packed unusually deep chains                                   |
+| `Git operation exceeded the ... wall-time limit`                 | the repository is larger than the local time budget allows                                          |
+| `git ... does not support shallow repositories`                  | fetch the missing Git history and retry                                                             |
+| `Git quarantine requires N free bytes`                           | not enough free space for the 3x reservation                                                        |
+| `Git bundle header does not match the signed encrypted metadata` | the bundle and its signed metadata disagree; treat the sender as hostile                            |
+| `This device rejected an incoming Git checkpoint from PEER.`     | the checkpoint cannot be applied; the chain advanced and its refusal notification is sent or queued |
+| `incremental Git base checkpoint is unavailable`                 | the peer receives a signed request for a complete checkpoint                                        |
+| `requires --allow-rewrite`                                       | the incoming history is not a descendant of what you have                                           |
+| `No pending Git checkpoint from PEER`                            | nothing to fetch; the sender has not pushed since your last fetch                                   |
 
 A quarantined delivery never entered your repository. Once you understand why it
 failed, either ask the sender to push again or drop it; there is nothing to

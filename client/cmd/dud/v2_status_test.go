@@ -584,24 +584,21 @@ func TestQuarantinedV2GitDeliveriesListUnpromotedCheckpoints(t *testing.T) {
 	}
 	// A quarantined checkpoint leaves every shared counter at zero, so the block
 	// has to raise itself here without -v or the condition goes unreported.
-	block := v2GitStatusReport(false, v2DeliveryStatus{}, quarantined, nil).String()
-	if !strings.Contains(block, "quarantined Git deliveries 2") || strings.Contains(block, "aa") || strings.Contains(block, "cc (payload-verified)") {
+	block := (v2GitTransferReport{status: v2DeliveryStatus{Alias: "laptop"}, quarantined: quarantined}).report(false).String()
+	if !strings.Contains(block, "2 incoming Git checkpoints from laptop need review") || strings.Contains(block, "aa") || strings.Contains(block, "cc (payload-verified)") {
 		t.Fatalf("quarantine block = %q", block)
 	}
-	empty := v2GitStatusReport(true, v2DeliveryStatus{}, nil, nil).String()
-	if !strings.Contains(empty, "quarantined Git deliveries  none") {
+	empty := (v2GitTransferReport{}).report(true).String()
+	if !strings.Contains(empty, "incoming Git checkpoints needing review") || !strings.Contains(empty, "none") {
 		t.Fatalf("empty quarantine block = %q", empty)
 	}
-	if strings.Contains(empty, "refused Git deliveries") {
-		t.Fatalf("empty report named refused deliveries: %q", empty)
-	}
-	if quiet := v2GitStatusReport(false, v2DeliveryStatus{}, nil, nil).String(); quiet != "Status: queued deliveries 0; unacknowledged deliveries 0.\n" {
+	if quiet := (v2GitTransferReport{}).report(false).String(); quiet != "" {
 		t.Fatalf("clean Git status block without --verbose = %q", quiet)
 	}
-	refused := v2GitStatusReport(false, v2DeliveryStatus{}, nil, []map[string]any{
+	refused := (v2GitTransferReport{status: v2DeliveryStatus{Alias: "laptop"}, rejected: []map[string]any{
 		{"descriptor_digest": "dd", "reason": "Git metadata is invalid"},
-	}).String()
-	if !strings.Contains(refused, "refused Git deliveries 1") || strings.Contains(refused, "Git metadata is invalid") {
+	}}).report(false).String()
+	if !strings.Contains(refused, "This device rejected 1 incoming Git checkpoint from laptop") || strings.Contains(refused, "Git metadata is invalid") {
 		t.Fatalf("refused block = %q", refused)
 	}
 }
