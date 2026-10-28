@@ -14,7 +14,7 @@ Security support windows for DUD itself are in [`SECURITY.md`](../SECURITY.md).
 | Node | 24.0.0  | `.node-version` |
 | Go   | 1.26.6  | `client/go.mod` |
 
-Older versions may work and are not tested. Each Go module selects `go1.27.2`
+Older versions may work and are not tested. Each Go module selects `go1.27.3`
 with its `toolchain` directive for builds and security scans. Go's automatic
 toolchain selection downloads that version when the installed Go is older. CI
 uses the preferred Go toolchain and the Node version in `.node-version`.

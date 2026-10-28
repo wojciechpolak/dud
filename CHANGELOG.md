@@ -8,6 +8,16 @@ and this project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Select Go 1.27.3 for builds to include the certificate verification fix for
+  GO-2026-6809, and update `golang.org/x/net` to v0.62.0 for GO-2026-6860 and
+  GO-2026-6866.
+- Retain peer acknowledgements for an independent bounded TTL after completion,
+  so payload expiry and capability renewal do not remove unread control events.
+- Keep older control slots in the client's scan until an empty response confirms
+  the queue is drained, including when event or byte limits split it into pages.
+
 ## [2.6.1] - 2026-10-16
 
 ### Added

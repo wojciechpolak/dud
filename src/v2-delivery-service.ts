@@ -1176,10 +1176,15 @@ export function createV2DeliveryHandler(
             operationDigest,
             sequence: 0,
             createdAt: current,
-            expiresAt: Math.min(
-              delivery.expiresAt,
-              verifiedProofs[1]!.capability.expiresAt,
-            ),
+            // A completion can arrive just before its payload expires. Its
+            // acknowledgement needs an independent read window so payload
+            // cleanup and capability renewal cannot create a control gap.
+            expiresAt:
+              current +
+              Math.min(
+                dependencies.maximumTtlSeconds ?? MAX_DELIVERY_TTL_SECONDS,
+                MAX_DELIVERY_TTL_SECONDS,
+              ),
           },
           authorization: {
             claims: proofClaims(verifiedProofs),

@@ -3006,7 +3006,11 @@ func (runtime *v2PeerRuntime) boundedControlDrain(parent context.Context) error 
 		}
 		pending = append(pending, event.ID)
 	}
-	runtime.state.ControlScanEpoch = current
+	// A response is bounded by event count and bytes. Keep querying the older
+	// slots until an empty response proves their pending events are drained.
+	if len(events) == 0 {
+		runtime.state.ControlScanEpoch = current
+	}
 	runtime.state.PendingControlEventIDs = pending
 	runtime.state.LastSuccessfulDrain = uint64(time.Now().Unix())
 	runtime.state.UndrainedControl = false

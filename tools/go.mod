@@ -2,7 +2,7 @@ module github.com/wojciechpolak/dud/tools
 
 go 1.26.6
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 tool (
 	github.com/fzipp/gocyclo/cmd/gocyclo

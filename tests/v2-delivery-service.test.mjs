@@ -36,6 +36,7 @@ import {
   V2_NOW,
   V2_REPOSITORY_BACKENDS,
   V2_SIGNED_DESCRIPTOR_DIGEST,
+  V2_TARGET_SLOT,
   V2_TOKENS,
   requestedPolicy,
 } from './v2-delivery-fixtures.mjs';
@@ -164,6 +165,44 @@ test('delivery retention enforces the configured maximum TTL', async (t) => {
   );
   assert.equal(inbox.header.has(3), false);
 });
+
+for (const [name, createRepository] of V2_REPOSITORY_BACKENDS) {
+  test(`${name} retains acknowledgements independently of the completed payload lifetime`, async (t) => {
+    const fixture = await createDeliveryFixture(t, createRepository, {
+      capabilityExpiresAt: V2_NOW + 20,
+      handler: { maximumTtlSeconds: 30 },
+    });
+    const policy = requestedPolicy(V2_NOW + 10);
+    const published = await fixture.deliver({ policy });
+    assert.equal(published.status, 200);
+    const deliveryId = hex((await decodeBody(published)).get(1));
+    fixture.setNow(V2_NOW + 9);
+    const completion = await fixture.complete({
+      deliveryId,
+      policy,
+      ackNonce: fill(170),
+      controlNonce: fill(171),
+    });
+    assert.equal(completion.status, 200);
+    const eventId = hex((await decodeBody(completion)).get(2));
+    const query = (now) =>
+      fixture.repository.queryInbox({
+        relationshipId: fixture.relationshipId,
+        direction: 'invitee->inviter',
+        dataSlots: [],
+        controlSlots: [{ slot: V2_TARGET_SLOT, epoch: V2_EPOCH }],
+        now,
+      });
+    await fixture.repository.runMaintenance(V2_NOW + 21, 100);
+    const retained = (await query(V2_NOW + 21)).controlEvents;
+    assert.deepEqual(
+      retained.map((event) => event.id),
+      [eventId],
+    );
+    assert.equal(retained[0].expiresAt, V2_NOW + 39);
+    assert.deepEqual((await query(V2_NOW + 39)).controlEvents, []);
+  });
+}
 
 test('atomic delivery stages and publishes only after proof verification', async (t) => {
   const fixture = await createDeliveryFixture(t, MEMORY_BACKEND);

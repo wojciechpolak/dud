@@ -822,6 +822,15 @@ and chunked transfers advertises `[5, 6, 7]`. Acknowledgements apply to
 data-chain deliveries; acknowledgement and peer-control descriptors are never
 themselves acknowledged, preventing an acknowledgement loop.
 
+The server retains a completion's control event for its configured maximum TTL,
+capped at 30 days, measured from completion publication. Payload expiry and
+capability expiry do not shorten that retention window: a payload received near
+its expiry still needs a readable acknowledgement, and capability renewal
+preserves access to retained events. Read authorization, event quotas, and
+explicit consumption remain enforced. Control inbox responses are bounded by
+event count and bytes; a nonempty response does not establish that older slots
+are drained, so the client's scan cursor advances only after an empty response.
+
 A device advertises feature 7 only when its send and receive paths implement the
 durable checkpoints in §7.3.1. Merely parsing chunked descriptors or downloading
 a complete chunked payload in one process is not feature support.
