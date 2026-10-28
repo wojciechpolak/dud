@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-10-28
+
 ### Fixed
 
 - Select Go 1.27.3 for builds to include the certificate verification fix for
