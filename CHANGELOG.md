@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-10-29
+
 ### Added
 
 - Add `dud --tui`, a full-screen client with the same main actions as the
