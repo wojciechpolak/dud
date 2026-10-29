@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -143,6 +142,7 @@ func (a *app) cmdDownload(args []string) error {
 	if err := a.getDownload(encryptedFile, opts); err != nil {
 		return err
 	}
+	a.transferObserver("decryption")
 	if opts.identity != "" {
 		if err := a.runAge("--decrypt", "-i", opts.identity, "-o", plainFile, encryptedFile); err != nil {
 			return err
@@ -160,14 +160,14 @@ func (a *app) cmdDownload(args []string) error {
 		if err := os.MkdirAll(opts.outDir, 0o700); err != nil {
 			return err
 		}
-		listing, err := exec.Command("tar", "-tf", plainFile).Output()
+		listing, err := exec.CommandContext(a.commandContext(), "tar", "-tf", plainFile).Output()
 		if err != nil {
 			return err
 		}
 		if err := validateBundleListing(listing); err != nil {
 			return err
 		}
-		cmd := exec.Command("tar", "-xf", plainFile, "-C", opts.outDir)
+		cmd := exec.CommandContext(a.commandContext(), "tar", "-xf", plainFile, "-C", opts.outDir)
 		cmd.Stdout = a.out
 		cmd.Stderr = a.errOut
 		if err := cmd.Run(); err != nil {
@@ -219,9 +219,9 @@ func (a *app) downloadReport(opts downloadOptions, output, plainFile string) map
 // whole object.
 func (a *app) getDownload(encryptedFile string, opts downloadOptions) error {
 	response, err := a.dropRequest(
-		context.Background(),
+		a.commandContext(),
 		opts.baseURL+"/v1/files/"+url.PathEscape(opts.id),
-		v2Request{Method: http.MethodGet, StreamResponse: true},
+		v2Request{Method: http.MethodGet, StreamResponse: true, ObserveDownload: a.transferObserver("download")},
 	)
 	if err != nil {
 		return err

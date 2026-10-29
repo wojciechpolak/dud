@@ -8,6 +8,22 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add `dud --tui`, a full-screen client with the same main actions as the
+  interactive menu: send, receive, git, peers, status, setup, and tools. Support
+  peer and dead drop transfers, Git checkpoints, delivery status, encryption
+  keys, configuration inspection, and scoped local-state management. Existing
+  CLI commands and the interactive menu retain their behavior.
+- Initialize devices and pair peers through invitation creation and acceptance
+  inside the TUI. Display the pairing code, server, and expiry while waiting;
+  resume interrupted pairing with the same alias. Codes and enrollment secrets
+  stay out of command arguments and command output.
+- Include transfer progress, cancellation with command cleanup, verified
+  collection previews, and explicit consent for destructive operations. Adapt
+  text contrast to the terminal background and support Esc or Left arrow for
+  menu navigation while preserving cursor movement in text fields.
+
 ## [2.6.2] - 2026-10-28
 
 ### Fixed

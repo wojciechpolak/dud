@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -99,7 +100,7 @@ func stdinIsTTY() bool {
 }
 
 func (a *app) runCommand(name string, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(a.commandContext(), name, args...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -107,12 +108,22 @@ func (a *app) runCommand(name string, args []string, stdin io.Reader, stdout io.
 }
 
 func (a *app) runAge(args ...string) error {
+	if a.terminalCommand != nil {
+		return a.terminalCommand(exec.CommandContext(a.commandContext(), a.cfg.AgeBin, args...))
+	}
 	stdin := a.in
 	if tty, err := openInteractiveInput(); err == nil {
 		defer func() { _ = tty.Close() }()
 		stdin = tty
 	}
 	return a.runCommand(a.cfg.AgeBin, args, stdin, a.out, a.errOut)
+}
+
+func (a *app) commandContext() context.Context {
+	if a.commandCtx != nil {
+		return a.commandCtx
+	}
+	return context.Background()
 }
 
 // Every temp file is registered so the signal handler can remove

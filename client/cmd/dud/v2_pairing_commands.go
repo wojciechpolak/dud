@@ -105,7 +105,7 @@ func v2InvitingPeerProfile(cfg *v2LocalConfig, alias string) (v2PeerProfile, err
 func (a *app) requireV2InviteCapabilities(transport v2Transport, origin string) (v2ServerContract, error) {
 	var contract v2ServerContract
 	serverCapabilities, err := requireV2Features(
-		context.Background(),
+		a.commandContext(),
 		transport,
 		origin,
 		2,
@@ -229,6 +229,9 @@ func (a *app) displayAndWaitV2Invitation(cfg *v2LocalConfig, paths v2Paths, pend
 }
 
 func (a *app) displayV2PairingCode(pending *v2PendingPairing, jsonOutput bool) error {
+	if a.showPairingCode != nil {
+		return a.showPairingCode(v2PairingCodeDisplay{Alias: pending.Alias, Code: pending.PairingCode, Origin: pending.CanonicalOrigin, ExpiresAt: pending.ExpiresAt})
+	}
 	if jsonOutput {
 		if err := writeJSON(a.out, map[string]any{"event": "pairing_code", "alias": pending.Alias, "pairing_code": pending.PairingCode, "qr_payload": pending.PairingCode, "expires_at": pending.ExpiresAt, "next_steps": v2PairingNextSteps(pending)}); err != nil {
 			return err
@@ -242,6 +245,14 @@ func (a *app) displayV2PairingCode(pending *v2PendingPairing, jsonOutput bool) e
 		fmt.Fprintf(a.out, "Waiting for %s...\n", safeTerminalText(pending.Alias))
 	}
 	return nil
+}
+
+// v2PairingCodeDisplay contains only the invitation fields shown to the user.
+type v2PairingCodeDisplay struct {
+	Alias     string
+	Code      string
+	Origin    string
+	ExpiresAt uint64
 }
 
 func (a *app) newV2Invitation(cfg *v2LocalConfig, paths v2Paths, alias, origin string, expires time.Duration) (*v2PendingPairing, string, []byte, error) {
@@ -420,7 +431,7 @@ func (a *app) createV2Rendezvous(pending *v2PendingPairing, transport v2Transpor
 		authorization = "DUD2-Enroll " + v2Base64URL(proof)
 	}
 	if _, err := doV2AuthorizedCBORRequest(
-		context.Background(),
+		a.commandContext(),
 		transport,
 		"POST",
 		pending.CanonicalOrigin,
@@ -443,9 +454,9 @@ func (a *app) createV2Rendezvous(pending *v2PendingPairing, transport v2Transpor
 // keys. Every failure here reports the same thing: a code that does not open an
 // invitation is indistinguishable from one that was never valid, and saying
 // which would tell a guesser that a locator exists.
-func fetchV2PairingInvitation(transport v2Transport, origin string, code, locator []byte) (map[int]any, []byte, error) {
+func (a *app) fetchV2PairingInvitation(transport v2Transport, origin string, code, locator []byte) (map[int]any, []byte, error) {
 	retrievalPath := "/v2/pairing/rendezvous/" + hex.EncodeToString(locator)
-	retrieval, err := doV2CBORRequest(context.Background(), transport, "GET", origin, retrievalPath, nil, nil, v2MaxDescriptorBytes)
+	retrieval, err := doV2CBORRequest(a.commandContext(), transport, "GET", origin, retrievalPath, nil, nil, v2MaxDescriptorBytes)
 	if err != nil {
 		return nil, nil, errors.New(v2PairingInvalidCodeMessage)
 	}
@@ -614,7 +625,7 @@ func buildV2PairingAcceptance(code, locator []byte, invitation map[int]any, invi
 // copy of the exported secret this device's half of the relationship is derived
 // from, so an acceptance the inviter receives always has a local counterpart to
 // finish the pairing against.
-func submitV2PairingAcceptance(transport v2Transport, paths v2Paths, origin string, pending *v2PendingPairing, invitation map[int]any, accepted v2PairingAcceptance, statusCapability []byte) error {
+func (a *app) submitV2PairingAcceptance(transport v2Transport, paths v2Paths, origin string, pending *v2PendingPairing, invitation map[int]any, accepted v2PairingAcceptance, statusCapability []byte) error {
 	unlock, err := acquireV2ConfigLock(paths)
 	if err != nil {
 		return err
@@ -635,7 +646,7 @@ func submitV2PairingAcceptance(transport v2Transport, paths v2Paths, origin stri
 		return err
 	}
 	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/accept"
-	if _, err := doV2CBORRequest(context.Background(), transport, "POST", origin, path, bootstrap, body, v2MaxDescriptorBytes); err != nil {
+	if _, err := doV2CBORRequest(a.commandContext(), transport, "POST", origin, path, bootstrap, body, v2MaxDescriptorBytes); err != nil {
 		return fmt.Errorf("accept pairing invitation: %w", err)
 	}
 	return nil
@@ -671,7 +682,7 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 		return err
 	}
 	serverCapabilities, err := requireV2Features(
-		context.Background(),
+		a.commandContext(),
 		transport,
 		origin,
 		2,
@@ -687,7 +698,7 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 	if err != nil {
 		return err
 	}
-	invitation, invitationCBOR, err := fetchV2PairingInvitation(transport, origin, code, locator)
+	invitation, invitationCBOR, err := a.fetchV2PairingInvitation(transport, origin, code, locator)
 	if err != nil {
 		return err
 	}
@@ -728,7 +739,7 @@ func (a *app) acceptV2PeerInvitation(alias, codeText string, jsonOutput bool) er
 		SecretB:              v2Base64URL(accepted.secretB),
 		ServerContract:       serverContract,
 	}
-	if err := submitV2PairingAcceptance(transport, paths, origin, pending, invitation, accepted, identity.statusCapability); err != nil {
+	if err := a.submitV2PairingAcceptance(transport, paths, origin, pending, invitation, accepted, identity.statusCapability); err != nil {
 		return err
 	}
 	if err := ensureV2InviteePendingProfile(alias, pending, echMode); err != nil {
@@ -811,19 +822,19 @@ func (a *app) resumeV2Acceptance(paths v2Paths, pending *v2PendingPairing, trans
 		return errors.New("pending invitation bootstrap is invalid")
 	}
 	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/accept"
-	if _, err := doV2CBORRequest(context.Background(), transport, "POST", pending.CanonicalOrigin, path, bootstrap, body, v2MaxDescriptorBytes); err != nil {
+	if _, err := doV2CBORRequest(a.commandContext(), transport, "POST", pending.CanonicalOrigin, path, bootstrap, body, v2MaxDescriptorBytes); err != nil {
 		return fmt.Errorf("resume pairing acceptance: %w", err)
 	}
 	return nil
 }
 
-func fetchV2PairingStatus(pending *v2PendingPairing, transport v2Transport) (map[int]any, error) {
+func (a *app) fetchV2PairingStatus(pending *v2PendingPairing, transport v2Transport) (map[int]any, error) {
 	bearer, err := decodeV2Base64URL(pending.StatusCapability, 32)
 	if err != nil {
 		return nil, err
 	}
 	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/status"
-	response, err := doV2CBORRequest(context.Background(), transport, "GET", pending.CanonicalOrigin, path, bearer, nil, v2MaxDescriptorBytes)
+	response, err := doV2CBORRequest(a.commandContext(), transport, "GET", pending.CanonicalOrigin, path, bearer, nil, v2MaxDescriptorBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -835,7 +846,7 @@ func fetchV2PairingStatus(pending *v2PendingPairing, transport v2Transport) (map
 }
 
 func (a *app) progressV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2PendingPairing, transport v2Transport) (uint64, error) {
-	status, err := fetchV2PairingStatus(pending, transport)
+	status, err := a.fetchV2PairingStatus(pending, transport)
 	if err != nil {
 		return 0, err
 	}
@@ -1067,7 +1078,7 @@ func buildV2KeyConfirmation(seed, relationshipID []byte, verified v2VerifiedAcce
 // the only copy of the relationship secrets: a confirmation the invitee acts on
 // must always have a local counterpart that can decrypt what the invitee sends
 // next.
-func sendV2KeyConfirmation(paths v2Paths, pending *v2PendingPairing, transport v2Transport, confirmation map[int]any, confirmationSignature []byte) error {
+func (a *app) sendV2KeyConfirmation(paths v2Paths, pending *v2PendingPairing, transport v2Transport, confirmation map[int]any, confirmationSignature []byte) error {
 	unlock, err := acquireV2ConfigLock(paths)
 	if err != nil {
 		return err
@@ -1083,7 +1094,7 @@ func sendV2KeyConfirmation(paths v2Paths, pending *v2PendingPairing, transport v
 	}
 	bearer, _ := decodeV2Base64URL(pending.StatusCapability, 32)
 	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/key-confirm"
-	_, err = doV2CBORRequest(context.Background(), transport, "POST", pending.CanonicalOrigin, path, bearer, body, v2MaxDescriptorBytes)
+	_, err = doV2CBORRequest(a.commandContext(), transport, "POST", pending.CanonicalOrigin, path, bearer, body, v2MaxDescriptorBytes)
 	return err
 }
 
@@ -1128,7 +1139,7 @@ func (a *app) completeInviterKeyConfirmation(paths v2Paths, pending *v2PendingPa
 	pending.OutboundRelationshipSecret = v2Base64URL(secrets.outbound)
 	pending.InboundRelationshipSecret = v2Base64URL(secrets.inbound)
 	pending.FullTranscriptHash = hex.EncodeToString(secrets.transcriptHash)
-	return sendV2KeyConfirmation(paths, pending, transport, confirmation, confirmationSignature)
+	return a.sendV2KeyConfirmation(paths, pending, transport, confirmation, confirmationSignature)
 }
 
 func completeInviteeKeyConfirmation(paths v2Paths, pending *v2PendingPairing, rawEnvelope any) error {
@@ -1311,7 +1322,7 @@ func (a *app) submitV2PairingCompletion(paths v2Paths, pending *v2PendingPairing
 		return err
 	}
 	path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator + "/complete"
-	if _, err := doV2CBORRequest(context.Background(), transport, "POST", pending.CanonicalOrigin, path, bearer, body, v2MaxDescriptorBytes); err != nil {
+	if _, err := doV2CBORRequest(a.commandContext(), transport, "POST", pending.CanonicalOrigin, path, bearer, body, v2MaxDescriptorBytes); err != nil {
 		return err
 	}
 	pending.Completed = true
@@ -1324,7 +1335,7 @@ func (a *app) submitV2PairingCompletion(paths v2Paths, pending *v2PendingPairing
 }
 
 func (a *app) finalizeV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2PendingPairing, transport v2Transport, jsonOutput bool) error {
-	status, err := fetchV2PairingStatus(pending, transport)
+	status, err := a.fetchV2PairingStatus(pending, transport)
 	if err != nil {
 		return err
 	}
@@ -1418,6 +1429,9 @@ func (a *app) waitV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2Pendin
 		}
 	}()
 	for {
+		if err := a.commandContext().Err(); err != nil {
+			return err
+		}
 		if pending.ExpiresAt <= uint64(time.Now().Unix()) {
 			_ = removeV2PendingPairing(paths, pending.Alias)
 			return errors.New(v2PairingInvalidCodeMessage)
@@ -1429,7 +1443,13 @@ func (a *app) waitV2Pairing(cfg *v2LocalConfig, paths v2Paths, pending *v2Pendin
 		if phase == 3 {
 			return a.finalizeV2Pairing(cfg, paths, pending, transport, jsonOutput)
 		}
-		time.Sleep(time.Second)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-a.commandContext().Done():
+			timer.Stop()
+			return a.commandContext().Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -1456,7 +1476,7 @@ func (a *app) cmdPeerRevoke(args []string) error {
 		return withCLISteps(fatalError("peer revocation preserves but disables pending delivery state"), localCLIStep("Confirm revocation; using this peer again requires pairing.", "peer revoke "+cliShellArg(alias)+" --yes"))
 	}
 	if err := a.withV2PeerForRecovery(alias, 30*time.Second, func(runtime *v2PeerRuntime) error {
-		ctx := context.Background()
+		ctx := a.commandContext()
 		if !runtime.state.Halted {
 			_ = runtime.boundedControlDrain(ctx)
 		}

@@ -457,7 +457,7 @@ func (a *app) cmdCapabilities(args []string) error {
 		fmt.Fprintln(a.errOut, "WARNING: v2 ECH off mode exposes the target hostname in TLS SNI.")
 	}
 	capabilities, status, serverVersion, err := a.fetchV2Capabilities(
-		context.Background(),
+		a.commandContext(),
 		settings,
 		v2BootstrapAddresses(cfg),
 	)

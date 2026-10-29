@@ -139,7 +139,7 @@ func (a *app) cmdKeygen(args []string) error {
 	recipient := ""
 	if opts.recipientOut != "" || opts.outputJSON {
 		var recipients bytes.Buffer
-		cmd := exec.Command(a.cfg.AgeKeygenBin, "-y", opts.out)
+		cmd := exec.CommandContext(a.commandContext(), a.cfg.AgeKeygenBin, "-y", opts.out)
 		cmd.Stdout = &recipients
 		cmd.Stderr = a.errOut
 		if err := cmd.Run(); err != nil {
@@ -172,7 +172,7 @@ func (a *app) cmdKeygen(args []string) error {
 // ageKeygenSupportsPQ reads help text even when the command exits non-zero.
 // Some CLIs return a non-zero status for --help.
 func (a *app) ageKeygenSupportsPQ() (bool, error) {
-	cmd := exec.Command(a.cfg.AgeKeygenBin, "--help")
+	cmd := exec.CommandContext(a.commandContext(), a.cfg.AgeKeygenBin, "--help")
 	output, err := cmd.CombinedOutput()
 	if err != nil && len(output) == 0 {
 		return false, err

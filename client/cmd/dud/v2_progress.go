@@ -61,6 +61,26 @@ type v2ProgressReporterConfig struct {
 	terminal  func(io.Writer) bool
 	now       func() time.Time
 	newTicker func(time.Duration) v2ProgressTicker
+	observe   func(v2ProgressSnapshot)
+}
+
+// v2ProgressSnapshot carries transfer state independently of terminal rendering.
+type v2ProgressSnapshot struct {
+	Peer    string
+	Phase   string
+	Current int64
+	Total   int64
+}
+
+func (a *app) transferObserver(phase string) func(int64, int64) {
+	if a.observeProgress == nil {
+		return nil
+	}
+	observe := func(current, total int64) {
+		a.observeProgress(v2ProgressSnapshot{Phase: phase, Current: current, Total: total})
+	}
+	observe(0, 0)
+	return observe
 }
 
 type v2ProgressReporter struct {
@@ -83,9 +103,10 @@ type v2ProgressReporter struct {
 	paused   bool
 	lastSize int
 
-	done   chan struct{}
-	ticker v2ProgressTicker
-	wait   sync.WaitGroup
+	done    chan struct{}
+	ticker  v2ProgressTicker
+	wait    sync.WaitGroup
+	observe func(v2ProgressSnapshot)
 }
 
 func newV2ProgressReporter(config v2ProgressReporterConfig) *v2ProgressReporter {
@@ -101,15 +122,19 @@ func newV2ProgressReporter(config v2ProgressReporterConfig) *v2ProgressReporter 
 		}
 	}
 	terminal := config.terminal(config.out)
-	enabled := !config.flags.disabled && (config.flags.force || (!config.json && terminal))
+	enabled := config.observe != nil || !config.flags.disabled && (config.flags.force || (!config.json && terminal))
 	reporter := &v2ProgressReporter{
 		out: config.out, peer: safeTerminalText(config.peer), enabled: enabled,
 		terminal: terminal, now: config.now, done: make(chan struct{}),
+		observe: config.observe,
 	}
 	if !enabled {
 		return reporter
 	}
 	reporter.started = config.now()
+	if reporter.observe != nil {
+		return reporter
+	}
 	interval := v2ProgressNonterminalInterval
 	if terminal {
 		interval = v2ProgressTerminalInterval
@@ -122,7 +147,7 @@ func newV2ProgressReporter(config v2ProgressReporterConfig) *v2ProgressReporter 
 
 func (a *app) newV2ProgressReporter(peer string, jsonOutput bool, flags v2ProgressFlags) *v2ProgressReporter {
 	return newV2ProgressReporter(v2ProgressReporterConfig{
-		out: a.errOut, peer: peer, json: jsonOutput, flags: flags,
+		out: a.errOut, peer: peer, json: jsonOutput, flags: flags, observe: a.observeProgress,
 	})
 }
 
@@ -173,6 +198,7 @@ func (reporter *v2ProgressReporter) phaseWithProgress(phase string, current, tot
 	reporter.current = current
 	reporter.total = total
 	reporter.rateBase = rateBase
+	reporter.observeLocked()
 	terminal := reporter.terminal
 	reporter.mu.Unlock()
 	if !terminal {
@@ -196,12 +222,19 @@ func (reporter *v2ProgressReporter) Set(current, total int64) {
 		if total >= 0 {
 			reporter.total = total
 		}
+		reporter.observeLocked()
 	}
 	reporter.mu.Unlock()
 }
 
+func (reporter *v2ProgressReporter) observeLocked() {
+	if reporter.observe != nil {
+		reporter.observe(v2ProgressSnapshot{reporter.peer, reporter.phase, reporter.current, reporter.total})
+	}
+}
+
 func (reporter *v2ProgressReporter) render() {
-	if reporter == nil || !reporter.enabled {
+	if reporter == nil || !reporter.enabled || reporter.observe != nil {
 		return
 	}
 	now := reporter.now()

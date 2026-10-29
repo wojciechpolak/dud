@@ -1,0 +1,104 @@
+#!/usr/bin/expect -f
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Wojciech Polak
+
+set timeout 45
+log_user 0
+
+proc await {id pattern} {
+ global timeout
+ expect -i $id -timeout $timeout -re $pattern {return $expect_out(0,string)} \
+  timeout {error "TUI did not display: $pattern"} \
+  eof {error "TUI exited before displaying: $pattern"}
+}
+
+proc open_device {name state device} {
+ global env spawn_id spawn_out
+ spawn docker run --rm -it --name $name --network $env(NETWORK) \
+  --add-host dud.local.test:$env(CADDY_IP) --add-host doh.local.test:$env(CADDY_IP) \
+  -e DUD_HOME=/state/dud -e DUD_PROFILE=tui \
+  -e DUD_PEER_BASE_URL=$env(ORIGIN) -e DUD_DOH_URL=$env(DOH_URL) -e DUD_ECH_MODE=off \
+  -e DUD_PEER_SECRET=$env(ENROLLMENT_SECRET) -e DUD_CA_BUNDLE=/cert/root.crt \
+  -v $state:/state -v $env(ROOT_CERT):/cert/root.crt:ro $env(CLIENT_IMAGE) --tui
+ set id $spawn_id
+ exec stty rows 30 columns 100 < $spawn_out(slave,name)
+ await $id {7\) tools}
+ send -i $id -- "6"
+ await $id {initialize device}
+ send -i $id -- "\r"
+ await $id {Name of this}
+ send -i $id -- "$device\023"
+ await $id {Initialized device}
+ send -i $id -- "\r"
+ await $id {7\) tools}
+ puts "TUI initialized $device."
+ return $id
+}
+
+set desktop [open_device $env(TUI_DESKTOP) $env(DESKTOP_STATE) tui-desktop]
+set laptop [open_device $env(TUI_LAPTOP) $env(LAPTOP_STATE) tui-laptop]
+
+send -i $desktop -- "4"
+await $desktop {create invitation}
+send -i $desktop -- "\r"
+await $desktop {Local alias for the device you are inviting}
+send -i $desktop -- "laptop\023"
+set invitation [await $desktop {[0-9a-f]{4}(-[0-9a-f]{4}){7}}]
+await $desktop {█}
+await $desktop {v QR}
+send -i $desktop -- "v"
+await $desktop {v details}
+send -i $desktop -- "v"
+await $desktop {v QR}
+puts "TUI displayed and toggled the invitation QR."
+
+send -i $laptop -- "4"
+await $laptop {create invitation}
+send -i $laptop -- "\033\133B"
+after 100
+send -i $laptop -- "\r"
+await $laptop {Pairing code \(blank:}
+send -i $laptop -- "desktop\t$invitation\023"
+await $laptop {Paired with desktop}
+await $desktop {Paired with laptop}
+puts "TUI paired both devices."
+
+# Returning to targets reads the activated profiles, so both sides can transfer.
+send -i $desktop -- "\r"
+await $desktop {peer . active}
+send -i $laptop -- "\r"
+await $laptop {peer . active}
+
+foreach id [list $desktop $laptop] {
+ send -i $id -- "\033"
+ await $id {create invitation}
+ send -i $id -- "\033"
+ await $id {7\) tools}
+}
+
+send -i $desktop -- "1"
+await $desktop {peer . active}
+send -i $desktop -- "\r"
+await $desktop {Send message}
+send -i $desktop -- "\r"
+await $desktop {Lifetime}
+send -i $desktop -- "tui-peer-message\023"
+await $desktop {Sent to laptop}
+
+send -i $laptop -- "2"
+await $laptop {peer . active}
+send -i $laptop -- "\r"
+await $laptop {Destination directory}
+send -i $laptop -- "\023"
+await $laptop {tui-peer-message}
+
+send -i $desktop -- "\003"
+expect -i $desktop eof
+catch {wait -i $desktop} desktop_result
+if {[lindex $desktop_result 3] != 0} {error "desktop TUI failed"}
+send -i $laptop -- "\003"
+expect -i $laptop eof
+catch {wait -i $laptop} laptop_result
+if {[lindex $laptop_result 3] != 0} {error "laptop TUI failed"}
+
+puts "TUI device initialization, pairing, send and receive passed."

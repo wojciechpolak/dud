@@ -304,7 +304,7 @@ _dud_docker_cli_args() {
 _dud_complete_wordlist() {
   case "$1" in
     top)
-      printf '%%s\n' --version version init doctor capabilities config migrate erase peer sync test upload download send receive git flush keygen install shell-init help -h --help
+      printf '%%s\n' --tui --version version init doctor capabilities config migrate erase peer sync test upload download send receive git flush keygen install shell-init help -h --help
       ;;
     config)
       printf '%%s\n' show validate
@@ -404,7 +404,7 @@ _dud_complete_parse() {
 
     if [ -z "$_dud_complete_command" ]; then
       case "$1" in
-        --version|version|init|doctor|capabilities|config|migrate|erase|peer|sync|test|upload|download|send|receive|git|flush|keygen|install|shell-init|help|-h|--help)
+        --tui|--version|version|init|doctor|capabilities|config|migrate|erase|peer|sync|test|upload|download|send|receive|git|flush|keygen|install|shell-init|help|-h|--help)
           _dud_complete_command="$1"
           shift
           continue

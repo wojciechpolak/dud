@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -247,7 +246,11 @@ func (a *app) cmdPeerAccept(args []string) error {
 		}
 		_ = removeV2PendingPairing(paths, alias)
 	}
-	code, err := readV2TTYLine("Pairing code: ", false)
+	readCode := a.readPairingCode
+	if readCode == nil {
+		readCode = func() (string, error) { return readV2TTYLine("Pairing code: ", false) }
+	}
+	code, err := readCode()
 	if err != nil {
 		return err
 	}
@@ -470,7 +473,7 @@ func (a *app) cmdPeerRemove(args []string) error {
 				return err
 			}
 			path := "/v2/pairing/rendezvous/" + pending.RendezvousLocator
-			if _, err := doV2CBORRequest(context.Background(), transport, "DELETE", pending.CanonicalOrigin, path, bearer, nil, v2MaxDescriptorBytes); err != nil {
+			if _, err := doV2CBORRequest(a.commandContext(), transport, "DELETE", pending.CanonicalOrigin, path, bearer, nil, v2MaxDescriptorBytes); err != nil {
 				return fmt.Errorf("cancel pending pairing: %w", err)
 			}
 		}
@@ -557,7 +560,7 @@ func (a *app) cmdDoctor(args []string) error {
 			Delivery: delivery,
 		})
 	}
-	ctx := context.Background()
+	ctx := a.commandContext()
 	results := make([]map[string]any, 0, len(targets))
 	allOK := true
 	for _, target := range targets {

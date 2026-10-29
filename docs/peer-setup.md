@@ -181,7 +181,9 @@ dud peer accept desktop
 Pairing code: 4664-43e6-72d9-edf8-8e80-2a2f-2652-b33b
 ```
 
-The prompt is visible and reads only from `/dev/tty`. A scanner or human may
+The CLI prompt is visible and reads only from `/dev/tty`. In `dud --tui`, use
+**peers → accept invitation** to enter the code in a visible field. The code is
+passed directly to the same acceptance flow in memory. A scanner or human may
 enter the grouped form or the identical 32 lowercase hexadecimal characters
 without dashes. Uppercase, whitespace, missing or extra characters, and other
 characters are rejected. It never accepts the code through arguments,

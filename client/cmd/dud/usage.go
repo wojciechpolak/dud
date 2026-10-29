@@ -12,6 +12,7 @@ const usageText = `Usage:
   dud help [COMMAND [SUBCOMMAND]]
   dud COMMAND --help
   dud --version
+  dud --tui          Open the full-screen transfer interface
   dud install        Print a host wrapper script to stdout
   dud shell-init     Print a shell function definition to stdout
 

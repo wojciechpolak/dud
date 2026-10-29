@@ -15,6 +15,8 @@ CADDY="$RUN_ID-caddy"
 DOH="$RUN_ID-doh"
 INVITER="$RUN_ID-inviter"
 CHUNK_SENDER="$RUN_ID-chunk-sender"
+TUI_DESKTOP="$RUN_ID-tui-desktop"
+TUI_LAPTOP="$RUN_ID-tui-laptop"
 TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/dud-v2-e2e.XXXXXX")
 # The client world directories are Docker volumes rather than host directories.
 # A peer Git repository lives inside one, and Git refuses to operate on a
@@ -45,7 +47,7 @@ e2e_section() {
 }
 
 cleanup() {
-  docker rm -f "$CHUNK_SENDER" "$INVITER" "$DOH" "$CADDY" "$SERVER" >/dev/null 2>&1 || true
+  docker rm -f "$TUI_DESKTOP" "$TUI_LAPTOP" "$CHUNK_SENDER" "$INVITER" "$DOH" "$CADDY" "$SERVER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
   docker volume rm "$DESKTOP_STATE" "$LAPTOP_STATE" >/dev/null 2>&1 || true
 
@@ -761,6 +763,12 @@ state_file_matches "$DROP_STATE" /state/received.bin '^drop-payload$' || {
 }
 
 run_drop flush >/dev/null
+
+e2e_section "Configure and pair through the TUI" \
+  "Initialize two device profiles, display and enter a pairing code, then send and receive without leaving the interface."
+
+export DESKTOP_STATE TUI_DESKTOP TUI_LAPTOP ORIGIN DOH_URL ENROLLMENT_SECRET
+expect "$REPO_ROOT/tests/tui-setup.e2e.exp"
 
 e2e_section "Inspect the client image" \
   "Confirm the runtime image does not include an extra HTTP client."

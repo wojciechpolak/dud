@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -39,7 +38,7 @@ func (a *app) cmdTest(args []string) error {
 		}
 	}
 
-	response, err := a.dropRequest(context.Background(), targetURL, v2Request{
+	response, err := a.dropRequest(a.commandContext(), targetURL, v2Request{
 		Method:           http.MethodGet,
 		MaxResponseBytes: dropTestResponseLimit,
 	})

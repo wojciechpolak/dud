@@ -163,7 +163,7 @@ func (a *app) gitSetupFlags() []string {
 // flags reach each one. It performs no network request of its own; the peer and
 // drop transports carry every byte that leaves the host.
 func (a *app) gitCommand(args ...string) *exec.Cmd {
-	return exec.Command(a.cfg.GitBin, append(a.gitSetupFlags(), args...)...)
+	return exec.CommandContext(a.commandContext(), a.cfg.GitBin, append(a.gitSetupFlags(), args...)...)
 }
 
 func (writer *v2GitLimitedBuffer) Write(value []byte) (int, error) {
@@ -870,7 +870,7 @@ func v2GitExitCode(err error) (int, bool) {
 }
 
 func (a *app) validateV2GitRef(repository *v2GitRepository, ref string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(a.commandContext(), 10*time.Second)
 	defer cancel()
 	if _, err := a.runV2Git(ctx, repository, nil, "check-ref-format", ref); err != nil {
 		return fmt.Errorf("invalid advertised Git ref %q: %w", ref, err)
@@ -1034,7 +1034,7 @@ func (a *app) resolveV2GitSnapshot(repository *v2GitRepository, opts v2GitPushOp
 	for _, branch := range branches {
 		selected["refs/heads/"+branch] = true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	ctx, cancel := context.WithTimeout(a.commandContext(), repository.Limits.WallTime)
 	defer cancel()
 	output, err := a.runV2Git(ctx, repository, nil,
 		"for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags")
@@ -1108,7 +1108,7 @@ func (a *app) createCompleteV2GitBundle(repository *v2GitRepository, repositoryI
 	}
 	args := []string{"bundle", "create", "--version=" + strconv.FormatUint(version, 10), bundlePath}
 	args = append(args, sortedV2GitRefNames(refs)...)
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	ctx, cancel := context.WithTimeout(a.commandContext(), repository.Limits.WallTime)
 	defer cancel()
 	if _, err := a.runV2Git(ctx, repository, nil, args...); err != nil {
 		_ = os.Remove(bundlePath)
@@ -1190,7 +1190,7 @@ func (a *app) v2GitBatchObjectTypes(repository *v2GitRepository, objectIDs []str
 		input.WriteString(objectID)
 		input.WriteByte('\n')
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	ctx, cancel := context.WithTimeout(a.commandContext(), repository.Limits.WallTime)
 	defer cancel()
 	output, err := a.runV2Git(ctx, repository, []byte(input.String()), "cat-file", "--batch-check=%(objectname) %(objecttype)")
 	if err != nil {
@@ -1298,7 +1298,7 @@ func (a *app) createIncrementalV2GitBundle(repository *v2GitRepository, reposito
 	// by the bundle-byte limit that also bounds a complete checkpoint, rather
 	// than by the smaller buffer that bounds collected command output.
 	pack := &v2GitPackWriter{file: bundle, limit: repository.Limits.BundleBytes - uint64(header.Len())}
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	ctx, cancel := context.WithTimeout(a.commandContext(), repository.Limits.WallTime)
 	defer cancel()
 	packErr := a.runV2GitToWriter(ctx, repository, nil, revisions.Bytes(), pack,
 		"pack-objects", "--stdout", "--revs", "--no-thin", "--no-reuse-delta")
@@ -1494,7 +1494,7 @@ func (a *app) cmdV2GitPush(args []string) error {
 			return err
 		}
 		defer unlock()
-		ctx := context.Background()
+		ctx := a.commandContext()
 		_ = runtime.boundedControlDrain(ctx)
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
@@ -1939,7 +1939,7 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 	if filepath.Dir(scratch) != filepath.Join(repository.DUDDir, "quarantine") {
 		return "", errors.New("invalid Git quarantine path")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	ctx, cancel := context.WithTimeout(a.commandContext(), repository.Limits.WallTime)
 	defer cancel()
 	if err := a.initV2GitQuarantine(ctx, repository, scratch, metadata); err != nil {
 		return "", err
@@ -1972,7 +1972,7 @@ func (a *app) verifyV2GitQuarantine(repository *v2GitRepository, bundlePath, dig
 }
 
 func (a *app) v2GitRefOID(repository *v2GitRepository, ref string) (string, bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(a.commandContext(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(
 		ctx,
@@ -2001,7 +2001,7 @@ func (a *app) v2GitRefOID(repository *v2GitRepository, ref string) (string, bool
 }
 
 func (a *app) v2GitIsAncestor(repository *v2GitRepository, oldOID, newOID, scratch string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	ctx, cancel := context.WithTimeout(a.commandContext(), repository.Limits.WallTime)
 	defer cancel()
 	_, err := a.runV2GitWithEnv(
 		ctx,
@@ -2217,7 +2217,7 @@ func (a *app) promoteV2GitQuarantine(repository *v2GitRepository, state *v2GitPe
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(scratch) }()
-	ctx, cancel := context.WithTimeout(context.Background(), repository.Limits.WallTime)
+	ctx, cancel := context.WithTimeout(a.commandContext(), repository.Limits.WallTime)
 	defer cancel()
 	names := make([]string, 0, len(metadata.Refs))
 	for name := range metadata.Refs {
@@ -3021,7 +3021,7 @@ func (a *app) cmdV2GitFetch(args []string) error {
 			return err
 		}
 		defer unlock()
-		ctx := context.Background()
+		ctx := a.commandContext()
 		_ = runtime.boundedControlDrain(ctx)
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
@@ -3105,7 +3105,7 @@ func (a *app) v2GitStatusForPeer(repository *v2GitRepository, repositoryID []byt
 			return err
 		}
 		defer unlock()
-		_ = runtime.boundedControlDrain(context.Background())
+		_ = runtime.boundedControlDrain(a.commandContext())
 		state, err := repository.loadPeerState(repositoryID, runtime.peer.PeerPseudonymousID)
 		if err != nil {
 			return err
