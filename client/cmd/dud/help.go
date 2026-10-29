@@ -91,6 +91,7 @@ const peerReceiveHelpOptions = "-o --wait --max --on-conflict --no-extract --col
 const transferModeHelp = "A positional peer alias selects a peer transfer. A leading flag selects a dead drop. Paired peers reject --url, --doh-url and --ech-mode."
 
 var commandHelpTopics = map[string]helpTopic{
+	"--tui":               {"Open the full-screen transfer interface.", "", "", "dud --tui", "Requires terminal stdin and stdout. The main menu follows send, receive, git, peers, status, setup and tools. Setup initializes a device; peers creates and accepts invitations. Send, receive and Git choose a peer or dead drop. Tab moves between fields; Ctrl+S runs an operation; Esc goes back or stops waiting. Age passphrase prompts use the terminal while the interface is suspended."},
 	"version":             {"Print the DUD version.", "", "", "dud --version", ""},
 	"help":                {"Show general or command-specific help.", "", "COMMAND and SUBCOMMAND select the help topic.", "dud help git push", "Use --help or -h on any command. Groups also accept help before a subcommand."},
 	"install":             {"Print a Docker host wrapper script to stdout.", "", "", "dud install > dud-wrapper.sh", ""},
@@ -245,7 +246,7 @@ func (a *app) commandHelp(args []string) (bool, error) {
 func helpUsage(path string) []string {
 	paths := []string{path}
 	switch path {
-	case "install", "shell-init":
+	case "install", "shell-init", "--tui":
 		return []string{"dud " + path}
 	case "version":
 		return []string{"dud --version", "dud version"}

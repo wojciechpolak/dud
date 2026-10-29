@@ -488,6 +488,12 @@ second deployment, need `DUD_PROFILE`. See
 Running `dud` with no command in a terminal opens an interactive menu that
 covers both modes.
 
+Run `dud --tui` for a full-screen interface with the same main menu as the
+interactive CLI. Initialize a device, pair peers, transfer messages and files
+through peers or dead drops, and work with Git checkpoints and tools. The
+[terminal interface guide](docs/client.md#full-screen-terminal-interface)
+describes navigation and cancellation.
+
 ### Resumable peer files
 
 `dud send PEER --file PATH` automatically splits a regular file larger than 16

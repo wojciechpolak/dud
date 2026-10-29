@@ -218,7 +218,7 @@ func deriveV2PeerRuntimeIdentity(seed, relationshipID []byte, peer v2PeerProfile
 // the server's own maximum TTL whatever the stored expiry says, and one close
 // enough to expiry to lapse mid-operation is reissued now rather than partway
 // through a transfer.
-func (runtime *v2PeerRuntime) prepareV2DeliveryCapabilities() error {
+func (runtime *v2PeerRuntime) prepareV2DeliveryCapabilities(ctx context.Context) error {
 	if err := runtime.requirePeerFeatures(); err != nil {
 		return err
 	}
@@ -232,7 +232,7 @@ func (runtime *v2PeerRuntime) prepareV2DeliveryCapabilities() error {
 		}
 	}
 	if state.CapabilitiesExpireAt <= uint64(time.Now().Add(24*time.Hour).Unix()) {
-		if err := runtime.reissueCapabilities(context.Background()); err != nil {
+		if err := runtime.reissueCapabilities(ctx); err != nil {
 			return fmt.Errorf("recover expiring peer capabilities: %w", err)
 		}
 	}
@@ -304,7 +304,7 @@ func (a *app) withV2PeerMode(alias string, timeout time.Duration, allowHalted, p
 		transport:      transport,
 	}
 	if prepareDelivery {
-		if err := runtime.prepareV2DeliveryCapabilities(); err != nil {
+		if err := runtime.prepareV2DeliveryCapabilities(a.commandContext()); err != nil {
 			return err
 		}
 	}
@@ -1738,7 +1738,10 @@ func (a *app) cmdPeerSend(args []string) error {
 				runtime.progress.Complete()
 			}
 		}()
-		ctx := context.Background()
+		ctx := a.commandContext()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
@@ -1773,6 +1776,9 @@ func (a *app) cmdPeerSend(args []string) error {
 		}()
 		prepared, err := runtime.prepareV2PeerSend(opts, payload, payloadCiphertext, chunkSpool, chunkSize)
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := runtime.enqueueV2PeerSend(prepared, payload, payloadCiphertext, chunkSpool, chunkSize); err != nil {
@@ -1963,6 +1969,9 @@ func parseV2PeerReceiveOptions(args []string) (v2PeerReceiveOptions, error) {
 }
 
 func (a *app) confirmV2CollectionExtraction(entries []v2CollectionEntry) bool {
+	if a.confirmCollection != nil {
+		return a.confirmCollection(entries)
+	}
 	fmt.Fprintln(a.out, "Verified collection contents:")
 	for _, entry := range entries {
 		if entry.dir {
@@ -1994,7 +2003,7 @@ func (a *app) cmdPeerReceive(args []string) error {
 				runtime.progress.Complete()
 			}
 		}()
-		ctx := context.Background()
+		ctx := a.commandContext()
 		if runtime.state.Halted {
 			return fmt.Errorf("peer relationship is halted: %s", runtime.state.HaltReason)
 		}
@@ -3616,14 +3625,14 @@ func (a *app) cmdSync(args []string) error {
 			if opts.refreshCapabilities {
 				// A forced refresh replaces expiry-based preparation, so even an
 				// expiring grant rotates only once before delivery requests begin.
-				if err := runtime.reissueCapabilities(context.Background()); err != nil {
+				if err := runtime.reissueCapabilities(a.commandContext()); err != nil {
 					return fmt.Errorf("refresh peer capabilities: %w", err)
 				}
 			}
-			drainErr := runtime.boundedControlDrain(context.Background())
-			completionErr := runtime.flushPendingCompletions(context.Background())
-			deliveryErr := runtime.flushPendingDeliveries(context.Background())
-			controlErr := runtime.flushPendingControlPublications(context.Background())
+			drainErr := runtime.boundedControlDrain(a.commandContext())
+			completionErr := runtime.flushPendingCompletions(a.commandContext())
+			deliveryErr := runtime.flushPendingDeliveries(a.commandContext())
+			controlErr := runtime.flushPendingControlPublications(a.commandContext())
 			if drainErr != nil {
 				result["drain_error"] = drainErr.Error()
 			}

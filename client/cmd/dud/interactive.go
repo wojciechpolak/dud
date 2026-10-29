@@ -58,13 +58,9 @@ func (a *app) interactiveMenu() error {
 // which is how going back and declined confirmations return to the menu.
 func (a *app) interactiveCommand(r *bufio.Reader) ([]string, error) {
 	fmt.Fprint(a.out, "\ndud — Discreet Upload/Download\n\n")
-	fmt.Fprintln(a.out, "  1) send")
-	fmt.Fprintln(a.out, "  2) receive")
-	fmt.Fprintln(a.out, "  3) git")
-	fmt.Fprintln(a.out, "  4) peers")
-	fmt.Fprintln(a.out, "  5) status")
-	fmt.Fprintln(a.out, "  6) setup")
-	fmt.Fprintln(a.out, "  7) tools")
+	for index, verb := range interactiveRootVerbs {
+		fmt.Fprintf(a.out, "  %d) %s\n", index+1, verb)
+	}
 	fmt.Fprintln(a.out, "  q) quit")
 	fmt.Fprint(a.out, "\nChoice: ")
 	choice, ok := readLineOK(r)

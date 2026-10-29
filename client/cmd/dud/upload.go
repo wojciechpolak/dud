@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,6 +176,9 @@ func (a *app) printUploadResponse(response uploadResponse, receiveCommand string
 }
 
 func (a *app) printUploadQR(id string) error {
+	if a.showQRCode != nil {
+		return a.showQRCode(id)
+	}
 	fmt.Fprintln(a.out)
 	fmt.Fprintln(a.out, "QR Code:")
 	return a.runCommand(a.cfg.QREncodeBin, []string{"-t", "ansiutf8", id}, nil, a.out, a.errOut)
@@ -223,7 +225,7 @@ func (a *app) createBundleArchive(archivePath string, sources []string) error {
 		args = append(args, "-C", filepath.Dir(source), archiveName)
 	}
 
-	cmd := exec.Command("tar", args...)
+	cmd := exec.CommandContext(a.commandContext(), "tar", args...)
 	cmd.Stdout = a.out
 	cmd.Stderr = a.errOut
 	return cmd.Run()
@@ -356,6 +358,7 @@ func (a *app) cmdUpload(args []string, receivePrefix string) error {
 	if err != nil {
 		return err
 	}
+	a.transferObserver("encryption")
 	if err := a.encryptUploadPlaintext(plainFile, encryptedFile, opts); err != nil {
 		return err
 	}
@@ -395,12 +398,13 @@ func (a *app) postUpload(encryptedFile string, opts uploadOptions) ([]byte, erro
 	headers.Set("x-dud-delete-after-read", deleteAfterRead)
 	headers.Set("x-dud-secret-token", a.cfg.SecretToken)
 
-	response, err := a.dropRequest(context.Background(), opts.baseURL+"/v1/files", v2Request{
+	response, err := a.dropRequest(a.commandContext(), opts.baseURL+"/v1/files", v2Request{
 		Method:           http.MethodPost,
 		Headers:          headers,
 		BodyStream:       file,
 		ContentLength:    info.Size(),
 		MaxResponseBytes: dropUploadResponseLimit,
+		ObserveUpload:    a.transferObserver("upload"),
 	})
 	if err != nil {
 		return nil, err

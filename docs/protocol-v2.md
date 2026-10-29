@@ -267,11 +267,13 @@ partial pairing are hard failures and `MUST` be displayed as such.
 
 ### 5.3 Invitation Input Channels
 
-The code is accepted only by `dud peer accept NAME` from its visible
-controlling- TTY prompt. It is never accepted from arguments, environment
-variables, files, or standard input. A mode-`0600` pending-state file may retain
-it solely to resume the same interrupted command and alias; it is deleted after
-activation, cancellation, or expiry.
+The code is accepted only through a visible interactive input: the controlling
+TTY prompt of `dud peer accept NAME`, or the accept-invitation field in
+`dud --tui`. Both inputs invoke the same acceptance and transcript validation.
+It is never accepted from arguments, environment variables, files, or standard
+input. A mode-`0600` pending-state file may retain it solely to resume the same
+interrupted command and alias; it is deleted after activation, cancellation, or
+expiry.
 
 ## 6. Pairing
 

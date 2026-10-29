@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -50,7 +49,7 @@ func (a *app) cmdFlush(args []string) error {
 	}
 	headers := http.Header{}
 	headers.Set("x-dud-secret-token", a.cfg.SecretToken)
-	response, err := a.dropRequest(context.Background(), baseURL+"/v1/admin/flush", v2Request{
+	response, err := a.dropRequest(a.commandContext(), baseURL+"/v1/admin/flush", v2Request{
 		Method:           http.MethodPost,
 		Headers:          headers,
 		MaxResponseBytes: dropFlushResponseLimit,

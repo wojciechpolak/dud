@@ -479,6 +479,88 @@ out of the top-level verb, or end of input leaves it successfully, and a command
 that fails ends the session with that command's exit status. If stdin is not a
 TTY, it prints usage information and exits instead.
 
+### Full-screen terminal interface
+
+`dud --tui` opens the full-screen interface. Both stdin and stdout must be
+terminals. `dud --tui --help` prints help without opening it. Running `dud`
+without arguments opens the interactive menu described above.
+
+The interface queries the terminal background to select light or dark accent and
+description colors. Ordinary text uses the terminal's foreground. If the
+terminal does not answer the background query, all text uses that foreground.
+
+Dead drop uploads, dead drop Git pushes, and peer invitations display QR codes
+when `qrencode` is available. QR modules use the terminal's foreground and the
+quiet zone uses its background: light modules on a dark terminal, dark modules
+on a light terminal. This also applies when the terminal does not answer the
+background query. Press `v` to switch between a full QR view and the details.
+The interface displays a code only when the complete symbol and its quiet zone
+fit; otherwise it shows the required terminal size. The text ID or pairing code
+remains available in the details if the encoder is unavailable.
+
+The main menu follows the interactive menu: **send**, **receive**, **git**,
+**peers**, **status**, **setup**, and **tools**. Press 1–7 to open an entry, or
+select it with arrow keys and Enter. Send and receive choose a paired peer or
+**dead drop** before asking for payload and output options. The target list
+refreshes with `r` and when returning to that screen.
+
+To configure peer transfers entirely in the interface:
+
+1. On each device, open **setup → initialize device**. Enter its name, the same
+   peer server URL, the DoH resolver, and ECH mode. Initialization creates the
+   private identity locally and refuses to replace an existing device.
+2. On the inviter, open **peers → create invitation**, choose a local alias for
+   the other device, and submit. An enrollment secret may be entered in a masked
+   field; leaving it blank uses `DUD_PEER_SECRET`. The screen displays the
+   pairing code, QR code, server and expiry while it waits.
+3. On the other device, open **peers → accept invitation**, choose a local alias
+   for the inviter, and enter its pairing code. The code stays out of command
+   arguments and command output. Both devices verify and complete the same
+   pairing handshake as the CLI; the invitation cannot change the server.
+4. Both screens report success after activation. Returning from the result
+   refreshes the peer list. Interrupted pairing is available through **Resume
+   pairing** in a pending peer's detail, or by repeating invite/accept with the
+   same alias. A resumed acceptance needs no code re-entry.
+
+**git** offers push, fetch and status. Push and fetch choose a peer or a dead
+drop; status selects one or all active peers. Peer fetch requires explicit
+checkboxes to associate a repository or allow ref rewrites. **status** includes
+peer details, synchronization, inbox inspection, Git status, transport doctor
+and capabilities. **tools** includes a dead drop transport test, identity
+generation, recipient derivation and expired-file cleanup. Private identities
+require an output file. **setup** also exposes configuration inspection,
+validation, migration and local erasure; erasure defaults to a dry run and
+requires explicit confirmation to write changes.
+
+- Use arrow keys and Enter to choose targets and actions. Esc returns one
+  screen. Left arrow also goes back in menus and result screens. In text fields
+  it moves the cursor; in the file browser it opens the parent directory.
+- In a form, Tab and Shift+Tab move focus, Space toggles a checkbox, and Ctrl+S
+  runs the selected operation. A message supports multiple lines and pasting;
+  Enter adds a line. The focused action button also accepts Enter.
+- For files, type a path or use Ctrl+O to browse. Enter opens a directory or
+  selects a file; Space selects a directory or file. Ctrl+N adds the typed path
+  and clears the field for another; Ctrl+D removes the last added path. A path
+  left in the field is included when submitting.
+- Dead drop sends accept an age recipient. Leaving it blank selects passphrase
+  encryption. Dead drop receives accept an identity file or a passphrase. The
+  interface suspends while `age` owns the terminal for its prompts.
+- **Delete after read** is unchecked by default. Lifetime defaults match the
+  CLI: 24 hours for dead drops and 168 hours for peers.
+- Peer receive preserves the CLI's default conflict policy, `skip`, and asks
+  before extracting a verified collection. Scroll the preview and press `y` to
+  approve; `n` or Esc declines. The **Keep collections as tar archives** option
+  avoids extraction. A large preview marks omitted entries; receive the archive
+  without extraction to inspect its full listing.
+- During an operation, Esc requests cancellation and waits for command cleanup.
+  Ctrl+C requests cancellation and exits after cleanup. Cancellation does not
+  undo a committed delivery. Queued peer sends remain resumable with
+  `dud sync PEER`; interrupted receives follow the CLI's durable resume rules.
+- Results and errors remain on screen. Arrow keys scroll, Enter or Esc returns
+  to actions, and `q` exits. The screen retains the last 128 KiB of command
+  output; earlier output is marked as omitted. Terminal controls in output are
+  escaped. Resizing preserves the form and operation state.
+
 ## 8. Command help and transfer status
 
 `dud help` shows the complete CLI reference. Add a command or subcommand to

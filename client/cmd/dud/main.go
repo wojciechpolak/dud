@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -44,12 +45,19 @@ type config struct {
 }
 
 type app struct {
-	cfg            config
-	in             io.Reader
-	out            io.Writer
-	errOut         io.Writer
-	exe            string
-	newV2Transport func(v2TransportOptions) (v2Transport, error)
+	cfg               config
+	in                io.Reader
+	out               io.Writer
+	errOut            io.Writer
+	exe               string
+	newV2Transport    func(v2TransportOptions) (v2Transport, error)
+	commandCtx        context.Context
+	observeProgress   func(v2ProgressSnapshot)
+	confirmCollection func([]v2CollectionEntry) bool
+	terminalCommand   func(*exec.Cmd) error
+	readPairingCode   func() (string, error)
+	showPairingCode   func(v2PairingCodeDisplay) error
+	showQRCode        func(string) error
 }
 
 type fatalError string
@@ -58,7 +66,10 @@ func (e fatalError) Error() string { return string(e) }
 
 func main() {
 	setProcessPrivateFileMask()
-	cleanupTempFilesOnSignal()
+	// The TUI restores its terminal and waits for command cleanup on signals.
+	if len(os.Args) < 2 || os.Args[1] != "--tui" {
+		cleanupTempFilesOnSignal()
+	}
 	a := newApp(os.Stdin, os.Stdout, os.Stderr)
 	if code := a.main(os.Args[1:]); code != 0 {
 		os.Exit(code)
@@ -142,6 +153,8 @@ func (a *app) run(args []string) (resultErr error) {
 	rest := args[1:]
 
 	switch command {
+	case "--tui":
+		return a.cmdTUI(rest)
 	case "--version", "version":
 		fmt.Fprintln(a.out, envDefault("DUD_VERSION", version))
 	case "test":
