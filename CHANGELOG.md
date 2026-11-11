@@ -8,6 +8,8 @@ and this project follows
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-11
+
 ### Added
 
 - Add optical as a third transfer mode for messages, files, and collections,
