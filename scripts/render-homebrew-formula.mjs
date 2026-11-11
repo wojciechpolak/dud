@@ -49,14 +49,14 @@ const SHA256 = /^[a-f0-9]{64}$/;
  * `brew search` and `brew info` show this line and nothing else, and it is the
  * only chance to distinguish this formula from the unrelated one that holds the
  * name `dud` in Homebrew's own index. It expands the name to discreet upload /
- * download and names the two transfer modes, so the description identifies the
+ * download and names the three transfer modes, so the description identifies the
  * formula on its own.
  *
  * Homebrew requires a description that starts with a capital, is not the
  * formula name, carries no trailing full stop, and stays under 80 characters.
  */
 const DESCRIPTION =
-  'Discreet upload / download over dead drops and paired peers';
+  'Discreet upload / download over dead drops, peers and optical';
 
 /**
  * The tap formula is generated. Change it by cutting a release or editing this
@@ -147,8 +147,19 @@ class Dud < Formula
     end
   end
 
+  def caveats
+    <<~EOS
+      This formula installs the headless client. Optical transfer upload needs
+      --optical-renderer kitty for compatible pixel terminals, or
+      --optical-renderer terminal for ANSI block glyphs. For a window, install the verified desktop
+      package with its sibling dud-optical-window helper.
+      dud capabilities --local reports the installed capability set offline.
+    EOS
+  end
+
   test do
     assert_equal version.to_s, shell_output("#{bin}/dud --version").strip
+    assert_match '"variant": "headless"', shell_output("#{bin}/dud capabilities --local --json")
   end
 end
 `;

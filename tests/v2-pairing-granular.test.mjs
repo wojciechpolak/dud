@@ -7,9 +7,9 @@ import test from 'node:test';
 import {
   createV2CapabilityRecord,
   deriveV2DailyCapabilityLookupId,
-} from '../dist/src/v2-auth.js';
-import { MemoryV2Repository } from '../dist/src/v2-memory-repository.js';
-import { registerActivationCapabilities } from '../dist/src/v2-pairing.js';
+} from '../dist/server/src/v2-auth.js';
+import { MemoryV2Repository } from '../dist/server/src/v2-memory-repository.js';
+import { registerActivationCapabilities } from '../dist/server/src/v2-pairing.js';
 
 test('pairing activation registers daily granular capability lookups', async () => {
   const deploymentKey = new Uint8Array(32).fill(1);

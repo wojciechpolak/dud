@@ -13,11 +13,11 @@ import {
   redactAccessPath,
   runNodeV2Maintenance,
   startNodeServer,
-} from '../dist/src/node-server.js';
+} from '../dist/server/src/node-server.js';
 import {
   MAINTENANCE_MAX_BATCHES,
   runV2MaintenancePass,
-} from '../dist/src/v2-maintenance.js';
+} from '../dist/server/src/v2-maintenance.js';
 
 test('v2 access paths redact complete delivery identifiers', () => {
   assert.equal(

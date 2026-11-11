@@ -4,7 +4,7 @@
 //
 // Documentation gate. Verifies that the documents a release is required to ship
 // exist, that every relative link between Markdown files resolves, and that the
-// V2 transport terminology stays consistent.
+// transfer-mode and ECH terminology stays consistent.
 //
 // Reads files only; no network.
 
@@ -19,6 +19,13 @@ const REQUIRED = [
   'LICENSE',
   'docs/README.md',
   'docs/protocol-v2.md',
+  'docs/optical.md',
+  'docs/optical-distribution.md',
+  'docs/optical-dependencies.md',
+  'docs/optical-verification.md',
+  'server/optical-receiver/README.md',
+  'client/optical-sender/README.md',
+  'docs/protocol-optical.md',
   'docs/threat-model-v2.md',
   'docs/peer-setup.md',
   'docs/dead-drops-v1.md',
@@ -45,16 +52,15 @@ const FORBIDDEN_TRANSPORT_WORDS = [
 ];
 
 /**
- * The two transfer modes are named, not numbered: a **dead drop** is addressed
- * by an opaque ID shared out of band, and a **peer** transfer is addressed by
- * the local alias of a paired device. Both ship permanently, so naming either
- * one "legacy" tells the reader to migrate off a feature that is not going
- * anywhere. "one-shot" is worse than vague, it is false: `--delete-after-read`
- * is opt-in, so a drop stays fetchable until its TTL expires. Those words
- * belong to that flag alone. As above, the patterns name the wrong words
- * explicitly instead of guessing, so ordinary prose keeps reading naturally.
+ * Dead drops use opaque IDs, peers use paired aliases, and optical transfers
+ * use a local screen-to-camera carrier. Names describe these modes independently
+ * of API and byte-format versions. Single-use wording belongs only to the
+ * opt-in --delete-after-read flag on network transfers.
  */
 const FORBIDDEN_MODE_WORDS = [
+  /\boptical[\s-]+dead[\s-]+drops?\b/i,
+  /\b(?:two|both)\s+(?:permanent\s+)?transfer\s+modes\b/i,
+  /\btwo\s+ways\s+to\s+transfer\b/i,
   /\bone-shot\s+link\b/i,
   /\bone-(?:shot|time)\s+(?:drop|transfer|sharing|upload|download)\b/i,
   /\blegacy\s+(?:commands?|modes?|paths?|upload|download|one-shot|drops?|v1)\b/i,
@@ -79,7 +85,13 @@ function fail(message) {
 }
 
 function markdownFiles() {
-  const files = ['README.md', 'SECURITY.md', 'CHANGELOG.md'];
+  const files = [
+    'README.md',
+    'SECURITY.md',
+    'CHANGELOG.md',
+    'server/optical-receiver/README.md',
+    'client/optical-sender/README.md',
+  ];
   for (const entry of fs.readdirSync('docs')) {
     if (entry.endsWith('.md')) {
       files.push(path.join('docs', entry));
@@ -135,7 +147,7 @@ for (const file of markdownFiles()) {
     const found = pattern.exec(text);
     if (found) {
       fail(
-        `${file}: uses "${found[0].trim()}" for a transfer mode; the modes are dead drops and peers`,
+        `${file}: uses "${found[0].trim()}" for a transfer mode; the modes are dead drop, peer and optical`,
       );
     }
   }

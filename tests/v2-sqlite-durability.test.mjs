@@ -8,8 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
-import { V2_SQLITE_MIGRATIONS } from '../dist/src/v2-sqlite-schema.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
+import { V2_SQLITE_MIGRATIONS } from '../dist/server/src/v2-sqlite-schema.js';
 
 const RELATIONSHIP = 'cc'.repeat(16);
 const bytes = (length, seed) =>

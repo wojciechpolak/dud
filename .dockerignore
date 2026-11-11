@@ -2,5 +2,11 @@
 !package.json
 !package-lock.json
 !tsconfig.json
-!src/
-!src/**
+!server/
+!server/src/
+!server/src/**
+!server/optical-receiver/
+!server/optical-receiver/**
+server/optical-receiver/.work/
+server/optical-receiver/test/
+server/optical-receiver/testdata/

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { SQLiteV2Database } from '../dist/src/v2-sqlite.js';
+import { SQLiteV2Database } from '../dist/server/src/v2-sqlite.js';
 
 test('SQLite V2 bootstrap creates an isolated database without reading legacy state', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dud-v2-sqlite-'));

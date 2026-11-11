@@ -13,14 +13,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wojciechpolak/dud/client/drop"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
 const (
-	v2MaximumCollectionEntries = 100_000
-	v2MaximumCollectionDepth   = 64
-	v2MaximumExtractedBytes    = int64(1 << 30)
+	v2MaximumCollectionEntries = drop.MaximumCollectionEntries
+	v2MaximumCollectionDepth   = drop.MaximumCollectionDepth
+	v2MaximumExtractedBytes    = drop.MaximumExtractedBytes
 )
 
 type v2CollectionEntry struct {
@@ -151,118 +152,27 @@ func isASCIIV2ArchiveName(name string) bool {
 }
 
 func validateV2ArchivePath(name string) error {
-	if name == "" || strings.ContainsRune(name, 0) || strings.HasPrefix(name, "/") || strings.Contains(name, `\`) {
-		return errors.New("collection contains an unsafe path")
-	}
-	for _, component := range strings.Split(name, "/") {
-		if !validPortableV2ArchiveComponent(component) {
-			return fmt.Errorf("collection path %q is not portable to Windows", name)
-		}
-	}
-	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
-	if cleaned != name || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return fmt.Errorf("collection path %q is not canonical and relative", name)
-	}
-	if len(strings.Split(name, "/")) > v2MaximumCollectionDepth {
-		return fmt.Errorf("collection path %q exceeds depth %d", name, v2MaximumCollectionDepth)
-	}
-	return nil
+	return drop.ValidateArchivePath(name)
 }
 
 func validPortableV2ArchiveComponent(component string) bool {
-	if component == "" || strings.TrimRight(component, " .") != component ||
-		strings.ContainsAny(component, `<>:"|?*`) {
-		return false
-	}
-	for _, character := range component {
-		if character < 32 {
-			return false
-		}
-	}
-	base, _, _ := strings.Cut(component, ".")
-	switch strings.ToUpper(base) {
-	case "CON", "PRN", "AUX", "NUL",
-		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-		"COM¹", "COM²", "COM³",
-		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-		"LPT¹", "LPT²", "LPT³":
-		return false
-	default:
-		return true
-	}
+	return drop.ValidPortableArchiveComponent(component)
 }
 
 func inspectV2CollectionArchive(body []byte, signedPlaintextSize uint64) ([]v2CollectionEntry, error) {
-	if uint64(len(body)) != signedPlaintextSize || int64(len(body)) > v2MaximumExtractedBytes {
-		return nil, errors.New("collection archive violates its signed size bound")
+	validated, err := drop.InspectCollectionArchive(body, signedPlaintextSize, drop.CollectionArchivePolicy{})
+	if err != nil {
+		return nil, err
 	}
-	reader := tar.NewReader(bytes.NewReader(body))
-	entries := []v2CollectionEntry{}
-	collisions := map[string]string{}
-	var extracted int64
-	for {
-		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			break
+	entries := make([]v2CollectionEntry, len(validated))
+	for index, entry := range validated {
+		entries[index] = v2CollectionEntry{
+			name:  entry.Name,
+			mode:  entry.Mode,
+			size:  entry.Size,
+			mtime: entry.ModTime,
+			dir:   entry.Directory,
 		}
-		if err != nil {
-			return nil, fmt.Errorf("inspect collection: %w", err)
-		}
-		if len(entries) >= v2MaximumCollectionEntries {
-			return nil, errors.New("collection exceeds 100000 entries")
-		}
-		if err := validateV2ArchivePath(header.Name); err != nil {
-			return nil, err
-		}
-		// GNU adds sparse maps and long-name members whose bodies do not match
-		// their declared size. This accepts PAX only for the one record a
-		// non-ASCII name needs. Ownership, sparse maps, and extended attributes
-		// are extensions this format does not support. An extended attribute
-		// reaches the reader as a SCHILY.xattr.* record, so the loop below
-		// rejects it along with every other record but "path".
-		if header.Format == tar.FormatGNU {
-			return nil, fmt.Errorf("collection entry %q uses unsupported extensions", header.Name)
-		}
-		for key := range header.PAXRecords {
-			if key != "path" {
-				return nil, fmt.Errorf(
-					"collection entry %q uses unsupported extension record %q", header.Name, key)
-			}
-		}
-		if header.Uid != 0 || header.Gid != 0 || header.Uname != "" || header.Gname != "" {
-			return nil, fmt.Errorf("collection entry %q requests ownership metadata", header.Name)
-		}
-		entry := v2CollectionEntry{name: header.Name, mtime: header.ModTime}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			entry.dir = true
-			entry.mode = 0o755
-			if header.Size != 0 {
-				return nil, fmt.Errorf("collection directory %q has a body", header.Name)
-			}
-		case tar.TypeReg:
-			if header.Size < 0 || header.Size > v2MaximumObjectBytes {
-				return nil, fmt.Errorf("collection file %q exceeds the single-file limit", header.Name)
-			}
-			entry.size = header.Size
-			if header.Mode&0o100 != 0 {
-				entry.mode = 0o755
-			} else {
-				entry.mode = 0o644
-			}
-			extracted += header.Size
-			if extracted > int64(signedPlaintextSize) || extracted > v2MaximumExtractedBytes {
-				return nil, errors.New("collection exceeds the signed extraction budget")
-			}
-		default:
-			return nil, fmt.Errorf("collection entry %q is a link or special file", header.Name)
-		}
-		collision := cases.Fold().String(norm.NFC.String(header.Name))
-		if prior, exists := collisions[collision]; exists {
-			return nil, fmt.Errorf("collection paths %q and %q collide after normalization", prior, header.Name)
-		}
-		collisions[collision] = header.Name
-		entries = append(entries, entry)
 	}
 	return entries, nil
 }

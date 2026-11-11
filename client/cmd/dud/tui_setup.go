@@ -85,6 +85,8 @@ func (form *tuiForm) clearSetupSecrets() {
 
 func (form *tuiForm) submitLabel() string {
 	switch form.action {
+	case "optical-recover":
+		return "Decrypt capsule"
 	case "initialize":
 		return "Initialize device"
 	case "invite":

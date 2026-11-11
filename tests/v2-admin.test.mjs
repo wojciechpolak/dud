@@ -14,8 +14,8 @@ import {
   decryptV2TokenSecret,
   encodeBase64Url,
   hexToBytes,
-} from '../dist/src/v2-auth.js';
-import { FilesystemV2Store } from '../dist/src/v2-filesystem.js';
+} from '../dist/server/src/v2-auth.js';
+import { FilesystemV2Store } from '../dist/server/src/v2-filesystem.js';
 
 const execute = promisify(execFile);
 
@@ -58,7 +58,7 @@ test('offline admin rewraps and revokes without exposing secrets', async (t) => 
 
   await execute(
     process.execPath,
-    ['dist/src/v2-admin.js', 'rewrap-key', '--data-dir', directory],
+    ['dist/server/src/v2-admin.js', 'rewrap-key', '--data-dir', directory],
     {
       env: {
         ...process.env,
@@ -75,7 +75,7 @@ test('offline admin rewraps and revokes without exposing secrets', async (t) => 
   assert.deepEqual(await decryptV2TokenSecret(newKey, rewrapped), tokenSecret);
 
   await execute(process.execPath, [
-    'dist/src/v2-admin.js',
+    'dist/server/src/v2-admin.js',
     'revoke',
     '--data-dir',
     directory,
@@ -93,11 +93,11 @@ test('offline derivation prints an enrollment key a deployment can hold', async 
   // DUD_PEER_SECRET and derive the same key as the passphrase. Otherwise, a
   // deployment configured from it would refuse its own clients.
   const { deriveV2EnrollmentKey, formatV2EnrollmentKey } =
-    await import('../dist/src/v2-auth.js');
+    await import('../dist/server/src/v2-auth.js');
   const secret = 'squid-lantern-rotate-9-mango';
   const { stdout } = await execute(
     process.execPath,
-    ['dist/src/v2-admin.js', 'enrollment-key'],
+    ['dist/server/src/v2-admin.js', 'enrollment-key'],
     { env: { ...process.env, DUD_PEER_SECRET: secret } },
   );
   const printed = stdout.trim();
@@ -114,14 +114,18 @@ test('offline derivation prints an enrollment key a deployment can hold', async 
   // The passphrase is never an argument, so it cannot reach a shell history or
   // the process table.
   await assert.rejects(
-    execute(process.execPath, ['dist/src/v2-admin.js', 'enrollment-key'], {
-      env: { ...process.env, DUD_PEER_SECRET: '' },
-    }),
+    execute(
+      process.execPath,
+      ['dist/server/src/v2-admin.js', 'enrollment-key'],
+      {
+        env: { ...process.env, DUD_PEER_SECRET: '' },
+      },
+    ),
     /DUD_PEER_SECRET/,
   );
   await assert.rejects(
     execute(process.execPath, [
-      'dist/src/v2-admin.js',
+      'dist/server/src/v2-admin.js',
       'enrollment-key',
       '--secret',
       secret,
@@ -137,7 +141,7 @@ test('the retired upload provisioning command is rejected', async (t) => {
   t.after(() => rm(directory, { recursive: true, force: true }));
   await assert.rejects(
     execute(process.execPath, [
-      'dist/src/v2-admin.js',
+      'dist/server/src/v2-admin.js',
       'provision-upload',
       '--data-dir',
       directory,
@@ -155,7 +159,7 @@ test('offline revocation rejects an unknown capability scope', async (t) => {
   t.after(() => rm(directory, { recursive: true, force: true }));
   await assert.rejects(
     execute(process.execPath, [
-      'dist/src/v2-admin.js',
+      'dist/server/src/v2-admin.js',
       'revoke',
       '--data-dir',
       directory,

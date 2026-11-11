@@ -12,14 +12,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { decodeCbor, encodeCbor, requireCborMap } from '../dist/src/cbor.js';
-import { bytesToHex, encodeBase64Url } from '../dist/src/v2-auth.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { MemoryV2Store } from '../dist/src/v2-memory.js';
-import { encryptV2RelationshipState } from '../dist/src/v2-relationship-state.js';
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
-import { WorkerV2Store } from '../dist/src/v2-worker-store.js';
+import {
+  decodeCbor,
+  encodeCbor,
+  requireCborMap,
+} from '../dist/server/src/cbor.js';
+import { bytesToHex, encodeBase64Url } from '../dist/server/src/v2-auth.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { MemoryV2Store } from '../dist/server/src/v2-memory.js';
+import { encryptV2RelationshipState } from '../dist/server/src/v2-relationship-state.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
+import { WorkerV2Store } from '../dist/server/src/v2-worker-store.js';
 import {
   V2_DEPLOYMENT_KEY,
   V2_NOW_MS,

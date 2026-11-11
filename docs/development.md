@@ -5,12 +5,15 @@ those see the [README](../README.md#quick-start).
 
 ## 1. Repository layout
 
-- `src/` — Worker code and Cloudflare adapters
-- `src/node-server.ts` — the self-hosted Node server adapter
-- `src/filesystem.ts` — the local-disk `BlobStore` implementation
-- `server/` — Docker packaging for the Node server image
+- `server/src/` — Worker code and Cloudflare adapters
+- `server/src/node-server.ts` — the self-hosted Node server adapter
+- `server/src/filesystem.ts` — the local-disk `BlobStore` implementation
+- `server/` — backend, optical receiver PWA and Docker packaging
 - `client/` — the Docker client image and the Go CLI under `client/cmd/dud/`
-- `tests/` — Node tests for the server; Go tests live beside the CLI sources
+- `client/optical-sender/` — optical codec, capsule, renderer and development
+  commands
+- `server/optical-receiver/` — camera PWA, workers, builds and tests
+- `tests/` — server and browser integration tests; Go tests live beside sources
 - `migrations/d1` — the single idempotent D1 schema file
 - `migrations/reset-d1.sql` — drops that schema so it can be applied again
 - `tools/` — the static analyzers, in a module of their own
@@ -18,25 +21,30 @@ those see the [README](../README.md#quick-start).
 
 ## 2. Commands
 
-| Command                      | What it does                                       |
-| ---------------------------- | -------------------------------------------------- |
-| `npm run build`              | TypeScript → `dist/`, Go client → `client/bin/dud` |
-| `npm run build:client`       | only the Go binary                                 |
-| `npm test`                   | build, then `node --test tests/*.test.mjs`         |
-| `npm run test:client`        | `go test ./...` for the CLI                        |
-| `npm run check`              | the full gate CI runs                              |
-| `npm run format`             | `oxfmt` plus `gofmt` and `goimports`               |
-| `npm run lint`               | `oxlint` plus `go vet`                             |
-| `npm run analyze:go`         | every Go static analyzer, without failing          |
-| `npm run analyze:go:pending` | the analyzers whose findings are open              |
-| `npm run tools:go`           | build the analyzers into `bin/`                    |
-| `npm run check:pins`         | offline supply-chain pin verification              |
-| `npm run check:tidy`         | every Go module is tidy                            |
-| `npm run check:docs`         | required documents, links, and terminology         |
-| `npm run check:vectors`      | protocol test vectors on both sides                |
-| `npm run test:e2e:v2`        | Dockerized end-to-end integration                  |
-| `npm version minor`          | prepare, commit, and tag the next minor release    |
-| `npx wrangler dev`           | run the Worker locally                             |
+| Command                          | What it does                                       |
+| -------------------------------- | -------------------------------------------------- |
+| `npm run build`                  | TypeScript → `dist/`, Go client → `client/bin/dud` |
+| `npm run build:optical:receiver` | build the static receiver and embedded assets      |
+| `npm run build:client:optical`   | build the native-host window CLI and helper        |
+| `npm run test:optical`           | corpus, client optical packages and receiver tests |
+| `npm run check:optical:vectors`  | regenerate Go/TypeScript optical vectors           |
+| `npm run build:client`           | only the Go binary                                 |
+| `npm test`                       | build, then `node --test tests/*.test.mjs`         |
+| `npm run test:client`            | `go test ./...` for the CLI                        |
+| `npm run check`                  | the full gate CI runs                              |
+| `npm run format`                 | `oxfmt` plus `gofmt` and `goimports`               |
+| `npm run lint`                   | `oxlint` plus `go vet`                             |
+| `npm run analyze:ts`             | server coverage, then Fallow analysis              |
+| `npm run analyze:go`             | every Go static analyzer, without failing          |
+| `npm run analyze:go:pending`     | the analyzers whose findings are open              |
+| `npm run tools:go`               | build the analyzers into `bin/`                    |
+| `npm run check:pins`             | offline supply-chain pin verification              |
+| `npm run check:tidy`             | every Go module is tidy                            |
+| `npm run check:docs`             | required documents, links, and terminology         |
+| `npm run check:vectors`          | protocol test vectors on both sides                |
+| `npm run test:e2e:v2`            | Dockerized end-to-end integration                  |
+| `npm version minor`              | prepare, commit, and tag the next minor release    |
+| `npx wrangler dev`               | run the Worker locally                             |
 
 Run a single test file:
 
@@ -44,10 +52,15 @@ Run a single test file:
 node --test tests/worker.test.mjs
 ```
 
-`npm run check` is `format:check`, `lint`, the four offline gates,
-`analyze:go:gate`, `test:client`, `test:client:race`, `test:tools`, and
-`npm test`. Run it before handing off a broad change; run `npm run test:e2e:v2`
-as well when deployment or end-to-end peer behavior changes.
+`npm run check` runs formatting, lint, pins, module tidiness, documentation,
+peer/optical vectors, Go analyzers, optical corpus and receiver tests, Go tests
+and race tests, tool tests and the server/browser integration suite. Run it
+before handing off a broad change; run `npm run test:e2e:v2` as well when
+deployment or end-to-end peer behavior changes.
+
+Run `npm run analyze:ts` separately for unused code, duplication and complexity
+analysis. It regenerates `coverage/fallow/coverage-final.json` before invoking
+Fallow, so source paths and function coverage match the checkout.
 
 Use `npm version major`, `npm version minor`, or `npm version patch` to cut a
 release commit and its `vMAJOR.MINOR.PATCH` tag. The command updates the package
@@ -59,12 +72,12 @@ stops before editing those files if any checked-in version has drifted from
 
 ## 3. Go static analysis
 
-The analyzers are declared in `tools/go.mod`, a module separate from the two
-that ship. Nothing they depend on can appear in the dependency graph of the
-client binary or of the protocol vector generator, and `tools/go.sum` fixes the
-exact version of each one. `npm run tools:go` compiles them into `bin/`, which
-is ignored by git; `npm run analyze:go` builds anything missing and then runs
-them.
+The analyzers are declared in `tools/go.mod`, separate from the client and peer
+vector generator modules. Nothing they depend on can appear in the dependency
+graph of the client binary or of the protocol vector generator, and
+`tools/go.sum` fixes the exact version of each one. `npm run tools:go` compiles
+them into `bin/`, which is ignored by git; `npm run analyze:go` builds anything
+missing and then runs them.
 
 | Analyzer      | What it reports                                             | Blocks |
 | ------------- | ----------------------------------------------------------- | ------ |
@@ -155,8 +168,8 @@ npm run test:e2e:v2
 This is the supported end-to-end path. It builds a private Docker network on a
 globally routable range, runs `dud-server` behind Caddy, serves DNS from a DoH
 server inside that network, and drives the real `dud-client` image through it.
-Both transfer modes use the same in-process transport there, with no host-side
-DNS or connection overrides.
+Dead drop and peer transfers use the same in-process transport there, with no
+host-side DNS or connection overrides.
 
 It rebuilds both images first, so a run cannot pass against source it never
 executed, the failure that looks like a pass. An unchanged working tree makes
@@ -207,14 +220,27 @@ records, and therefore a Caddy build with a DNS provider module.
 required document exists, that every relative link between Markdown files
 resolves, and that the naming stays consistent:
 
-- the two transfer modes are named, not numbered: a **dead drop** and a **peer**
-  transfer. Neither is "legacy", and a drop is not "one-shot": a drop stays
-  fetchable until its TTL expires unless `--delete-after-read` was set.
+- the three transfer modes are named, not numbered: **dead drop**, **peer** and
+  **optical**. Optical transfers use a local screen-to-camera carrier. A dead
+  drop is not "one-shot": a drop stays fetchable until its TTL expires unless
+  `--delete-after-read` was set.
 - a document may use the shorthand only after writing `dead drop` in full
 - the two ECH modes are `hard` and `off`; no other name for them is accepted
 - `v1` and `v2` stay where the number names something literal: routes, HKDF
   strings, on-disk names, deployment shapes, and file names
-- environment variables are named by mode: `DUD_DROP_*` and `DUD_PEER_*`
+- environment variables are named by mode: `DUD_DROP_*`, `DUD_PEER_*` and
+  `DUD_OPTICAL_*`
 
 Markdown is formatted by `oxfmt` at 80 columns with `proseWrap: always`, so run
 `npm run format` after editing prose.
+
+## Optical transfer development
+
+The [receiver source guide](../server/optical-receiver/README.md) and
+[client package guide](../client/optical-sender/README.md) describe maintained
+entry points. [Dependencies and notices](optical-dependencies.md) cover browser
+and native graphs; [distribution](optical-distribution.md) covers reproducible
+artifacts, installed capabilities and receiver hosting trust. The
+[verification procedure](optical-verification.md) separates automated byte and
+lifecycle checks from physical phone memory, camera goodput and terminal
+readability. Performance reports must name their source revision and method.

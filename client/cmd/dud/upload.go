@@ -4,15 +4,13 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/wojciechpolak/dud/client/drop"
 )
 
 type uploadResponse struct {
@@ -22,6 +20,12 @@ type uploadResponse struct {
 }
 
 type uploadOptions struct {
+	optical             bool
+	opticalProfile      string
+	opticalRenderer     string
+	opticalQuietZone    int
+	opticalScale        int
+	explicitFlags       map[string]bool
 	files               []string
 	message             string
 	ttl                 string
@@ -37,14 +41,44 @@ type uploadOptions struct {
 
 func parseUploadOptions(args []string, defaultBaseURL, defaultDOHURL string) (uploadOptions, error) {
 	opts := uploadOptions{
-		ttl:      "24h",
-		outputQR: true,
-		baseURL:  defaultBaseURL,
-		dohURL:   defaultDOHURL,
+		ttl:            "24h",
+		opticalProfile: "high-rate", opticalRenderer: "window", opticalQuietZone: 4, opticalScale: 2,
+		explicitFlags: make(map[string]bool),
+		outputQR:      true,
+		baseURL:       defaultBaseURL,
+		dohURL:        defaultDOHURL,
 	}
 
 	for len(args) > 0 {
+		opts.explicitFlags[args[0]] = true
 		switch args[0] {
+		case "--optical":
+			opts.optical = true
+			args = args[1:]
+		case "--optical-profile", "--optical-renderer":
+			if err := needValue(args, args[0]); err != nil {
+				return opts, err
+			}
+			if args[0] == "--optical-profile" {
+				opts.opticalProfile = args[1]
+			} else {
+				opts.opticalRenderer = args[1]
+			}
+			args = args[2:]
+		case "--optical-quiet-zone", "--optical-scale":
+			if err := needValue(args, args[0]); err != nil {
+				return opts, err
+			}
+			value, err := strconv.Atoi(args[1])
+			if err != nil {
+				return opts, fatalError("Invalid optical integer option")
+			}
+			if args[0] == "--optical-scale" {
+				opts.opticalScale = value
+			} else {
+				opts.opticalQuietZone = value
+			}
+			args = args[2:]
 		case "--file":
 			if err := needValue(args, args[0]); err != nil {
 				return opts, err
@@ -125,6 +159,14 @@ func (opts uploadOptions) recipientMode() bool {
 }
 
 func validateUploadOptions(opts uploadOptions, cfg config) error {
+	if opts.optical {
+		return validateOpticalUploadOptions(opts)
+	}
+	for name := range opts.explicitFlags {
+		if strings.HasPrefix(name, "--optical-") {
+			return fatalError("Optical display options require --optical")
+		}
+	}
 	if opts.sourceCount() > 1 {
 		return fatalError("upload accepts only one source: --file, -m, or stdin")
 	}
@@ -184,130 +226,30 @@ func (a *app) printUploadQR(id string) error {
 	return a.runCommand(a.cfg.QREncodeBin, []string{"-t", "ansiutf8", id}, nil, a.out, a.errOut)
 }
 
-func (a *app) createBundleArchive(archivePath string, sources []string) error {
-	args := []string{"-cf", archivePath}
-	seen := map[string]bool{}
-
-	for _, source := range sources {
-		if source == "" {
-			continue
-		}
-		info, err := os.Lstat(source)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return fatalError("Path not found: " + source)
-			}
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fatalError("Bundle sources cannot include symlinks: " + source)
-		}
-		if err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				return fatalError("Bundle sources cannot include symlinks: " + source)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-
-		archiveName := filepath.Base(source)
-		if archiveName == "" || archiveName == "." || archiveName == ".." {
-			return fatalError("Bundle source has an invalid top-level name: " + source)
-		}
-		if seen[archiveName] {
-			return fatalError("Bundle sources must have unique top-level names: " + archiveName)
-		}
-		seen[archiveName] = true
-		args = append(args, "-C", filepath.Dir(source), archiveName)
-	}
-
-	cmd := exec.CommandContext(a.commandContext(), "tar", args...)
-	cmd.Stdout = a.out
-	cmd.Stderr = a.errOut
-	return cmd.Run()
-}
-
 // writeUploadPlaintext assembles the bytes to upload into one file and reports
 // whether they were bundled into an archive. A directory, or more than one
 // path, becomes a bundle; a single file is copied as it is, so the download
 // side writes back the same file rather than an archive containing it.
 func (a *app) writeUploadPlaintext(plainFile string, opts uploadOptions) (bool, error) {
-	if len(opts.files) == 0 {
-		return false, a.writeUploadInput(plainFile, opts)
-	}
-	bundle := false
-	pathCount := 0
-	for _, source := range opts.files {
-		if source == "" {
-			continue
-		}
-		info, err := os.Stat(source)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return false, fatalError("Path not found: " + source)
-			}
-			return false, err
-		}
-		pathCount++
-		if info.IsDir() || pathCount > 1 {
-			bundle = true
-		}
-	}
-	if bundle {
-		return true, a.createBundleArchive(plainFile, opts.files)
-	}
-	return false, copyFile(plainFile, opts.files[0])
-}
-
-// writeUploadInput writes the plaintext of an upload that names no files: the
-// message given on the command line, or standard input.
-func (a *app) writeUploadInput(plainFile string, opts uploadOptions) error {
-	if opts.message != "" {
-		return os.WriteFile(plainFile, []byte(opts.message), 0o600)
-	}
-	if stdinIsTTY() {
-		fmt.Fprintln(a.errOut, "Enter plaintext, then press Ctrl-D when finished.")
-	}
-	out, err := os.Create(plainFile)
+	prepared, err := drop.PrepareInput(plainFile, drop.InputOptions{
+		Files: opts.files, Message: opts.message,
+	}, drop.InputEnvironment{
+		Context: a.commandContext(), Stdin: a.in, Stderr: a.errOut, CommandOutput: a.out, StdinIsTTY: stdinIsTTY(),
+	})
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, copyErr := io.Copy(out, a.in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
+	return prepared.Bundle, nil
 }
 
 // encryptUploadPlaintext encrypts the assembled plaintext with age. Recipients
 // given on the command line are written to a file rather than passed as
 // arguments, so they do not appear in this host's process list.
 func (a *app) encryptUploadPlaintext(plainFile, encryptedFile string, opts uploadOptions) error {
-	if !opts.recipientMode() {
-		return a.runAge("--encrypt", "--passphrase", "-o", encryptedFile, plainFile)
-	}
-	ageArgs := []string{"--encrypt"}
-	if len(opts.inlineRecipients) > 0 {
-		inlineRecipientsFile, err := tempFile("dud-upload-recipients-txt-")
-		if err != nil {
-			return err
-		}
-		defer removeTempFile(inlineRecipientsFile)
-		if err := os.WriteFile(inlineRecipientsFile, []byte(strings.Join(opts.inlineRecipients, "\n")+"\n"), 0o600); err != nil {
-			return err
-		}
-		ageArgs = append(ageArgs, "-R", inlineRecipientsFile)
-	}
-	if opts.recipientsFile != "" {
-		ageArgs = append(ageArgs, "-R", opts.recipientsFile)
-	}
-	ageArgs = append(ageArgs, "-o", encryptedFile, plainFile)
-	return a.runAge(ageArgs...)
+	return drop.EncryptFile(plainFile, encryptedFile, drop.EncryptionOptions{
+		InlineRecipients: opts.inlineRecipients,
+		RecipientsFile:   opts.recipientsFile,
+	}, a.runAge, tempFile, removeTempFile)
 }
 
 // reportUpload renders what the server returned for an upload, including the
@@ -335,6 +277,15 @@ func (a *app) reportUpload(data []byte, opts uploadOptions, receivePrefix string
 
 func (a *app) cmdUpload(args []string, receivePrefix string) error {
 	opts, err := parseUploadOptions(args, a.cfg.DropBaseURL, a.cfg.DOHURL)
+	if hasOpticalUploadFlag(args) {
+		if err != nil {
+			return a.reportOpticalFailure(hasJSONFlag(args), opticalFailure("usage", "Invalid optical upload arguments"))
+		}
+		if err := validateUploadOptions(opts, a.cfg); err != nil {
+			return a.reportOpticalFailure(opts.outputJSON, err)
+		}
+		return a.cmdOpticalUpload(opts)
+	}
 	if err != nil {
 		return cliUsageHint(err)
 	}

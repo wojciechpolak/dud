@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
-import { D1V2PairingRepository } from '../dist/src/v2-d1-pairing-repository.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
+import { D1V2PairingRepository } from '../dist/server/src/v2-d1-pairing-repository.js';
 
 const bytes = (length, seed) =>
   Uint8Array.from({ length }, (_, index) => (seed + index) & 0xff);

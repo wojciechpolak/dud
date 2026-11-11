@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { decodeCbor, encodeCbor } from '../dist/src/cbor.js';
+import { decodeCbor, encodeCbor } from '../dist/server/src/cbor.js';
 import {
   buildV2DeliveryProof,
   deriveV2DailyCapabilityLookupId,
@@ -20,8 +20,8 @@ import {
   parseV2DeliveryProof,
   V2_ENROLLMENT_KDF_ITERATIONS,
   verifyV2DeliveryProof,
-} from '../dist/src/v2-auth.js';
-import { sha256 } from '../dist/src/sha256.js';
+} from '../dist/server/src/v2-auth.js';
+import { sha256 } from '../dist/server/src/sha256.js';
 import {
   decodeV2ControlEventRequest,
   decodeV2CompletionRequest,
@@ -39,7 +39,7 @@ import {
   V2_INBOX_REQUEST_KEYS,
   V2_MAX_BATCHED_SLOT_PROOFS,
   V2_MAX_ENCRYPTED_DESCRIPTOR_BYTES,
-} from '../dist/src/v2-delivery-frame.js';
+} from '../dist/server/src/v2-delivery-frame.js';
 
 const corpus = JSON.parse(
   readFileSync(new URL('./vectors/v2-wire-vectors.json', import.meta.url)),

@@ -11,6 +11,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync/atomic"
+
+	"github.com/wojciechpolak/dud/client/optical-sender/display"
 )
 
 // Injected at build time from package.json via
@@ -45,19 +48,20 @@ type config struct {
 }
 
 type app struct {
-	cfg               config
-	in                io.Reader
-	out               io.Writer
-	errOut            io.Writer
-	exe               string
-	newV2Transport    func(v2TransportOptions) (v2Transport, error)
-	commandCtx        context.Context
-	observeProgress   func(v2ProgressSnapshot)
-	confirmCollection func([]v2CollectionEntry) bool
-	terminalCommand   func(*exec.Cmd) error
-	readPairingCode   func() (string, error)
-	showPairingCode   func(v2PairingCodeDisplay) error
-	showQRCode        func(string) error
+	cfg                config
+	in                 io.Reader
+	out                io.Writer
+	errOut             io.Writer
+	exe                string
+	newV2Transport     func(v2TransportOptions) (v2Transport, error)
+	commandCtx         context.Context
+	observeProgress    func(v2ProgressSnapshot)
+	confirmCollection  func([]v2CollectionEntry) bool
+	terminalCommand    func(*exec.Cmd) error
+	readPairingCode    func() (string, error)
+	showPairingCode    func(v2PairingCodeDisplay) error
+	showQRCode         func(string) error
+	newOpticalRenderer func(context.Context, display.Options) (display.Renderer, error)
 }
 
 type fatalError string
@@ -71,10 +75,18 @@ func main() {
 		cleanupTempFilesOnSignal()
 	}
 	a := newApp(os.Stdin, os.Stdout, os.Stderr)
-	if code := a.main(os.Args[1:]); code != 0 {
+	code := a.main(os.Args[1:])
+	if signalCode := receivedSignalExitCode.Load(); signalCode != 0 {
+		<-signalCleanupDone
+		code = int(signalCode)
+	}
+	if code != 0 {
 		os.Exit(code)
 	}
 }
+
+var receivedSignalExitCode atomic.Int32
+var signalCleanupDone = make(chan struct{})
 
 // Deferred cleanup never runs when a signal kills the process, so an
 // interrupted upload or download would leave decrypted plaintext in the
@@ -84,7 +96,11 @@ func cleanupTempFilesOnSignal() {
 	signal.Notify(signals, processCleanupSignals()...)
 	go func() {
 		sig := <-signals
+		receivedSignalExitCode.Store(int32(processSignalExitCode(sig)))
+		beginTempShutdown()
+		closeOpticalOperations()
 		removeAllTempFiles()
+		close(signalCleanupDone)
 		os.Exit(processSignalExitCode(sig))
 	}()
 }
@@ -132,9 +148,8 @@ func (a *app) main(args []string) int {
 func (a *app) run(args []string) (resultErr error) {
 	defer func() {
 		var syntax fatalError
-		var guided *cliGuidanceError
-		if errors.As(resultErr, &syntax) && syntax != "" && !errors.As(resultErr, &guided) {
-			resultErr = withCLISteps(resultErr, localCLIStep("Check command syntax.", "help"))
+		if errors.As(resultErr, &syntax) && syntax != "" {
+			resultErr = cliUsageHint(resultErr)
 		}
 	}()
 	if len(args) == 0 {
@@ -177,6 +192,8 @@ func (a *app) run(args []string) (resultErr error) {
 		return a.cmdSync(rest)
 	case "inbox":
 		return a.cmdInbox(rest)
+	case "optical":
+		return a.cmdOptical(rest)
 	case "upload", "send":
 		if len(rest) != 0 && !strings.HasPrefix(rest[0], "-") {
 			return a.cmdPeerSend(rest)

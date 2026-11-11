@@ -11,18 +11,18 @@ import {
   buildV2DeliveryProof,
   deriveV2DailyCapabilityLookupId,
   encodeBase64Url,
-} from '../dist/src/v2-auth.js';
-import { encodeCbor } from '../dist/src/cbor.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { FilesystemV2BodyStore } from '../dist/src/v2-filesystem-body-store.js';
-import { MemoryV2BodyStore } from '../dist/src/v2-memory-body-store.js';
-import { MemoryV2Repository } from '../dist/src/v2-memory-repository.js';
-import { R2V2BodyStore } from '../dist/src/v2-r2.js';
+} from '../dist/server/src/v2-auth.js';
+import { encodeCbor } from '../dist/server/src/cbor.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { FilesystemV2BodyStore } from '../dist/server/src/v2-filesystem-body-store.js';
+import { MemoryV2BodyStore } from '../dist/server/src/v2-memory-body-store.js';
+import { MemoryV2Repository } from '../dist/server/src/v2-memory-repository.js';
+import { R2V2BodyStore } from '../dist/server/src/v2-r2.js';
 import {
   decodeV2InboxResponseFrame,
   V2_INBOX_RESPONSE_KEYS,
-} from '../dist/src/v2-delivery-frame.js';
-import { V2_CBOR_CONTENT_TYPE } from '../dist/src/v2-http.js';
+} from '../dist/server/src/v2-delivery-frame.js';
+import { V2_CBOR_CONTENT_TYPE } from '../dist/server/src/v2-http.js';
 import {
   attachHandler,
   decodeBody,

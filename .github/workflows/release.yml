@@ -77,6 +77,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install optical window build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev \
+            libxrandr-dev libxxf86vm-dev
+
       - name: Format, lint, pins, docs, unit, and race checks
         run: npm run check
 
@@ -139,6 +146,13 @@ jobs:
           cache-dependency-path: |
             client/go.sum
             tools/go.sum
+
+      - name: Prepare release dependency cache
+        run: |
+          module_dir="$(mktemp -d)"
+          trap 'rm -rf "$module_dir"' EXIT
+          cp client/go.mod client/go.sum "$module_dir/"
+          go -C "$module_dir" mod download all
 
       # Builds every platform twice and fails if the two builds differ, so the
       # checksums below describe bytes anyone can reproduce from the same source.
@@ -348,6 +362,7 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" \
             dist/release/dud-* \
             dist/release/SHA256SUMS \
+            dist/release/capability-matrix.json \
             dist/release/*-image.spdx.json \
             --clobber
 

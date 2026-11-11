@@ -4,21 +4,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { decodeCbor, encodeCbor } from '../dist/src/cbor.js';
+import { decodeCbor, encodeCbor } from '../dist/server/src/cbor.js';
 import {
   buildV2DeliveryProof,
   deriveV2DailyCapabilityLookupId,
   hexToBytes,
   parseV2DeliveryProof,
   verifyV2DeliveryProof,
-} from '../dist/src/v2-auth.js';
-import { sha256 } from '../dist/src/sha256.js';
+} from '../dist/server/src/v2-auth.js';
+import { sha256 } from '../dist/server/src/sha256.js';
 import {
   readV2FramedDeliveryRequest,
   readV2RequestBytes,
   V2_CBOR_CONTENT_TYPE,
   V2_CONTENT_SHA256_HEADER,
-} from '../dist/src/v2-http.js';
+} from '../dist/server/src/v2-http.js';
 import {
   decodeV2InboxRequest,
   decodeV2InboxResponseFrame,
@@ -30,7 +30,7 @@ import {
   V2_INBOX_RESPONSE_KEYS,
   V2_DELIVERY_REQUEST_KEYS,
   V2_SLOT_PROOF_KEYS,
-} from '../dist/src/v2-delivery-frame.js';
+} from '../dist/server/src/v2-delivery-frame.js';
 import {
   hasRequiredV2Features,
   V2_ENDPOINT,
@@ -40,7 +40,7 @@ import {
   V2_REQUIRED_PEER_FEATURES,
   V2_SERVER_FEATURES,
   v2CompletionEndpoint,
-} from '../dist/src/v2-contract.js';
+} from '../dist/server/src/v2-contract.js';
 
 function hex(value) {
   return Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join(

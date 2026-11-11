@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { sha256 } from '../dist/src/sha256.js';
-import { FilesystemV2BodyStore } from '../dist/src/v2-filesystem-body-store.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { FilesystemV2BodyStore } from '../dist/server/src/v2-filesystem-body-store.js';
 
 function stream(bytes) {
   return new ReadableStream({

@@ -8,6 +8,24 @@ and this project follows
 
 ## [Unreleased]
 
+### Added
+
+- Add optical as a third transfer mode for messages, files, and collections,
+  with native age encryption, an offline camera receiver, and native recovery.
+  Send with `dud optical send` or the TUI and decrypt saved capsules with
+  `dud optical decrypt`. Display QR symbols in a window or terminal, including
+  Kitty graphics with automatic sizing in interactive Docker sessions. The
+  browser handles ciphertext only; receiver hosting is opt-in through
+  `DUD_OPTICAL_PWA_ENABLED`.
+- Add reproducible native client packages with capability, dependency, and
+  license provenance.
+
+### Fixed
+
+- Select Go 1.27.4 for builds and security scans to address GO-2026-6859.
+- Require native release binaries and security scans to use the same Go
+  toolchain.
+
 ## [2.7.0] - 2026-10-29
 
 ### Added

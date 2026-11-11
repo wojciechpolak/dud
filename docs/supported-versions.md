@@ -14,10 +14,13 @@ Security support windows for DUD itself are in [`SECURITY.md`](../SECURITY.md).
 | Node | 24.0.0  | `.node-version` |
 | Go   | 1.26.6  | `client/go.mod` |
 
-Older versions may work and are not tested. Each Go module selects `go1.27.3`
+Older versions may work and are not tested. Each Go module selects `go1.27.4`
 with its `toolchain` directive for builds and security scans. Go's automatic
 toolchain selection downloads that version when the installed Go is older. CI
-uses the preferred Go toolchain and the Node version in `.node-version`.
+uses the preferred Go toolchain and the Node version in `.node-version`. The
+native release matrix in `scripts/release-targets.json` selects the same Go
+toolchain; `check:pins` rejects a mismatch between release builds and security
+scans.
 
 ## 2. Runtime tools
 
@@ -31,8 +34,9 @@ These are the versions the client and server assume on the host or in the image.
 
 `dud doctor` reports whether `age`, `age-keygen`, `git`, and `qrencode` resolve
 on the host. Its `Tools` section shows `ok` or `missing`, so a missing tool is
-visible before it breaks a transfer. It does not report `curl`. Both transfer
-modes carry their own transport in Go, and the image ships no HTTP subprocess.
+visible before it breaks a transfer. It does not report `curl`. Dead drop and
+peer transfers carry their own transport in Go, and the image ships no HTTP
+subprocess.
 
 ## 3. Pinned sources
 

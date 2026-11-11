@@ -182,6 +182,13 @@ function usesProblems(reference, line) {
  */
 function checkManifest() {
   const manifest = JSON.parse(read(MANIFEST));
+  const releaseTargets = JSON.parse(read('scripts/release-targets.json'));
+  if (releaseTargets.goVersion !== manifest.go.toolchain) {
+    fail(
+      'scripts/release-targets.json',
+      `release Go toolchain ${releaseTargets.goVersion} disagrees with ${MANIFEST} ${manifest.go.toolchain}`,
+    );
+  }
 
   const nodeVersion = read('.node-version').trim();
   if (!nodeVersion.startsWith(`${manifest.node.minimum.split('.')[0]}.`)) {

@@ -826,7 +826,7 @@ func v2LocalDiagnostics(cfg *v2LocalConfig, paths v2Paths) map[string]any {
 // records the configured name and whether it is executable, never a version
 // banner, because a banner is host fingerprinting the report does not need.
 // `curl` is absent by design: the client carries its own transport in Go, in
-// both transfer modes.
+// dead drop and peer transfers.
 func (a *app) v2ToolDiagnostics() map[string]any {
 	tools := map[string]any{}
 	for name, binary := range map[string]string{

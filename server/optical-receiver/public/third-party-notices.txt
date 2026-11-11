@@ -1,0 +1,5 @@
+DUD optical receiver third-party notices
+
+The receiver's application, QR detector, QR decoder and service worker are
+repository code under the MIT license. The receiver bundle includes no
+third-party runtime code or WebAssembly assets.

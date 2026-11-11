@@ -1,8 +1,11 @@
 # DUD Client
 
-The client is one static Go binary. It performs DNS-over-HTTPS resolution,
+The client CLI is a static Go binary. Desktop optical packages add a separate
+local window helper. The CLI performs DNS-over-HTTPS resolution,
 candidate-address classification, exactly TLS 1.3, and ECH inside the `dud`
-binary. It needs no HTTP subprocess and ships none. Both transfer modes use it.
+binary. It needs no HTTP subprocess and ships none. Dead drop and peer transfers
+use it; optical transfers use a local display and camera without a network
+payload transport.
 
 Most installs use the Docker image, which also contains the `age`, `age-keygen`,
 `git`, and `qrencode` helpers the binary calls:
@@ -22,6 +25,13 @@ HTTPS client:
 curl -fL -o dud https://github.com/wojciechpolak/dud/releases/latest/download/dud-linux-amd64
 sudo install -m 0755 dud /usr/local/bin/dud
 ```
+
+The plain native binaries, Docker wrapper and Homebrew formula are headless.
+They support optical transfer recovery and explicitly selected terminal display.
+A window needs the verified desktop package and its sibling helper. Run
+`dud capabilities --local --json` to inspect the installed capability set. See
+[Optical transfer distribution](optical-distribution.md) for package selection
+and installation.
 
 `/releases/latest/download/` resolves to the newest stable release; a
 pre-release tag is published as one and is never what that path returns, so pin
@@ -110,26 +120,26 @@ on Windows.
 
 ## 1. Environment
 
-| Variable              | Default                                | Applies to                            |
-| --------------------- | -------------------------------------- | ------------------------------------- |
-| `DUD_DROP_BASE_URL`   | unset                                  | dead drops, above the shared fallback |
-| `DUD_PEER_BASE_URL`   | unset                                  | peers, above the shared fallback      |
-| `DUD_BASE_URL`        | `https://dud.example.com`              | fallback for both modes               |
-| `DUD_DOH_URL`         | `https://cloudflare-dns.com/dns-query` | both modes                            |
-| `DUD_ECH_MODE`        | `hard`                                 | both modes                            |
-| `DUD_DROP_SECRET`     | unset                                  | `upload` and `flush`                  |
-| `DUD_PEER_SECRET`     | unset                                  | `peer invite` on a gated deployment   |
-| `DUD_HOME`            | user home + `.dud`                     | peer commands; see §3                 |
-| `DUD_PROFILE`         | unset                                  | peer commands; see §3                 |
-| `DUD_IMAGE`           | the published image                    | the generated wrappers                |
-| `DUD_CA_BUNDLE`       | unset                                  | a CA bundle path inside the container |
-| `DUD_AGE_BIN`         | `age`                                  | payload encryption and decryption     |
-| `DUD_AGE_KEYGEN_BIN`  | `age-keygen`                           | `keygen`                              |
-| `DUD_GIT_BIN`         | `git`                                  | `dud git *`                           |
-| `DUD_GIT_TRUSTED_DIR` | unset                                  | `dud git *`; set by the wrappers      |
-| `DUD_QRENCODE_BIN`    | `qrencode`                             | `upload` and `peer invite` QR codes   |
-| `DUD_DOCKER_NETWORK`  | unset                                  | the generated wrappers                |
-| `DUD_CONNECT_TO`      | unset                                  | rejected; setting it fails every run  |
+| Variable              | Default                                | Applies to                               |
+| --------------------- | -------------------------------------- | ---------------------------------------- |
+| `DUD_DROP_BASE_URL`   | unset                                  | dead drops, above the shared fallback    |
+| `DUD_PEER_BASE_URL`   | unset                                  | peers, above the shared fallback         |
+| `DUD_BASE_URL`        | `https://dud.example.com`              | fallback for dead drop and peer          |
+| `DUD_DOH_URL`         | `https://cloudflare-dns.com/dns-query` | HTTP dead drops and peers                |
+| `DUD_ECH_MODE`        | `hard`                                 | HTTP dead drops and peers                |
+| `DUD_DROP_SECRET`     | unset                                  | HTTP `upload` and `flush`                |
+| `DUD_PEER_SECRET`     | unset                                  | `peer invite` on a gated deployment      |
+| `DUD_HOME`            | user home + `.dud`                     | peer commands; see §3                    |
+| `DUD_PROFILE`         | unset                                  | peer commands; see §3                    |
+| `DUD_IMAGE`           | the published image                    | the generated wrappers                   |
+| `DUD_CA_BUNDLE`       | unset                                  | a CA bundle path inside the container    |
+| `DUD_AGE_BIN`         | `age`                                  | payload encryption and decryption        |
+| `DUD_AGE_KEYGEN_BIN`  | `age-keygen`                           | `keygen`                                 |
+| `DUD_GIT_BIN`         | `git`                                  | `dud git *`                              |
+| `DUD_GIT_TRUSTED_DIR` | unset                                  | `dud git *`; set by the wrappers         |
+| `DUD_QRENCODE_BIN`    | `qrencode`                             | HTTP `upload` and `peer invite` QR codes |
+| `DUD_DOCKER_NETWORK`  | unset                                  | the generated wrappers                   |
+| `DUD_CONNECT_TO`      | unset                                  | rejected by network operations           |
 
 `DUD_ECH_MODE` accepts exactly two values:
 
@@ -143,7 +153,7 @@ pin them to the image's own executables (§6), so setting one in the shell or in
 
 `DUD_CONNECT_TO` names no supported behavior. The transport refuses to start
 when it is set, so it cannot be used to redirect a connection past the DoH
-resolution and address checks that every transfer depends on.
+resolution and address checks that HTTP dead drops and peer transfers depend on.
 
 Only the inviter needs `DUD_PEER_SECRET`; an invitee accepts with the pairing
 code alone. It is normally the passphrase the operator issued.
@@ -173,7 +183,7 @@ The peer profile sits above the environment on purpose. A paired relationship
 pins its own canonical origin, which is bound into every signed descriptor,
 while the `DUD_*` variables are ambient. A shell can export `DUD_DROP_BASE_URL`
 for dead drops without changing peer initialization or pairing. `DUD_BASE_URL`
-is the shared fallback when both modes use one origin.
+is the shared fallback when dead drop and peer transfers use one origin.
 
 Peer-scoped commands (`send`, `receive`, `sync`, `git push|fetch|status`) reject
 `--url`, `--doh-url`, and `--ech-mode` for the same reason. `dud doctor` and
@@ -304,6 +314,48 @@ original server. Their settings come from the dead drop environment and `--url`,
 independently of peer profiles. A printed download command includes its required
 destination. An unavailable ID must be checked with its sender; if its payload
 expired or was deleted, a fresh upload has a different ID.
+
+### Send and recover an optical transfer
+
+Use `dud capabilities --local --json` to inspect the installed build. Desktop
+window display needs the matching sibling helper; headless binaries, Docker and
+Homebrew require explicit terminal selection:
+
+```sh
+dud optical send --file input.bin --passphrase --optical-profile balanced
+dud optical send --file input.bin --passphrase --optical-renderer kitty --optical-profile balanced
+dud optical send --file input.bin --recipient RECIPIENT --optical-renderer terminal --optical-profile balanced --optical-scale 1
+```
+
+`kitty` uses pixel images on Linux/macOS, including Linux Docker containers
+attached with `-it` to a Kitty-compatible terminal. It requires enough pixels
+for the complete raster, independent of the font's cell count. `terminal` uses
+ANSI block glyphs and requires the character dimensions in the
+[terminal verification procedure](optical-verification.md#terminal-optical-transfer-verification).
+
+Open `/optical/` on a trusted HTTPS host, wait for offline installation, select
+the sender's profile and start the camera. Optical commands use neither server
+credentials nor HTTP transport settings. The PWA captures local ciphertext; it
+is not a browser HTTP dead drop or peer client. Never enter a decryption secret
+there. Pause preserves in-memory progress and the 15-minute deadline. Reset,
+backgrounding, reload and tab close discard progress.
+
+Save `dud-encrypted-capsule.age` in the receiver PWA, move it to a trusted
+native host and run:
+
+```sh
+dud optical decrypt --file dud-encrypted-capsule.age --out output.bin
+dud optical decrypt --file dud-encrypted-capsule.age --stdout --identity key.txt
+dud optical decrypt --file dud-encrypted-capsule.age --extract --out-dir recovered --identity key.txt
+```
+
+Omitting `--identity` asks age for the passphrase on the native host. Recovery
+validates the entire private container, SHA-256 and collection archive before
+writing payload bytes. It uses no server configuration or network requests. An
+existing output file or extraction top-level path causes an error. `--json`
+reports successful validation and the absolute output path; it cannot accompany
+`--stdout`. See [optical transfers](optical.md) for input limits, native
+identity requirements, output permissions and archive rules.
 
 ### Resumable peer files
 
@@ -500,9 +552,24 @@ remains available in the details if the encoder is unavailable.
 
 The main menu follows the interactive menu: **send**, **receive**, **git**,
 **peers**, **status**, **setup**, and **tools**. Press 1–7 to open an entry, or
-select it with arrow keys and Enter. Send and receive choose a paired peer or
-**dead drop** before asking for payload and output options. The target list
-refreshes with `r` and when returning to that screen.
+select it with arrow keys and Enter. Send chooses a paired peer, **dead drop**
+or **optical**; receive chooses a peer or dead drop. The target list refreshes
+with `r` and when returning to that screen.
+
+For optical sending, choose **send → Optical → Send message / Send files**. The
+form defaults to **kitty** and **balanced**. Use Left/Right or Space to change
+the renderer or profile, Tab to move between fields, and Ctrl+S to start. An
+empty age-recipient field selects a passphrase prompt; otherwise the provided
+recipient encrypts the content. File selection supports Ctrl+O browsing and
+Ctrl+N adding another file or directory. The interface releases the terminal for
+the display probe, age prompt and QR presentation, then resumes after Q or Esc
+ends terminal display. Ctrl+C cancels and exits the interface.
+
+To decrypt a capsule transferred from the phone, choose **tools → decrypt
+optical capsule**, select its saved file, destination and optional age identity.
+Choose **Extract a collection** for a collection capsule. This performs the
+local `dud optical decrypt` operation; camera capture belongs to the receiver
+PWA.
 
 To configure peer transfers entirely in the interface:
 

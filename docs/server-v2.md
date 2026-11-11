@@ -30,12 +30,12 @@ key; bearer credentials are stored only as salted hashes.
 Two flags decide which protocol versions a deployment serves. They are
 independent, and all four combinations are valid:
 
-| `DUD_DROP_ENABLED` | `DUD_PEER_ENABLED` | Deployment shape                               |
-| ------------------ | ------------------ | ---------------------------------------------- |
-| `true` (default)   | `false` (default)  | v1-only, the 1.x behavior unchanged            |
-| `true`             | `true`             | dual-stack                                     |
-| `false`            | `true`             | v2-only                                        |
-| `false`            | `false`            | serves neither; useful only to park a hostname |
+| `DUD_DROP_ENABLED` | `DUD_PEER_ENABLED` | Deployment shape                    |
+| ------------------ | ------------------ | ----------------------------------- |
+| `true` (default)   | `false` (default)  | v1-only, the 1.x behavior unchanged |
+| `true`             | `true`             | dual-stack                          |
+| `false`            | `true`             | v2-only                             |
+| `false`            | `false`            | serves neither HTTP mode            |
 
 A v2-only deployment answers `404` on every `/v1/` route. A v1-only deployment
 answers the v2 error document with code `4` on every `/v2/` route. Capability
@@ -48,6 +48,60 @@ expose to a health checker.
 Feature 12 advertises the authenticated peer relationship reset endpoint. It is
 part of the server build rather than a deployment flag. Clients also require the
 peer's signed feature-12 advertisement before they write a proposal.
+
+### Host an optical transfer receiver
+
+`DUD_OPTICAL_PWA_ENABLED=true` enables the static receiver at `/optical/` on
+Node and Worker. It defaults to false and is independent of the two HTTP flags.
+A host with both HTTP modes disabled can still serve the receiver. `GET` and
+`HEAD` return embedded build assets; the route accepts no payload upload,
+capsule download or peer API request. Receipt, reconstruction and Save stay on
+the receiving device. Native `dud optical decrypt` recovers the saved capsule
+locally with age.
+
+For an existing Compose deployment, set this in its operator environment and
+recreate the server using the selected image:
+
+```dotenv
+DUD_OPTICAL_PWA_ENABLED=true
+```
+
+For a Worker, set the same variable in `[vars]` of the deployment's Wrangler
+configuration. Build with `npm run build:server` to embed one coherent receiver
+build in either server artifact. Keep HTTPS termination and the receiver's CSP,
+Permissions-Policy, Referrer-Policy and content-type headers intact. Serve the
+manifest and service worker with their generated cache policy. Do not rewrite
+HTML, mix asset builds or inject analytics or third-party scripts.
+
+The public receiver address is `/optical/`, and `manifest.webmanifest` is the
+stable installation manifest. Node and Worker redirect a missing
+`/optical/index.<12 lowercase hex characters>.html` to `/optical/` with status
+302 and `Cache-Control: no-store`. Limit that fallback to the index pattern;
+unknown scripts, styles, nested paths and query variants must not return HTML.
+Serve `index.html`, `manifest.webmanifest` and `sw.js` without HTTP caching and
+preserve immutable caching for content-addressed assets. The service worker
+resolves the public aliases and saved index addresses from its installed cache
+without requiring the static host.
+
+The browser requires a secure context for camera access and service-worker
+installation. Wait for offline installation before disconnecting the receiver.
+The footer confirms successful installation with
+`Receiver is available offline.` Verify a desktop or home-screen installation by
+closing it and reopening from its icon in airplane mode, then receiving and
+saving a capsule. Offline startup requires retained browser storage; received
+progress stays in memory only. An explicit update runs only while idle. Offline
+cache stores static code and notices; it holds neither camera data nor
+ciphertext. Installation and updates require trust in the server image, HTTPS
+host and installed service worker. A host can replace the PWA and its displayed
+build identifier; neither that identifier nor offline availability authenticates
+the code running on the phone. Browser installation does not enforce the native
+client's DoH, ECH hard mode or exactly TLS 1.3; those requirements continue to
+apply to HTTP dead drops and peers.
+
+The [receiver workflow](optical.md) covers profiles, pause/reset, limits,
+generic Save and native recovery. The
+[receiver source guide](../server/optical-receiver/README.md) explains
+dependencies and packaging.
 
 ## 3. Credentials
 
@@ -143,7 +197,7 @@ DUD_PEER_SECRET='squid-lantern-rotate-9-mango' dud peer enrollment-key
 ```
 
 ```sh
-DUD_PEER_SECRET='squid-lantern-rotate-9-mango' node dist/src/v2-admin.js enrollment-key
+DUD_PEER_SECRET='squid-lantern-rotate-9-mango' node dist/server/src/v2-admin.js enrollment-key
 ```
 
 Then feed the printed value to `wrangler secret put DUD_PEER_SECRET`.
@@ -225,7 +279,7 @@ to configure.
 
 ## 5. Self-hosted deployment
 
-`dist/src/node-server.js` serves the same routes from one data directory:
+`dist/server/src/node-server.js` serves the same routes from one data directory:
 
 ```
 <DUD_DATA_DIR>/

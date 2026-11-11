@@ -1,7 +1,11 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["typescript", "import"],
-  "ignorePatterns": ["**/.work/**", "**/dist/**", "**/node_modules/**"],
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/node_modules/**",
+    "server/src/optical-pwa-assets.generated.ts"
+  ],
   "rules": {
     "curly": ["error", "all"]
   }

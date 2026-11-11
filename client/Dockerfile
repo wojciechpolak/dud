@@ -24,6 +24,8 @@ WORKDIR /client
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
+COPY drop ./drop
+COPY optical-sender ./optical-sender
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${DUD_VERSION}" -o /usr/local/bin/dud ./cmd/dud
 

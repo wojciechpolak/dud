@@ -5,16 +5,16 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { decodeCbor, encodeCbor } from '../dist/src/cbor.js';
+import { decodeCbor, encodeCbor } from '../dist/server/src/cbor.js';
 import {
   createV2CapabilityRecord,
   decryptV2TokenSecret,
   encodeBase64Url,
   rewrapV2VerifierKeys,
-} from '../dist/src/v2-auth.js';
-import { offlineRevokeV2Relationship } from '../dist/src/v2-admin.js';
-import { MemoryV2Store } from '../dist/src/v2-memory.js';
-import { WorkerV2Store } from '../dist/src/v2-worker-store.js';
+} from '../dist/server/src/v2-auth.js';
+import { offlineRevokeV2Relationship } from '../dist/server/src/v2-admin.js';
+import { MemoryV2Store } from '../dist/server/src/v2-memory.js';
+import { WorkerV2Store } from '../dist/server/src/v2-worker-store.js';
 import { makeContext, textStream } from './helpers.mjs';
 import {
   createV2TestService,
@@ -51,7 +51,7 @@ async function seedLegacyCapability(store, randomBytes) {
 }
 
 test('v2 endpoints are unreachable until explicitly enabled', async () => {
-  const { createDudService } = await import('../dist/src/service.js');
+  const { createDudService } = await import('../dist/server/src/service.js');
   const { MemoryBlobStore } = await import('./helpers.mjs');
   const service = createDudService({ blobStore: new MemoryBlobStore() });
   const response = await service.fetch(
@@ -66,7 +66,7 @@ test('v2 endpoints are unreachable until explicitly enabled', async () => {
 // ever await it. A failure in that window must stay attached to the promise:
 // unhandled, it would end the whole process instead of failing one request.
 test('a failed store initialization never escapes as an unhandled rejection', async () => {
-  const { createDudService } = await import('../dist/src/service.js');
+  const { createDudService } = await import('../dist/server/src/service.js');
   const { MemoryBlobStore } = await import('./helpers.mjs');
   class FailingV2Store extends MemoryV2Store {
     async initialize() {
@@ -100,7 +100,7 @@ test('a failed store initialization never escapes as an unhandled rejection', as
 });
 
 test('v2 limit configuration fails closed on unsafe quota relationships', async () => {
-  const { createDudService } = await import('../dist/src/service.js');
+  const { createDudService } = await import('../dist/server/src/service.js');
   const { MemoryBlobStore } = await import('./helpers.mjs');
   assert.throws(
     () =>
@@ -118,7 +118,7 @@ test('v2 limit configuration fails closed on unsafe quota relationships', async 
 });
 
 test('v2 deployment and administrative credentials must be distinct', async () => {
-  const { createDudService } = await import('../dist/src/service.js');
+  const { createDudService } = await import('../dist/server/src/service.js');
   const { MemoryBlobStore } = await import('./helpers.mjs');
   const shared = encodeBase64Url(V2_DEPLOYMENT_KEY);
   assert.throws(
@@ -165,7 +165,7 @@ test('v2 deployment and administrative credentials must be distinct', async () =
 });
 
 test('a v2 deployment refuses to start without a stated enrollment policy', async () => {
-  const { createDudService } = await import('../dist/src/service.js');
+  const { createDudService } = await import('../dist/server/src/service.js');
   const { MemoryBlobStore } = await import('./helpers.mjs');
   const base = {
     v2Enabled: true,
@@ -193,10 +193,10 @@ test('a v2 deployment refuses to start without a stated enrollment policy', asyn
 });
 
 test('a v2 deployment reads every accepted form of the enrollment secret', async () => {
-  const { createDudService } = await import('../dist/src/service.js');
+  const { createDudService } = await import('../dist/server/src/service.js');
   const { MemoryBlobStore } = await import('./helpers.mjs');
   const { deriveV2EnrollmentKey, formatV2EnrollmentKey } =
-    await import('../dist/src/v2-auth.js');
+    await import('../dist/server/src/v2-auth.js');
   const start = (config) =>
     createDudService({
       blobStore: new MemoryBlobStore(),

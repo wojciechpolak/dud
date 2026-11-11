@@ -36,6 +36,7 @@ const (
 type tuiItem struct {
 	id, title, description, details string
 	deadDrop                        bool
+	optical                         bool
 	active                          bool
 	pairingAction                   string
 	allPeers                        bool
@@ -201,25 +202,7 @@ func (model *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.resize()
 		return model, nil
 	case tuiTargetsMsg:
-		model.screen, model.notice = tuiTargets, msg.notice
-		model.setTheme(model.theme)
-		items := []list.Item{}
-		for _, value := range msg.items {
-			item := value.(tuiItem)
-			if item.deadDrop && model.peersOnly {
-				continue
-			}
-			if !item.deadDrop && !item.active && !model.includeInactive {
-				continue
-			}
-			items = append(items, item)
-		}
-		if model.allowAll {
-			items = append(items, tuiItem{title: "All peers", description: "Select all active peers", allPeers: true})
-		}
-		model.menu.ResetSelected()
-		model.resize()
-		return model, model.menu.SetItems(items)
+		return model, model.updateTargets(msg)
 	case tuiTickMsg:
 		if model.busy && msg.operation == model.operation {
 			model.refreshOutput()
@@ -278,12 +261,38 @@ func (model *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			msg.answer <- model.operation.ctx.Err()
 			return model, model.operation.nextEvent
 		}
-		command := tuiTerminalCommand{msg, model.operation.output}
+		command := &tuiTerminalCommand{request: msg, output: model.operation.output}
 		return model, tea.Batch(model.operation.nextEvent, tea.Exec(command, func(err error) tea.Msg { msg.answer <- err; return tuiTerminalFinishedMsg{} }))
 	case tea.KeyPressMsg:
 		return model.handleKey(msg)
 	}
 	return model.updateComponent(message)
+}
+
+func (model *tuiModel) updateTargets(msg tuiTargetsMsg) tea.Cmd {
+	model.screen, model.notice = tuiTargets, msg.notice
+	model.setTheme(model.theme)
+	items := []list.Item{}
+	for _, value := range msg.items {
+		item := value.(tuiItem)
+		if item.deadDrop && model.peersOnly {
+			continue
+		}
+		if !item.deadDrop && !item.active && !model.includeInactive {
+			continue
+		}
+		items = append(items, item)
+	}
+	if model.allowAll {
+		items = append(items, tuiItem{title: "All peers", description: "Select all active peers", allPeers: true})
+	}
+	if !model.peersOnly && model.targetAction == "send" {
+		items = append(items, tuiItem{id: "optical", title: "Optical", description: "Local encrypted QR transfer", optical: true, active: true,
+			details: "Optical\nSend encrypted content as four QR symbols.\nKitty displays pixel images in a compatible terminal.\nQ or Esc ends terminal display and returns to the interface."})
+	}
+	model.menu.ResetSelected()
+	model.resize()
+	return model.menu.SetItems(items)
 }
 
 func (model *tuiModel) refreshOutput() {
@@ -413,11 +422,11 @@ func (model *tuiModel) showActions() tea.Cmd {
 		if model.homeAction != "send" {
 			items = append(items, tuiItem{id: "receive", title: "Receive", description: "Save incoming content"})
 		}
-		if !model.target.deadDrop && model.homeAction != "send" {
+		if !model.target.deadDrop && !model.target.optical && model.homeAction != "send" {
 			items = append(items, tuiItem{id: "sync", title: "Sync", description: "Publish queued work and collect acknowledgements"})
 		}
 	}
-	if !model.target.deadDrop && model.homeAction != "send" {
+	if !model.target.deadDrop && !model.target.optical && model.homeAction != "send" {
 		items = append(items, tuiItem{id: "status", title: "Status", description: "Inspect peer state and delivery counters"})
 	}
 	model.menu.ResetSelected()
@@ -471,6 +480,13 @@ func (model *tuiModel) start(args []string) tea.Cmd {
 
 func (model *tuiModel) editKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	form := model.form
+	if field := form.activeField(); field != nil && len(field.choices) > 0 {
+		switch msg.String() {
+		case "left", "right", "space":
+			field.cycleChoice(msg.String() == "left")
+			return model, nil
+		}
+	}
 	switch msg.String() {
 	case "esc":
 		return model, model.goBack()
@@ -535,7 +551,7 @@ func (model *tuiModel) updateComponent(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiEditing:
 		if model.form.hasMessage && model.form.focus == 0 {
 			model.form.message, command = model.form.message.Update(message)
-		} else if field := model.form.activeField(); field != nil && !field.toggle {
+		} else if field := model.form.activeField(); field != nil && !field.toggle && len(field.choices) == 0 {
 			field.input, command = field.input.Update(message)
 		}
 	case tuiFiles:
@@ -618,6 +634,9 @@ func (model *tuiModel) body() (string, string) {
 			body += "\n" + ansi.Truncate(strings.ReplaceAll(model.form.err, "\n", " "), max(1, model.width-4), "…")
 		}
 		footer := "Tab next · Space toggle · Ctrl+S run · Esc back"
+		if strings.HasPrefix(model.form.action, "optical-") && model.form.action != "optical-recover" {
+			footer = "Esc back · Ctrl+S run · Tab next · ←/→ choose"
+		}
 		if isTUISetupAction(model.form.action) {
 			footer = "Tab next · Ctrl+S " + model.form.submitLabel() + " · Esc back"
 		}

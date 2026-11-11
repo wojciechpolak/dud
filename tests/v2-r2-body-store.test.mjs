@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { sha256 } from '../dist/src/sha256.js';
-import { R2V2BodyStore } from '../dist/src/v2-r2.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { R2V2BodyStore } from '../dist/server/src/v2-r2.js';
 import { MockR2Bucket } from './v2-helpers.mjs';
 
 globalThis.FixedLengthStream ??= class FixedLengthStream extends (

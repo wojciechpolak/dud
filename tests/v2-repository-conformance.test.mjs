@@ -8,12 +8,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { MemoryV2Repository } from '../dist/src/v2-memory-repository.js';
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
-import { D1V2PairingRepository } from '../dist/src/v2-d1-pairing-repository.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { R2V2BodyStore } from '../dist/src/v2-r2.js';
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
+import { MemoryV2Repository } from '../dist/server/src/v2-memory-repository.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
+import { D1V2PairingRepository } from '../dist/server/src/v2-d1-pairing-repository.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { R2V2BodyStore } from '../dist/server/src/v2-r2.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
 import { readD1Migrations } from './d1-local.mjs';
 import { MockR2Bucket } from './v2-helpers.mjs';
 

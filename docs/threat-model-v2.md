@@ -68,11 +68,10 @@ A self-hosted DoH resolver can expose more than it hides. A distinctive resolver
 hostname in a system DNS query is more identifying than the DUD origin it hides.
 `dud doctor` reports this; pinned bootstrap addresses remove it.
 
-**Traffic fingerprint:** every request in either transfer mode leaves the same
-Go client, so the observable handshake and framing are uniform: one stack, and
-`h2` in both modes, so no `http/1.1` connection stands out against the HTTP/2
-majority. None of that hides the fact of a connection. This adversary still sees
-timing and volume.
+**Traffic fingerprint:** dead drop and peer requests leave the same Go client,
+so the observable handshake and framing are uniform: one stack, and `h2`, so no
+`http/1.1` connection stands out against the HTTP/2 majority. None of that hides
+the fact of a connection. This adversary still sees timing and volume.
 
 ### 3.3 TLS-Terminating Provider
 

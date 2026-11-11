@@ -1,0 +1,19 @@
+{
+  "name": "DUD optical transfer receiver",
+  "short_name": "DUD optical",
+  "description": "Reconstruct encrypted DUD capsules from an optical QR stream.",
+  "id": "/optical/",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f8ff",
+  "theme_color": "#eef4ff",
+  "icons": [
+    {
+      "src": "__DUD_OPTICAL_ICON__",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
