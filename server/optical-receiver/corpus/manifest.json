@@ -1,0 +1,66 @@
+{
+  "format": 1,
+  "generator": "dud-optical-corpus-0",
+  "files": [
+    {
+      "name": "collection-hostile.tar",
+      "size": 6656,
+      "sha256": "4c438051074d6f3a1cb835585d507c345ee7ecdc85eb53337393ac4c5496cfa1"
+    },
+    {
+      "name": "collection-safe.tar",
+      "size": 3072,
+      "sha256": "e8c054d38ed923eecf958338f90bc5a2aa4e851e3f4a2ca733696008b559e407"
+    },
+    {
+      "name": "compressible-16mib.bin",
+      "size": 16777216,
+      "sha256": "95abb2839c98dec95c0195f00e9907b43bd7e83d622678eeae561833062b2814"
+    },
+    {
+      "name": "compressible-1kib.bin",
+      "size": 1024,
+      "sha256": "88c9bf6ea7d49ad7161846f4680c9c634a48fbe36866a7f7af3b7ee8dda35ba6"
+    },
+    {
+      "name": "compressible-1mib.bin",
+      "size": 1048576,
+      "sha256": "094d4e3560cf3fde963dd6c5e2ce0ced488839acfb568c226348218d86085f9d"
+    },
+    {
+      "name": "compressible-64mib.bin",
+      "size": 67108864,
+      "sha256": "dde652d78fcb0dde405a0d6277257795cbb6ac28e91ef1fe9f1b3312cb36c674"
+    },
+    {
+      "name": "message-utf8.txt",
+      "size": 72,
+      "sha256": "891587e4cb53ca54502f7011b51c0964925467d097750dff177c6160e39369fd"
+    },
+    {
+      "name": "random-16mib.bin",
+      "size": 16777216,
+      "sha256": "5ac7694be9b936e95703e3a254d206ecbe706ea411175a0a60d8c1f48776c343"
+    },
+    {
+      "name": "random-1kib.bin",
+      "size": 1024,
+      "sha256": "3d93dd7e2f5774a50495770bb1a7e0d0e7bacda5f5b38fd31382e4be4dc726a4"
+    },
+    {
+      "name": "random-1mib.bin",
+      "size": 1048576,
+      "sha256": "d37e76900c3d428a369465fc53dcc162f11a848a731dd94dbfbfc40dbcf167a1"
+    },
+    {
+      "name": "random-64mib.bin",
+      "size": 67108864,
+      "sha256": "f2fdab5baa369f72a1ac5170c362ec6f5d601f9f51be7e1ca70c0bf618091d84"
+    },
+    {
+      "name": "single-file.bin",
+      "size": 4099,
+      "sha256": "e146de8e12c224ce8c4e4229e10cd7f656927b0b37b16bcc13101679fb68d2b1"
+    }
+  ]
+}

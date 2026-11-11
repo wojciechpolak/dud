@@ -22,11 +22,11 @@ import { Miniflare } from 'miniflare';
 import {
   buildV2DeliveryProof,
   deriveV2DailyCapabilityLookupId,
-} from '../dist/src/v2-auth.js';
-import { encodeCbor, decodeCbor } from '../dist/src/cbor.js';
-import { V2_INBOX_RESPONSE_KEYS } from '../dist/src/v2-delivery-frame.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
+} from '../dist/server/src/v2-auth.js';
+import { encodeCbor, decodeCbor } from '../dist/server/src/cbor.js';
+import { V2_INBOX_RESPONSE_KEYS } from '../dist/server/src/v2-delivery-frame.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
 import { readD1Migrations } from './d1-local.mjs';
 import {
   buildDeliveryRequest,
@@ -80,7 +80,7 @@ function pairingVerifier(bearer, saltStart) {
  */
 async function startWorker(t) {
   const bundle = await build({
-    entryPoints: ['src/index.ts'],
+    entryPoints: ['server/src/index.ts'],
     bundle: true,
     format: 'esm',
     platform: 'browser',

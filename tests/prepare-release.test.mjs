@@ -28,7 +28,7 @@ function scratchRelease(t) {
   const files = {
     'CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Work.\n',
     'docs/dead-drops-v1.md': '  "version": "2.2.0"\n',
-    'src/config.ts': "  version: '2.2.0',\n",
+    'server/src/config.ts': "  version: '2.2.0',\n",
     'tests/v2-workerd.test.mjs':
       "            APP_VERSION: { type: 'text', value: '9.9.9' },\n",
     'tests/worker.test.mjs': "    config: { version: '9.9.9' },\n",
@@ -83,7 +83,7 @@ test('the release plan accepts the repository release files', () => {
   const [major, minor] = version.split('.').map(Number);
   const nextVersion = `${major}.${minor + 1}.0`;
   const changes = planRelease(root, version, nextVersion, '2026-09-11');
-  const config = changes.find(({ file }) => file === 'src/config.ts');
+  const config = changes.find(({ file }) => file === 'server/src/config.ts');
 
   assert.ok(config);
   assert.ok(config.contents.includes(`  version: '${nextVersion}',`));
@@ -93,12 +93,12 @@ test('the release plan accepts the repository release files', () => {
 test('the release plan rejects a missing or duplicated version marker', (t) => {
   const root = scratchRelease(t);
   writeFileSync(
-    path.join(root, 'src/config.ts'),
+    path.join(root, 'server/src/config.ts'),
     "  version: '2.2.0',\n  version: '2.2.0',\n",
   );
   assert.throws(
     () => planRelease(root, '2.2.0', '2.3.0', '2026-09-11'),
-    /src\/config\.ts contains .* more than once/,
+    /server\/src\/config\.ts contains .* more than once/,
   );
 });
 
@@ -121,7 +121,7 @@ test('the preversion check requires manifests at the old version and changes not
   writeManifests(root, '2.2.0');
   run('check', env, root);
   assert.match(
-    readFileSync(path.join(root, 'src/config.ts'), 'utf8'),
+    readFileSync(path.join(root, 'server/src/config.ts'), 'utf8'),
     /2\.2\.0/,
   );
 
@@ -159,7 +159,7 @@ test('the version pass writes every release file once npm has bumped the manifes
   writeManifests(root, '2.3.0');
   run('update', env, root);
   assert.match(
-    readFileSync(path.join(root, 'src/config.ts'), 'utf8'),
+    readFileSync(path.join(root, 'server/src/config.ts'), 'utf8'),
     /2\.3\.0/,
   );
   assert.match(

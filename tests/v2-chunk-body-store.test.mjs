@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { FilesystemV2BodyStore } from '../dist/src/v2-filesystem-body-store.js';
-import { MemoryV2BodyStore } from '../dist/src/v2-memory-body-store.js';
-import { R2V2BodyStore } from '../dist/src/v2-r2.js';
-import { sha256 } from '../dist/src/sha256.js';
+import { FilesystemV2BodyStore } from '../dist/server/src/v2-filesystem-body-store.js';
+import { MemoryV2BodyStore } from '../dist/server/src/v2-memory-body-store.js';
+import { R2V2BodyStore } from '../dist/server/src/v2-r2.js';
+import { sha256 } from '../dist/server/src/sha256.js';
 import { MockR2Bucket } from './v2-helpers.mjs';
 
 globalThis.FixedLengthStream ??= class FixedLengthStream extends (

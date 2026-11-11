@@ -7,8 +7,8 @@ import test from 'node:test';
 import {
   createWorkerMaintenanceGate,
   scheduleWorkerV2Maintenance,
-} from '../dist/src/index.js';
-import { createDudService } from '../dist/src/service.js';
+} from '../dist/server/src/index.js';
+import { createDudService } from '../dist/server/src/service.js';
 import { MemoryBlobStore, makeContext, textStream } from './helpers.mjs';
 
 // Valid 32-char lowercase hex IDs used across tests

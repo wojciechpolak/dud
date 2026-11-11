@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   applyV2SQLiteMigrations,
   V2_SQLITE_MIGRATIONS,
-} from '../dist/src/v2-sqlite-schema.js';
+} from '../dist/server/src/v2-sqlite-schema.js';
 
 test('v2 SQLite migrations create the normalized schema', () => {
   const database = new DatabaseSync(':memory:');

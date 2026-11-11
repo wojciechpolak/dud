@@ -67,6 +67,9 @@ func TestCommandHelpFormsAndAliasesSelectTheSameTopic(t *testing.T) {
 		{"peer reset --help", "peer help reset", "help peer reset", "peer reset laptop --yes --help"},
 		{"config show --help", "config help show", "help config show"},
 		{"erase peer --help", "help erase peer", "erase peer laptop --yes --help"},
+		{"optical --help", "optical help", "help optical"},
+		{"optical send --help", "optical help send", "help optical send"},
+		{"optical decrypt --help", "optical help decrypt", "help optical decrypt"},
 		{"version --help", "--version --help"},
 	} {
 		var expected string
@@ -142,5 +145,39 @@ func TestGroupHelpListsOnlyRelevantCommands(t *testing.T) {
 		if !strings.Contains(stdout.String(), "Subcommands\n") || !strings.Contains(stdout.String(), test.present) || strings.Contains(stdout.String(), test.absent) {
 			t.Fatalf("%s help = %s", test.path, stdout.String())
 		}
+	}
+}
+
+func TestTransferHelpDescribesOpticalRoutingAndOptions(t *testing.T) {
+	for _, command := range []string{"upload", "send"} {
+		var stdout, stderr bytes.Buffer
+		a := newApp(unreadableHelpInput{t}, &stdout, &stderr)
+		if code := a.main([]string{command, "--help"}); code != 0 {
+			t.Fatalf("%s: %s", command, stderr.String())
+		}
+		for _, fragment := range []string{"dead drop", "peer", "optical", "--optical", "rejects optical options"} {
+			if !strings.Contains(stdout.String(), fragment) {
+				t.Fatalf("%s help omitted %q", command, fragment)
+			}
+		}
+		if command == "upload" || command == "send" {
+			for _, flag := range []string{"--optical-profile", "--optical-renderer", "--optical-quiet-zone", "--optical-scale"} {
+				if !strings.Contains(stdout.String(), flag) {
+					t.Fatalf("%s help omitted %s", command, flag)
+				}
+			}
+		}
+	}
+	for _, path := range [][]string{{"git", "push"}, {"git", "fetch"}, {"--tui"}, {"download"}, {"receive"}} {
+		var stdout bytes.Buffer
+		a := newApp(unreadableHelpInput{t}, &stdout, &bytes.Buffer{})
+		if code := a.main(append(path, "--help")); code != 0 || strings.Contains(stdout.String(), "--optical") {
+			t.Fatalf("%v advertises unsupported optical operations: %s", path, stdout.String())
+		}
+	}
+	var stdout bytes.Buffer
+	a := newApp(unreadableHelpInput{t}, &stdout, &bytes.Buffer{})
+	if code := a.main([]string{"capabilities", "--help"}); code != 0 || !strings.Contains(stdout.String(), "--local") || !strings.Contains(stdout.String(), "offline") {
+		t.Fatalf("local capability help = %s", stdout.String())
 	}
 }

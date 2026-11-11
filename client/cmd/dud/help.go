@@ -28,6 +28,12 @@ type helpOption struct {
 // belongs to its option and must never turn a transfer into a help request.
 var helpOptions = map[string]helpOption{
 	"--json":                 {"", "Report the result as JSON; automatic progress is disabled."},
+	"--local":                {"", "Report compiled client capabilities offline; rejects network options."},
+	"--optical":              {"", "Select a local optical transfer instead of an HTTP dead drop."},
+	"--optical-profile":      {"high-rate|balanced", "Select the optical profile; the default is high-rate."},
+	"--optical-renderer":     {"window|terminal|kitty", "Select the optical display: window (default), ANSI terminal, or Kitty pixel graphics on Linux/macOS."},
+	"--optical-quiet-zone":   {"4..16", "Set the QR quiet zone in modules; the default is 4."},
+	"--optical-scale":        {"1..16", "Set the integer QR raster scale; the default is 2. Kitty treats it as the minimum and fills the available pixel area."},
 	"--url":                  {"URL", "Select the server URL; paired peers use their pinned origin."},
 	"--doh-url":              {"URL", "Select the HTTPS DNS-over-HTTPS resolver."},
 	"--ech-mode":             {"hard|off", "Select ECH mode; the default is hard."},
@@ -38,10 +44,10 @@ var helpOptions = map[string]helpOption{
 	"--name":                 {"NAME", "Set the peer delivery's display name."},
 	"--ttl":                  {"DURATION", "Set expiry: the default is 24h for dead drops and 168h for peers."},
 	"--delete-after-read":    {"", "Request one-time consumption; expiry alone does not make a dead drop single-use."},
-	"--passphrase":           {"", "Encrypt a dead drop using a prompted passphrase."},
-	"--recipient":            {"AGE_RECIPIENT", "Encrypt a dead drop to an age recipient."},
+	"--passphrase":           {"", "Encrypt using a prompted passphrase."},
+	"--recipient":            {"AGE_RECIPIENT", "Encrypt to an age recipient."},
 	"-r":                     {"AGE_RECIPIENT", "Alias for --recipient."},
-	"--recipient-file":       {"PATH", "Read dead drop age recipients from a file."},
+	"--recipient-file":       {"PATH", "Read age recipients from a file."},
 	"-R":                     {"PATH", "Recipient file; for keygen, write the public recipient to this path."},
 	"--recipient-out":        {"PATH", "Write the keygen public recipient to this path; alias: -R."},
 	"--no-qr":                {"", "Suppress the HTTP dead drop QR code."},
@@ -49,9 +55,9 @@ var helpOptions = map[string]helpOption{
 	"--out":                  {"PATH", "Choose the output path; keygen writes the private identity here."},
 	"-o":                     {"PATH", "Peer receive alias for --out."},
 	"--out-dir":              {"DIR", "Choose the receive or extraction directory."},
-	"--stdout":               {"", "Write the decrypted dead drop payload to stdout; incompatible with --json."},
-	"--extract":              {"", "Extract a dead drop collection; existing top-level paths are rejected."},
-	"--identity":             {"PATH", "Decrypt a dead drop with this age identity; omission prompts for a passphrase."},
+	"--stdout":               {"", "Write the validated payload to stdout; incompatible with --json."},
+	"--extract":              {"", "Extract a collection; existing top-level paths are rejected."},
+	"--identity":             {"PATH", "Decrypt with this age identity; omission prompts for a passphrase."},
 	"-i":                     {"PATH", "Alias for --identity."},
 	"--remote":               {"NAME", "Set the dead drop Git fetch remote; the default is dud."},
 	"--pq":                   {"", "Generate a hybrid post-quantum age identity."},
@@ -86,26 +92,32 @@ const networkHelpOptions = "--url --doh-url --ech-mode --json"
 const dropEncryptionHelpOptions = "--ttl --delete-after-read --passphrase --recipient -r --recipient-file -R --json --no-qr --url --doh-url"
 const dropSendHelpOptions = "--file -m " + dropEncryptionHelpOptions
 const dropReceiveHelpOptions = "--id --out --stdout --extract --out-dir --identity -i --json --url --doh-url"
+const opticalRendererHelpOptions = "--optical-profile --optical-renderer --optical-quiet-zone --optical-scale"
+const opticalSendHelpOptions = "--optical " + opticalRendererHelpOptions
+const opticalTransferModeHelp = "A positional peer alias selects a peer transfer and rejects optical options. Without a peer alias, --optical selects a local optical transfer; otherwise leading flags select a dead drop. Optical rejects explicit network options, TTL, delete-after-read and no-qr. Dead drop and peer transfers use the server; optical displays or recovers a local encrypted capsule."
 const peerSendHelpOptions = "--message --stdin --name " + transferHelpOptions
 const peerReceiveHelpOptions = "-o --wait --max --on-conflict --no-extract --collection-overwrite --interactive " + transferHelpOptions
 const transferModeHelp = "A positional peer alias selects a peer transfer. A leading flag selects a dead drop. Paired peers reject --url, --doh-url and --ech-mode."
 
 var commandHelpTopics = map[string]helpTopic{
-	"--tui":               {"Open the full-screen transfer interface.", "", "", "dud --tui", "Requires terminal stdin and stdout. The main menu follows send, receive, git, peers, status, setup and tools. Setup initializes a device; peers creates and accepts invitations. Send, receive and Git choose a peer or dead drop. Tab moves between fields; Ctrl+S runs an operation; Esc goes back or stops waiting. Age passphrase prompts use the terminal while the interface is suspended."},
+	"--tui":               {"Open the full-screen transfer interface.", "", "", "dud --tui", "Requires terminal stdin and stdout. The main menu follows send, receive, git, peers, status, setup and tools. Setup initializes a device; peers creates and accepts invitations. Send offers peer, dead drop and optical targets. Optical sending defaults to Kitty and balanced; choose message or files, recipient or passphrase, renderer and profile. Tools includes decrypt optical capsule for a saved receiver file. Tab moves between fields; Ctrl+S runs an operation; Esc goes back or stops waiting. Age and optical display own the terminal while the interface is suspended. Q or Esc ends terminal optical display and returns to the interface."},
 	"version":             {"Print the DUD version.", "", "", "dud --version", ""},
 	"help":                {"Show general or command-specific help.", "", "COMMAND and SUBCOMMAND select the help topic.", "dud help git push", "Use --help or -h on any command. Groups also accept help before a subcommand."},
 	"install":             {"Print a Docker host wrapper script to stdout.", "", "", "dud install > dud-wrapper.sh", ""},
 	"shell-init":          {"Print a Docker shell function definition to stdout.", "", "", "dud shell-init", ""},
 	"test":                {"Check dead drop connectivity and server authorization.", "--json --url --doh-url", "", "dud test --json", ""},
-	"upload":              {"Send a dead drop or a delivery to a paired peer.", dropSendHelpOptions + " " + peerSendHelpOptions, "PEER is the local alias of a paired device.", "dud upload --file report.txt --passphrase", transferModeHelp},
-	"send":                {"Send a delivery to a paired peer or create a dead drop.", dropSendHelpOptions + " " + peerSendHelpOptions, "PEER is the local alias of a paired device.", "dud send laptop -m 'hello'", transferModeHelp + " Publishing returns without waiting for the peer's acknowledgement."},
-	"download":            {"Receive a dead drop or deliveries from a paired peer.", dropReceiveHelpOptions + " " + peerReceiveHelpOptions, "PEER is the local alias of a paired device.", "dud download --id ID --out report.txt", transferModeHelp},
-	"receive":             {"Receive deliveries from a paired peer or recover a dead drop.", dropReceiveHelpOptions + " " + peerReceiveHelpOptions, "PEER is the local alias of a paired device.", "dud receive laptop --out-dir received", transferModeHelp + " Peer receive drains oldest first. --id selects a saved descriptor digest. A Git checkpoint stops the drain and requires git fetch in the matching repository."},
+	"upload":              {"Send a dead drop, a delivery to a paired peer, or an optical transfer.", dropSendHelpOptions + " " + peerSendHelpOptions + " " + opticalSendHelpOptions, "PEER is the local alias of a paired device.", "dud upload --file report.txt --passphrase", opticalTransferModeHelp},
+	"send":                {"Send through a paired peer, a dead drop, or optical transfer.", dropSendHelpOptions + " " + peerSendHelpOptions + " " + opticalSendHelpOptions, "PEER is the local alias of a paired device.", "dud send laptop -m 'hello'", opticalTransferModeHelp + " Publishing returns without waiting for the peer's acknowledgement."},
+	"download":            {"Receive dead drops or peer deliveries.", dropReceiveHelpOptions + " " + peerReceiveHelpOptions, "PEER is the local alias of a paired device.", "dud download --id ID --out report.txt", transferModeHelp},
+	"receive":             {"Receive from a peer or a dead drop.", dropReceiveHelpOptions + " " + peerReceiveHelpOptions, "PEER is the local alias of a paired device.", "dud receive laptop --out-dir received", transferModeHelp + " Peer receive drains oldest first. --id selects a saved descriptor digest. A Git checkpoint stops the drain and requires git fetch in the matching repository."},
+	"optical":             {"Send encrypted QR images or decrypt a capsule saved by the camera receiver.", "", "", "dud optical send --file report.txt --passphrase --optical-renderer kitty", "Camera capture runs in the optical receiver PWA. Decrypting a saved capsule is local file processing."},
+	"optical send":        {"Encrypt local content and display four QR symbols for a camera receiver.", "--file -m --passphrase --recipient -r --recipient-file -R --json " + opticalRendererHelpOptions, "", "dud optical send --file report.txt --passphrase --optical-renderer kitty", "The sender checks display support before reading input or prompting. upload --optical and send --optical also select optical sending. Ending display does not confirm remote receipt."},
+	"optical decrypt":     {"Decrypt and validate a saved optical capsule on a trusted local host.", "--file --out --stdout --extract --out-dir --identity -i --json", "", "dud optical decrypt --file dud-encrypted-capsule.age --out report.txt", "Transfer the capsule saved by the camera receiver to this host first. Decryption uses age and verifies the private container before output. --extract unpacks a collection. Decryption secrets stay outside the receiver PWA."},
 	"flush":               {"Remove server-side dead drops using the configured upload secret.", "--json --url --doh-url", "", "dud flush --json", ""},
 	"keygen":              {"Generate an age identity or derive a public recipient from an identity.", "--pq --out --recipient-out -R --json", "INPUT is an existing identity; omit it to generate a key.", "dud keygen --out identity.txt -R recipient.txt", "Keep the private identity secret; share only its public recipient."},
 	"init":                {"Initialize a device and its local peer profile.", "--device " + networkHelpOptions, "", "dud init --device desktop --url https://dud.example.com", ""},
 	"doctor":              {"Diagnose peer configuration, transport and delivery state.", networkHelpOptions, "", "dud doctor", ""},
-	"capabilities":        {"Report peer server capabilities.", networkHelpOptions, "", "dud capabilities --json", ""},
+	"capabilities":        {"Report local client or peer server capabilities.", networkHelpOptions + " --local", "", "dud capabilities --local --json", "--local reports the compiled dead drop, peer and optical capabilities without configuration or network access."},
 	"migrate":             {"Migrate local peer configuration to its supported layout.", "--json", "", "dud migrate --json", ""},
 	"config":              {"Inspect and validate local peer configuration.", "", "", "dud config show", ""},
 	"config show":         {"Show local peer configuration with secrets redacted.", "--json", "", "dud config show --json", ""},

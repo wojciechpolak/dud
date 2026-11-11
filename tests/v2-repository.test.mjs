@@ -7,8 +7,8 @@ import test from 'node:test';
 import {
   MemoryV2BodyStore,
   MemoryV2Repository,
-} from '../dist/src/v2-memory-repository.js';
-import { sha256 } from '../dist/src/sha256.js';
+} from '../dist/server/src/v2-memory-repository.js';
+import { sha256 } from '../dist/server/src/sha256.js';
 
 const bytes = (length, seed = 0) =>
   Uint8Array.from({ length }, (_, index) => (seed + index) & 0xff);

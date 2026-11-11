@@ -12,12 +12,12 @@ import {
   formatEventLog,
   parseLogFormat,
   redactLogText,
-} from '../dist/src/log.js';
+} from '../dist/server/src/log.js';
 import {
   loadNodeServerConfig,
   startNodeServer,
-} from '../dist/src/node-server.js';
-import { encodeBase64Url } from '../dist/src/v2-auth.js';
+} from '../dist/server/src/node-server.js';
+import { encodeBase64Url } from '../dist/server/src/v2-auth.js';
 
 const DELIVERY_ID = 'a'.repeat(32);
 const RENDEZVOUS_ID = 'd'.repeat(64);

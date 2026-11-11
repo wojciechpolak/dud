@@ -3,11 +3,27 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestUploadCollectionHonorsCommandCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a := newApp(strings.NewReader(""), io.Discard, io.Discard)
+	a.commandCtx = ctx
+	_, err := a.writeUploadPlaintext(filepath.Join(t.TempDir(), "archive"), uploadOptions{
+		files: []string{t.TempDir()},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("upload preparation ignored command cancellation: %v", err)
+	}
+}
 
 func TestParseUploadResponse(t *testing.T) {
 	response, err := parseUploadResponse(

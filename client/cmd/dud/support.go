@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -130,11 +131,18 @@ func (a *app) commandContext() context.Context {
 // sensitive intermediates (plaintext, bundles) if the process is
 // interrupted before its deferred cleanup runs.
 var (
-	tempFilesMu sync.Mutex
-	tempFiles   = map[string]struct{}{}
+	tempFilesMu           sync.Mutex
+	tempFiles             = map[string]struct{}{}
+	tempFilesShuttingDown bool
 )
 
 func tempFile(pattern string) (string, error) {
+	tempFilesMu.Lock()
+	defer tempFilesMu.Unlock()
+	if tempFilesShuttingDown {
+		return "", errors.New("temporary file creation stopped by signal")
+	}
+
 	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return "", err
@@ -149,9 +157,7 @@ func tempFile(pattern string) (string, error) {
 		_ = os.Remove(name)
 		return "", err
 	}
-	tempFilesMu.Lock()
 	tempFiles[name] = struct{}{}
-	tempFilesMu.Unlock()
 	return name, nil
 }
 
@@ -219,3 +225,7 @@ func absPathIfRelative(path string) string {
 	}
 	return filepath.Join(wd, path)
 }
+
+// beginTempShutdown serializes signal cleanup with file creation and registration.
+// A source operation cannot register an intermediate after the final removal.
+func beginTempShutdown() { tempFilesMu.Lock(); tempFilesShuttingDown = true; tempFilesMu.Unlock() }

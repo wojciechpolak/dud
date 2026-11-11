@@ -22,9 +22,10 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 BIN="$ROOT/bin"
 export GOCACHE="${GOCACHE:-/tmp/dud-go-build-cache}"
+export STATICCHECK_CACHE="${STATICCHECK_CACHE:-/tmp/dud-staticcheck-cache}"
 
-# The Go modules in this repository. client ships; the other two are the
-# protocol vector generator and the analyzers themselves.
+# The Go modules in this repository. client ships; the others are the protocol
+# vector generator and analyzers.
 MODULES="client tests/vectors/protocol-v2 tools"
 
 # staticcheck, errcheck, and the analyze vettool type-check one platform at a
@@ -144,16 +145,14 @@ for tool in "${tools[@]}"; do
             echo "--- gocyclo: over $GOCYCLO_OVER"
             code=0
             "$BIN/gocyclo" -over "$GOCYCLO_OVER" \
-                client/cmd/dud tests/vectors/protocol-v2 tools || code=1
+                client tests/vectors/protocol-v2 tools || code=1
             report gocyclo "$code"
             ;;
         deadcode)
-            # The client is one package main whose tests sit beside the
-            # sources. Without -test, every helper that only a test calls
-            # reports as unreachable.
-            echo "--- deadcode: client/cmd/dud"
+            # Optical APIs have consumers in the CLI, development commands and tests.
+            echo "--- deadcode: client and optical consumers"
             code=0
-            output="$(cd client && "$BIN/deadcode" -test ./cmd/dud)" || code=1
+            output="$(cd client && "$BIN/deadcode" -test ./...)" || code=1
             if [ -n "$output" ]; then
                 echo "$output"
                 code=1

@@ -49,7 +49,7 @@ func (model *tuiModel) showHome() tea.Cmd {
 	model.history = nil
 	model.setTheme(model.theme)
 	descriptions := map[string]string{
-		"send":    "Send to a peer or create a dead drop",
+		"send":    "Send through a peer, dead drop or optical transfer",
 		"receive": "Receive from a peer or a dead drop",
 		"git":     "Push, fetch and inspect Git checkpoints",
 		"peers":   "Pair and manage devices",
@@ -108,6 +108,7 @@ func (model *tuiModel) selectHome() tea.Cmd {
 		return model.showMenu("Setup", model.setupActions())
 	case "tools":
 		return model.showMenu("Tools", []list.Item{
+			tuiItem{id: "optical-recover", title: "decrypt optical capsule", description: "Decrypt a saved capsule transferred from the camera receiver"},
 			tuiItem{id: "transport-test", title: "transport test", description: "Check the dead drop server"},
 			tuiItem{id: "keygen-menu", title: "keygen", description: "Generate an identity or derive recipients"},
 			tuiItem{id: "flush", title: "flush expired dead drop files", description: "Clean expired files on the dead drop server"},
@@ -166,6 +167,9 @@ func (model *tuiModel) selectTarget() tea.Cmd {
 }
 
 func (model *tuiModel) openForm(action string) tea.Cmd {
+	if model.target.optical && (action == "message" || action == "files") {
+		action = "optical-" + action
+	}
 	model.form = newTUIForm(action, model.target.deadDrop)
 	if isTUISetupAction(action) {
 		model.prepareSetupForm()

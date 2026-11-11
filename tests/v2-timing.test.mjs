@@ -8,8 +8,8 @@ import {
   V2_TIMED_OPERATIONS,
   classifyV2Operation,
   startV2Timing,
-} from '../dist/src/v2-timing.js';
-import { MemoryV2Store } from '../dist/src/v2-memory.js';
+} from '../dist/server/src/v2-timing.js';
+import { MemoryV2Store } from '../dist/server/src/v2-memory.js';
 import { makeContext } from './helpers.mjs';
 import {
   V2_DATA_SLOT,

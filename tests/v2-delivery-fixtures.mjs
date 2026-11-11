@@ -13,8 +13,8 @@ import {
   buildV2DeliveryProof,
   deriveV2DailyCapabilityLookupId,
   encryptV2TokenSecret,
-} from '../dist/src/v2-auth.js';
-import { decodeCbor, encodeCbor } from '../dist/src/cbor.js';
+} from '../dist/server/src/v2-auth.js';
+import { decodeCbor, encodeCbor } from '../dist/server/src/cbor.js';
 import {
   encodeV2DeliveryFrame,
   v2CompletionRequestAuthorizationDigest,
@@ -26,19 +26,19 @@ import {
   V2_DELIVERY_REQUEST_KEYS,
   V2_INBOX_REQUEST_KEYS,
   V2_SLOT_PROOF_KEYS,
-} from '../dist/src/v2-delivery-frame.js';
-import { createV2DeliveryHandler } from '../dist/src/v2-delivery-service.js';
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
+} from '../dist/server/src/v2-delivery-frame.js';
+import { createV2DeliveryHandler } from '../dist/server/src/v2-delivery-service.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
 import {
   MemoryV2BodyStore,
   MemoryV2Repository,
-} from '../dist/src/v2-memory-repository.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
+} from '../dist/server/src/v2-memory-repository.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
 import {
   V2_CBOR_CONTENT_TYPE,
   V2_CONTENT_SHA256_HEADER,
-} from '../dist/src/v2-http.js';
+} from '../dist/server/src/v2-http.js';
 import { createMigratedLocalD1, LocalD1Database } from './d1-local.mjs';
 import { V2_ORIGIN } from './v2-helpers.mjs';
 

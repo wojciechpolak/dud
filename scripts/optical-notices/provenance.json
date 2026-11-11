@@ -1,0 +1,80 @@
+{
+  "ebiten": {
+    "version": "v2.9.7",
+    "sourceCommit": "e5c886370fe341524305173d43ae53de2afcc11e",
+    "sum": "h1:WuNgM24uJxwdLZLqM8SXLAGVBof/45udRjo2tJoTpM0=",
+    "goModSum": "h1:DAt4tnkYYpCvu3x9i1X/nK/vOruNXIlYq/tBXxnhrXM="
+  },
+  "font": {
+    "asset": "ebitenutil/text.png",
+    "bytes": 3743,
+    "sha256": "b88c6afcc98cf3a58fbb7cc938f4d0d0ff353ef54b2d42980a71f41e5d60868a",
+    "exactByteMatch": true,
+    "originCommit": "faca493fbc993d3ee06782369ada6c3613a30abd",
+    "originGeneratorSHA256": "ccd45f3f6c4feae6c037aa1ce506ccbf0c844ee28a3665abcdd0a8722c423691",
+    "originGoModSHA256": "39ed5b0d15c2afb15b74d997efddd76b6c4a35e6fbd088110494ca211d561bb7",
+    "toolchain": "go version go1.20.2 darwin/arm64",
+    "dependencies": [
+      "github.com/hajimehoshi/bitmapfont/v2 v2.2.3",
+      "golang.org/x/image v0.6.0",
+      "golang.org/x/text v0.8.0"
+    ],
+    "glyphRange": "U+0000 through U+00FF; source selection routes this range to misc-fixed",
+    "bdf": {
+      "bytes": 512118,
+      "sha256": "d00cf1cbaed055bb91d11c80e063d5d2d3b66552a7f2ead7161ee3780f9123f0"
+    },
+    "bdfNotice": "Public domain font.  Share and enjoy.",
+    "upstreamNoticeReference": "https://www.cl.cam.ac.uk/~mgk25/ucs-fonts.html",
+    "toolchainEvidenceLimit": "Go 1.20.2 reproduces the exact bytes; the original generator operator and toolchain are not independently attested."
+  },
+  "controllers": {
+    "upstreamCommit": "38fc811c715365e963a6942092cae147eddddc90",
+    "upstreamBlob": "979e950680d72e569ae6c2239d39321c7c4c85d4",
+    "sourceBytes": 583682,
+    "sourceSHA256": "622d8f001c70a7784672ea14035c98f7d34fafed99a272b63a3efbe3542e217c",
+    "fullSourceByteMatch": true,
+    "generatorSHA256": "92f4563fd0446e586bdd424b23cee0138773d1de03c7c9357d61a511bf4f3014",
+    "license": {
+      "bytes": 884,
+      "sha256": "97f35b302b361680ec1e891e95d2d52097bb95abff361434916d99dc1305f127"
+    },
+    "databases": [
+      {
+        "target": "android",
+        "asset": "internal/gamepaddb/gamecontrollerdb_android.txt",
+        "bytes": 74858,
+        "sha256": "e65c8e451e06077342e50da4e07d67c6f0fbe1d92950c387a4cc09385aa265af",
+        "exactByteMatch": true
+      },
+      {
+        "target": "ios",
+        "asset": "internal/gamepaddb/gamecontrollerdb_ios.txt",
+        "bytes": 10003,
+        "sha256": "521fef1967277a743e0fe07481959595cdcfbf14368708a25bc1a16eb2f257bf",
+        "exactByteMatch": true
+      },
+      {
+        "target": "linbsd",
+        "asset": "internal/gamepaddb/gamecontrollerdb_linbsd.txt",
+        "bytes": 191256,
+        "sha256": "33591d31de6588aabd8437f1e5e3e126794cc9cc08a439a5f9a92ff0f46b9630",
+        "exactByteMatch": true
+      },
+      {
+        "target": "macos",
+        "asset": "internal/gamepaddb/gamecontrollerdb_macos.txt",
+        "bytes": 82954,
+        "sha256": "27f952c5464bb8c3522f5a8c07effadd3328e6de2f5cbcaf994ade6f31e110fe",
+        "exactByteMatch": true
+      },
+      {
+        "target": "windows",
+        "asset": "internal/gamepaddb/gamecontrollerdb_windows.txt",
+        "bytes": 224457,
+        "sha256": "e7a2cf2efbb3870d642b7b96a5ea572f5681bb4012389d2fd5be58511a6420a3",
+        "exactByteMatch": true
+      }
+    ]
+  }
+}

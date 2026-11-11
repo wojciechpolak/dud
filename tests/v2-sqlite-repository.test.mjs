@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
 
 const bytes = (length, seed = 0) =>
   Uint8Array.from({ length }, (_, index) => (seed + index) & 0xff);

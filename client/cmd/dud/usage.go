@@ -13,10 +13,11 @@ const usageText = `Usage:
   dud COMMAND --help
   dud --version
   dud --tui          Open the full-screen transfer interface
+  dud capabilities --local [--json]   Report this binary's capabilities offline
   dud install        Print a host wrapper script to stdout
   dud shell-init     Print a shell function definition to stdout
 
-Dead-drop commands (addressed by an opaque ID, shared out of band):
+Dead drop commands (addressed by an opaque ID):
   dud test [--json] [--url URL] [--doh-url URL]
   dud upload [--file PATH ... | -m TEXT] [--ttl 24h] [--delete-after-read] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--json] [--no-qr] [--url URL] [--doh-url URL]
   dud download --id ID (--out PATH | --stdout | --extract [--out-dir PATH]) [--identity PATH] [--json] [--url URL] [--doh-url URL]
@@ -25,6 +26,44 @@ Dead-drop commands (addressed by an opaque ID, shared out of band):
   dud flush [--json] [--url URL] [--doh-url URL]
   dud keygen [--pq] [--out PATH] [-R PATH] [--json]
   dud keygen [INPUT] [--out PATH | -R PATH] [--json]
+
+Optical commands (local screen-to-camera transfer):
+  dud optical send [--file PATH ... | -m TEXT] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--optical-profile high-rate|balanced] [--optical-renderer window|terminal|kitty] [--optical-quiet-zone 4..16] [--optical-scale 1..16] [--json]
+  dud optical decrypt --file CAPSULE (--out PATH | --stdout | --extract [--out-dir PATH]) [--identity PATH] [--json]
+  dud upload --optical [--file PATH ... | -m TEXT] [--passphrase | --recipient AGE_RECIPIENT | --recipient-file PATH] [--optical-profile high-rate|balanced] [--optical-renderer window|terminal|kitty] [--optical-quiet-zone 4..16] [--optical-scale 1..16] [--json]
+
+Optical upload:
+  Optical encrypts locally and displays four QR symbols without server access.
+  The default is high-rate, window, quiet zone 4 and integer scale 2.
+  Balanced uses Version 30 L at 30 FPS; high-rate uses Version 40 L at 60 FPS.
+  A window needs a nativewindow build and the sibling dud-optical-window helper.
+  Terminal fallback is explicit and requires enough cells for all four symbols.
+  Kitty uses terminal pixel graphics on Linux/macOS, including Docker with -it.
+  Kitty fills available pixels at an integer module scale; optical-scale is its minimum.
+  Display availability and dimensions are checked before reading or encrypting.
+  Optical rejects explicit --ttl, --delete-after-read, --url, --doh-url and --no-qr.
+  Close the window or press Q/Escape to end display. SIGINT exits with code 130.
+  Ending display does not confirm receipt. --json reports only the local outcome.
+
+Optical receiver:
+  Open /optical/ on a trusted HTTPS host and wait for offline installation.
+  The PWA receives local ciphertext; it does not fetch HTTP dead drops or peers.
+  Select the sender's profile, allow the camera and keep all four symbols visible.
+  Pause camera keeps progress in memory; Resume camera uses the same sender.
+  Stop / reset clears transfer data. Backgrounding, reload and tab close lose it.
+  The 15-minute receipt deadline includes pauses. Save requires complete verification.
+  Save writes only dud-encrypted-capsule.age. Never enter decryption secrets in the PWA.
+  Complete ciphertext is limited to 64 MiB, including container and age overhead.
+  Device rates and memory require measurements; profile FPS is a configured cap.
+
+Optical recovery:
+  Move the PWA-saved dud-encrypted-capsule.age to a trusted native host.
+  optical decrypt uses age locally and validates the complete capsule before output.
+  Omit --identity for passphrase prompting; identity files use native X25519 or hybrid keys.
+  --out creates an unused file with mode 0600; --stdout emits validated payload bytes.
+  --extract accepts collections and defaults to the working directory.
+  Extraction rejects existing top-level paths and applies bounded archive rules.
+  --json reports native validation and the absolute output path; it rejects --stdout.
 
 Peer commands (addressed by the local alias of a paired device):
   dud init --device NAME [--url URL] [--doh-url URL] [--ech-mode hard|off] [--json]
@@ -101,7 +140,9 @@ Peer transfer progress:
 Aliases:
   dud send, dud receive          a positional peer alias selects the peer
                                  command; a leading flag selects upload or
-                                 download, so both spellings reach both modes
+                                 download; otherwise selects a dead drop
+  dud upload --optical, dud send --optical
+                                aliases for dud optical send
   dud git send, dud git receive  aliases for dud git push and dud git fetch
 
 Environment:
@@ -112,7 +153,7 @@ Environment:
   DUD_DOH_URL         DNS-over-HTTPS resolver.
                       Default: https://cloudflare-dns.com/dns-query
   DUD_ECH_MODE        ECH mode. Allowed: hard, off. Default: hard
-  DUD_DROP_SECRET     Shared secret required for dead drop upload and flush
+  DUD_DROP_SECRET     Shared secret required for HTTP dead drop upload and flush
   DUD_PEER_SECRET     Enrollment secret for creating invitations on a gated
                       deployment. Only the inviter needs it. The invitee uses
                       the pairing code. Run 'dud peer enrollment-key' to turn
@@ -128,7 +169,7 @@ Environment:
   DUD_IMAGE           Docker image used by install/shell-init output
   DUD_PROFILE         Peer world under the DUD root. NAME starts with a letter
                       or digit and may also contain '.', '_', or '-'. Dead drop
-                      commands ignore it and read no configuration file
+                      and optical commands ignore it and read no configuration file
 
 Dead drop network options:
   DUD resolves the base URL in this order: command line, DUD_DROP_BASE_URL,
@@ -153,7 +194,7 @@ Peer local state:
   contains one device identity, one seed, and one peer graph. Use another
   profile for another deployment. The whole DUD root is secret. Do not sync it.
 
-  Every network operation rejects DUD_CONNECT_TO. Both modes require a
-  canonical HTTPS origin, HTTPS DoH, and TLS 1.3. ECH uses hard mode unless you
-  select off.
+  Every network operation rejects DUD_CONNECT_TO. HTTP dead drops and peer
+  transfers require a canonical HTTPS origin, HTTPS DoH, and TLS 1.3. ECH uses
+  hard mode unless you select off. Optical commands perform no network transfer.
 `

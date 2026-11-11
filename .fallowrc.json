@@ -1,21 +1,85 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
   "entry": [
-    "src/index.ts",
-    "src/node-server.ts",
-    "src/v2-admin.ts",
-    "src/v2-d1-auth-repository.ts",
-    "src/v2-memory-repository.ts",
-    "src/v2-memory.ts",
-    "tests/v2-doh-server.mjs"
+    "server/src/index.ts",
+    "server/src/node-server.ts",
+    "server/src/v2-admin.ts",
+    "server/src/v2-d1-auth-repository.ts",
+    "server/src/v2-memory-repository.ts",
+    "server/src/v2-memory.ts",
+    "server/optical-receiver/src/app.ts",
+    "server/optical-receiver/src/decoder-worker.ts",
+    "server/optical-receiver/src/simulator.ts",
+    "server/optical-receiver/src/vector-gen.ts",
+    "server/optical-receiver/public/styles.css",
+    "server/optical-receiver/public/sw.js",
+    "server/optical-receiver/test/codec.test.mjs",
+    "server/optical-receiver/test/fuzz.test.mjs",
+    "server/optical-receiver/test/pwa.test.mjs",
+    "server/optical-receiver/test/runtime.test.mjs",
+    "tests/v2-doh-server.mjs",
+    "server/optical-receiver/src/fountain-worker.ts",
+    "scripts/build-release-binaries.mjs",
+    "scripts/install-release.mjs",
+    "server/optical-receiver/corpus/generate.mjs",
+    "server/optical-receiver/bench-*.mjs",
+    "server/optical-receiver/profile-*.mjs",
+    "server/optical-receiver/isolated-fountain-*.mjs"
   ],
+  "ignoreDependencies": ["c8"],
   "ignoreExports": [
     {
-      "file": "src/log.ts",
+      "file": "server/optical-receiver/src/replay-image.ts",
+      "exports": [
+        "MAX_REPLAY_PNG_BYTES",
+        "MAX_REPLAY_IMAGE_SIDE",
+        "MAX_REPLAY_IMAGE_PIXELS",
+        "validateReplayPNGHeader"
+      ]
+    },
+    {
+      "file": "server/optical-receiver/src/codec.ts",
+      "exports": [
+        "FRAME_SIZE",
+        "HIGH_DENSITY_FRAME_SIZE",
+        "MAX_SOURCE_BLOCKS",
+        "MAX_STRIPE_COUNT",
+        "MAX_ACTIVE_STRIPES",
+        "MAX_ACTIVE_SESSIONS",
+        "MAX_DISTINCT_FRAMES",
+        "MAX_RETAINED_EQUATIONS",
+        "MAX_DECODER_WORK_BYTES",
+        "MAX_EQUATION_STORAGE_BYTES",
+        "MAX_DECODER_TYPED_STORAGE_BYTES",
+        "parseFrame"
+      ]
+    },
+    {
+      "file": "server/optical-receiver/src/pipeline.ts",
+      "exports": ["MAX_PIPELINE_FRAMES"]
+    },
+    {
+      "file": "server/optical-receiver/src/scan-cadence.ts",
+      "exports": ["CAMERA_SCAN_FPS"]
+    },
+    {
+      "file": "server/optical-receiver/src/scan-region.ts",
+      "exports": ["MAX_SCAN_DIMENSION"]
+    },
+    {
+      "file": "server/optical-receiver/src/worker-pool.ts",
+      "exports": ["recordDecodedImage"]
+    },
+    {
+      "file": "server/src/optical-pwa.ts",
+      "exports": ["OPTICAL_PWA_BUILD"]
+    },
+    {
+      "file": "server/src/log.ts",
       "exports": ["redactLogText"]
     },
     {
-      "file": "src/v2-auth.ts",
+      "file": "server/src/v2-auth.ts",
       "exports": [
         "buildV2DeliveryProof",
         "encryptV2TokenSecret",
@@ -23,7 +87,7 @@
       ]
     },
     {
-      "file": "src/v2-contract.ts",
+      "file": "server/src/v2-contract.ts",
       "exports": [
         "V2_REQUIRED_PEER_FEATURES",
         "V2_REQUIRED_GIT_FEATURES",
@@ -34,7 +98,7 @@
       ]
     },
     {
-      "file": "src/v2-delivery-frame.ts",
+      "file": "server/src/v2-delivery-frame.ts",
       "exports": [
         "V2_MAX_BATCHED_SLOT_PROOFS",
         "encodeV2DeliveryFrame",
@@ -44,28 +108,40 @@
       ]
     },
     {
-      "file": "src/v2-http.ts",
+      "file": "server/src/v2-http.ts",
       "exports": ["V2_CBOR_CONTENT_TYPE", "V2_CONTENT_SHA256_HEADER"]
     },
     {
-      "file": "src/v2-maintenance.ts",
+      "file": "server/src/v2-maintenance.ts",
       "exports": ["MAINTENANCE_MAX_BATCHES"]
     },
     {
-      "file": "src/v2-pairing.ts",
+      "file": "server/src/v2-pairing.ts",
       "exports": ["registerActivationCapabilities"]
     },
     {
-      "file": "src/v2-r2.ts",
+      "file": "server/src/v2-r2.ts",
       "exports": ["R2V2Store"]
     },
     {
-      "file": "src/v2-sqlite-schema.ts",
+      "file": "server/src/v2-sqlite-schema.ts",
       "exports": ["V2_SQLITE_MIGRATIONS"]
     },
     {
-      "file": "src/v2-timing.ts",
+      "file": "server/src/v2-timing.ts",
       "exports": ["V2_TIMED_OPERATIONS"]
+    },
+    {
+      "file": "server/optical-receiver/src/progress-gaps.ts",
+      "exports": ["MAX_RECORDED_PROGRESS_GAPS"]
+    },
+    {
+      "file": "server/optical-receiver/src/qr-image.ts",
+      "exports": ["QR_IMAGE_LIMITS"]
+    },
+    {
+      "file": "server/optical-receiver/src/receiver-updates.ts",
+      "exports": ["readReceiverBuild"]
     }
   ],
   "usedClassMembers": [
@@ -154,6 +230,12 @@
   ],
   "overrides": [
     {
+      "files": ["server/optical-receiver/public/index.html"],
+      "rules": {
+        "unresolved-imports": "off"
+      }
+    },
+    {
       "files": ["tests/**/*.mjs"],
       "rules": {
         "unused-class-members": "off"
@@ -167,11 +249,17 @@
     "coverage": "coverage/fallow/coverage-final.json",
     "thresholdOverrides": [
       {
-        "files": ["tests/**"],
+        "files": ["server/optical-receiver/**"],
+        "maxCrap": 421,
+        "reason": "The Istanbul map records server tests; receiver tests exercise compiled JavaScript and cannot supply TypeScript function coverage. Cyclomatic and cognitive limits still apply."
+      },
+      {
+        "files": ["tests/**", "server/optical-receiver/test/**"],
         "maxCrap": 1000000,
         "reason": "Test code is what exercises the rest of the tree; no suite measures coverage of the tests themselves, so a CRAP score there has no coverage to weigh. Complexity limits still apply."
       }
     ]
   },
-  "rules": {}
+  "rules": {},
+  "ignorePatterns": []
 }

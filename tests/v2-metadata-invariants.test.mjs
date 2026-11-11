@@ -8,8 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
 import { readD1Migrations } from './d1-local.mjs';
 
 const bytes = (length, seed) =>

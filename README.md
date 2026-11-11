@@ -3,7 +3,8 @@
 Discreet upload / download with either a Cloudflare Worker backed by R2 or a
 self-hosted Node server backed by local disk, plus a Go client that carries its
 own HTTPS transport and uses `age` and `age-keygen`. The client ships as a
-Docker image or as a native binary.
+Docker image or as a native binary. Optical transfers display locally encrypted
+bytes as QR symbols for a camera PWA, with decryption on a trusted native host.
 
 ![Desktop pairs with laptop, then sends it an encrypted file.](docs/assets/peer-overview.gif)
 
@@ -13,12 +14,12 @@ name. For one-off sharing, use a dead drop addressed by an opaque ID.
 ## What this does
 
 - Encrypts and decrypts every payload on the client with `age`: a passphrase or
-  a recipient public key for a dead drop, the peer's hybrid post-quantum
-  recipient for a peer transfer.
+  a recipient public key for a dead drop or optical transfer, the peer's hybrid
+  post-quantum recipient for a peer transfer.
 - Uploads only ciphertext. The server stores opaque bodies and bounded metadata
   and holds no key that opens them.
-- Addresses a dead drop by an opaque ID handed to the recipient out of band, and
-  a peer transfer by the local alias of a device you paired with once.
+- Addresses an HTTP dead drop by an opaque ID handed to the recipient out of
+  band, and a peer transfer by the local alias of a device you paired with once.
 - Authenticates the sender of a peer transfer with its Ed25519 device identity,
   sequences deliveries against a hash chain the receiver acknowledges, and can
   revoke a relationship when a device or its state is lost.
@@ -31,13 +32,14 @@ name. For one-off sharing, use a dead drop addressed by an opaque ID.
 - Opportunistically cleans up expired or consumed objects during normal traffic,
   on both the R2 and filesystem backends.
 - Verifies secure transport from the client with in-process DoH, exactly TLS
-  1.3, and ECH, using `hard` by default, before either mode moves data.
+  1.3, and ECH, using `hard` by default, for HTTP dead drops and peer transfers.
 
 <!-- prettier-ignore -->
 > [!IMPORTANT]
-> There is no web UI, and there will not be one. A browser cannot enforce ECH
-> hard mode, DoH, or exactly TLS 1.3 the way the DUD client does, and those
-> checks are what the threat model rests on.
+> HTTP dead drops and peer transfers use the native client to enforce ECH hard
+> mode, DoH and exactly TLS 1.3. The optical PWA receives ciphertext locally
+> from a screen and saves it for native decryption. It is not a browser HTTP
+> dead drop or peer client, and it accepts no passphrase or identity.
 
 <!-- prettier-ignore -->
 > [!TIP]
@@ -54,62 +56,112 @@ Stack:
 - [DoH](https://en.wikipedia.org/wiki/DNS_over_HTTPS)
 - [ECH](https://en.wikipedia.org/wiki/Server_Name_Indication#Encrypted_Client_Hello)
 
-DUD assumes bring-your-own infrastructure: a Cloudflare Worker with R2 for a
-managed edge deployment, or the Node server on your own host. No public shared
-instance is required or assumed.
+Dead drop and peer transfers use bring-your-own infrastructure: a Cloudflare
+Worker with R2 for a managed edge deployment, or the Node server on your own
+host. No public shared instance is required or assumed. Optical uses a trusted
+HTTPS host to install the receiver PWA and transfers payloads locally.
 
-## Two ways to transfer: dead drops and peers
+## Three ways to transfer: dead drops, peers and optical
 
-DUD has two transfer modes. Both ship permanently in the same binary, and
-neither one is on its way out; they answer different questions.
+DUD has three transfer modes, available in the same client.
 
 A **dead drop** is addressed by an opaque ID. Encrypt to a passphrase or an
-`age` recipient, upload, and hand the ID to the other side out of band. Nothing
-is remembered between runs, and the ID is the whole credential.
+`age` recipient, upload, and hand the ID to the other side out of band. The
+server holds ciphertext until expiry or deletion.
 
-A **peer** transfer is addressed by the local alias of a device you have paired
-with. Pair once, and `dud send laptop` works from then on. Everything that
-crosses the relationship is signed by the sender, sequenced, acknowledged, and
-revocable.
+A **peer** transfer is addressed by the local alias of a paired device. Pair
+once, and `dud send laptop` works from then on. Deliveries are signed by the
+sender, sequenced, acknowledged and revocable.
 
-| Property                     | Dead drop `upload -r`                | Peer `send PEER`                   |
-| ---------------------------- | ------------------------------------ | ---------------------------------- |
-| Payload encryption           | `age` recipient; X25519 unless `-pq` | `age` hybrid PQ recipient, always  |
-| Post-quantum payloads        | opt-in, per upload                   | mandatory, signed `kem_alg`        |
-| Sender authenticity          | none                                 | Ed25519, domain-separated          |
-| Recipient key                | supplied per upload; static          | from pairing; per relationship     |
-| Reaching the recipient       | opaque ID, shared out of band        | slot from relationship secret      |
-| Replay / rollback resistance | none                                 | hash-chained sequences, watermarks |
-| Revocation                   | none                                 | `peer revoke`, epochs, reissue     |
+An **optical** transfer displays locally encrypted bytes as QR symbols for a
+camera PWA. It needs no payload server, opaque ID or pairing. The PWA saves
+ciphertext for recovery on a trusted native host. Use `optical send` and
+`optical decrypt`. `upload --optical` and `send --optical` also select optical
+sending.
 
-Payload confidentiality is the same primitive in both modes once a drop is made
-to a post-quantum recipient: peer transfers encrypt to the hybrid
-MLKEM768-X25519 recipient that `age-keygen -pq` also produces. What peer mode
-adds sits around the cipher: sender authentication, freshness, revocation, and
-no long-lived public identifier for anyone to correlate. What it costs is reach.
-Peer mode only talks to devices you have paired with, which is why
+| Property                     | Dead drop `upload -r`                | Peer `send PEER`                   | Optical `optical send -r`               |
+| ---------------------------- | ------------------------------------ | ---------------------------------- | --------------------------------------- |
+| Payload encryption           | `age` recipient; X25519 unless `-pq` | `age` hybrid PQ recipient, always  | `age` native X25519 or hybrid recipient |
+| Post-quantum payloads        | opt-in, per upload                   | mandatory, signed `kem_alg`        | opt-in, per transfer                    |
+| Sender authenticity          | none                                 | Ed25519, domain-separated          | none                                    |
+| Recipient key                | supplied per upload; static          | from pairing; per relationship     | supplied per transfer; static           |
+| Reaching the recipient       | opaque ID, shared out of band        | slot from relationship secret      | screen visible to the camera            |
+| Payload server               | required                             | required                           | none                                    |
+| Replay / rollback resistance | none                                 | hash-chained sequences, watermarks | none                                    |
+| Receipt acknowledgement      | none                                 | signed by the peer                 | none                                    |
+| Revocation                   | none                                 | `peer revoke`, epochs, reissue     | none                                    |
+
+All three modes use native `age` encryption. Dead drop and optical transfers can
+use passphrases or supplied recipients; a hybrid recipient selects the
+MLKEM768-X25519 primitive used by peers. Peer mode adds sender authentication,
+freshness, revocation and delivery tracking. It requires a paired device, so
 `dud send PEER` rejects `--recipient` and `--passphrase`.
 
-Neither mode has post-quantum signatures or forward secrecy. `age` offers no
-post-quantum signature type, so sender authentication stays Ed25519, and peer
-recipients derive from a long-lived device seed. See
-[`docs/threat-model-v2.md`](docs/threat-model-v2.md) section 2 for the full
-guarantee table and section 3.21 for the quantum reasoning.
+The modes provide no post-quantum signatures or forward secrecy. Peer sender
+authentication uses Ed25519, and peer recipients derive from a long-lived device
+seed. See [`docs/threat-model-v2.md`](docs/threat-model-v2.md) sections 2 and
+3.21 for the peer guarantees and quantum reasoning.
 
-A dead drop reaches someone you have not paired with, and it is the only way to
-reach them. Pair when you expect to keep exchanging data with the same device.
+Choose a dead drop for server-mediated sharing without pairing, a peer for
+repeated exchanges with a paired device, or optical for a local screen-to-camera
+transfer. Optical installation and updates require a trusted HTTPS host; receipt
+and native recovery work offline. Dead drop and peer network transfers use DoH,
+ECH and TLS 1.3.
 
-The wire protocols behind the two modes are versioned `v1` and `v2`. Those
-numbers appear where they name something literal, such as the `/v1/` and `/v2/`
-routes and the file names of the protocol documents. What an operator configures
-is named by mode instead: `DUD_DROP_*` for dead drops, `DUD_PEER_*` for peers.
-In prose the modes are called drops and peers.
+The network APIs use `/v1/` for dead drops and `/v2/` for peers. Optical uses
+`dud/optical/1`. These protocol identifiers are independent of the DUD release
+number. Configuration follows the mode names: `DUD_DROP_*`, `DUD_PEER_*` and
+`DUD_OPTICAL_*`.
+
+## Optical transfers without a payload server
+
+Select and install a [client package](docs/optical-distribution.md) for your
+host. The macOS arm64 desktop archive includes the default window renderer and
+its matching helper. Plain binaries, Docker and Homebrew provide explicit
+terminal display and native recovery. Check the installed capabilities:
+
+```sh
+dud capabilities --local --json
+dud optical send --file input.bin --passphrase --optical-profile balanced
+```
+
+Open the receiver at `https://YOUR_HOST/optical/`, wait for offline
+installation, then select **30 FPS full frame** (balanced) and press **Start
+camera**. Keep all four QR symbols inside the guide. Start the native window
+with click, Space or Enter. Once receipt completes, press **Save encrypted
+capsule**, move `dud-encrypted-capsule.age` to a trusted native host and recover
+it there:
+
+```sh
+dud optical decrypt --file dud-encrypted-capsule.age --out recovered.bin
+```
+
+Enter the original passphrase only at the native age prompt. Choose an unused
+output path. For recipient encryption use `--recipient RECIPIENT` when sending
+and `--identity key.txt` when recovering. Collections use repeated `--file` or a
+directory, then `--extract --out-dir recovered` on recovery.
+
+**Pause camera** keeps progress in memory for the same sender; **Stop / reset**
+discards it. Reloading, closing or backgrounding the page loses progress. The
+15-minute receipt deadline includes pauses. The 64 MiB limit applies to complete
+ciphertext, so container and age overhead reduce usable input size. Profile FPS
+does not promise camera goodput or phone memory. A headless sender must select
+`--optical-renderer kitty` for Kitty pixel graphics on Linux/macOS (including
+Linux Docker with `-it`), or `--optical-renderer terminal` for ANSI block
+glyphs. Both require room for all four symbols; Kitty uses pixel dimensions
+independently of the font's cell count.
+
+Operators enable only static receiver hosting with
+`DUD_OPTICAL_PWA_ENABLED=true`. See the
+[hosting and trust instructions](docs/server-v2.md#host-an-optical-transfer-receiver),
+[complete workflow and errors](docs/optical.md), and
+[client packages and receiver hosting trust](docs/optical-distribution.md).
 
 ## Quick start
 
-A DUD setup is a client you install once and a server you deploy. Install the
-client first. The deployment paths below end by pointing it at the hostname they
-produced, and one of them derives a credential with it.
+A dead drop or peer setup is a client you install once and a server you deploy.
+Install the client first. The deployment paths below end by pointing it at the
+hostname they produced, and one of them derives a credential with it.
 
 ### Install the client
 
@@ -140,6 +192,13 @@ peer state in the user's `.dud` directory directly:
 curl -fL -o dud https://github.com/wojciechpolak/dud/releases/latest/download/dud-linux-amd64
 sudo install -m 0755 dud /usr/local/bin/dud
 ```
+
+The plain native binaries, Docker wrapper and Homebrew formula are headless.
+They support optical transfer recovery and explicitly selected terminal display.
+A window needs the verified desktop package and its sibling helper. Run
+`dud capabilities --local --json` to inspect the installed capability set. See
+[Optical transfer distribution](docs/optical-distribution.md) for package
+selection and installation.
 
 Release assets are plain HTTPS downloads, so no GitHub CLI is required.
 `/releases/latest/download/` resolves to the newest stable release and never to
@@ -440,7 +499,7 @@ unit.
 
 ## First transfer
 
-Both modes below assume the client from
+The dead drop and peer examples below assume the client from
 [Install the client](#install-the-client) and a deployment to point it at.
 `/work` in these examples is the directory you run `dud` from, which the wrapper
 mounts under that name; a native binary takes ordinary host paths instead.
@@ -486,7 +545,8 @@ second deployment, need `DUD_PROFILE`. See
 [`docs/client.md`](docs/client.md#3-running-more-than-one-deployment).
 
 Running `dud` with no command in a terminal opens an interactive menu that
-covers both modes.
+covers dead drop and peer transfers. Use the optical CLI commands for
+screen-to-camera transfers.
 
 Run `dud --tui` for a full-screen interface with the same main menu as the
 interactive CLI. Initialize a device, pair peers, transfer messages and files
@@ -535,8 +595,8 @@ docker run --rm -p 8787:8787 \
 ```
 
 Container defaults are `DUD_DATA_DIR=/data`, `DUD_LISTEN_HOST=0.0.0.0`, and
-`DUD_LISTEN_PORT=8787`. The image starts `node dist/src/node-server.js` under
-`tini` as the non-root `dud` user; mount `/data` to persist uploads across
+`DUD_LISTEN_PORT=8787`. The image starts `node dist/server/src/node-server.js`
+under `tini` as the non-root `dud` user; mount `/data` to persist uploads across
 restarts. The checked-in `docker-compose.yml` already persists it in the named
 volume `dud_data`.
 

@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { decodeV2InboxResponseFrame } from '../dist/src/v2-delivery-frame.js';
+import { decodeV2InboxResponseFrame } from '../dist/server/src/v2-delivery-frame.js';
 import {
   createDeliveryFixture,
   decodeBody,

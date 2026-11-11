@@ -1,9 +1,11 @@
 # DUD Documentation
 
-DUD has two transfer modes, and neither replaces the other. A **dead drop** is
-addressed by an opaque ID shared out of band. A **peer** transfer is addressed
-by the local alias of a device you have paired with. The [README](../README.md)
-introduces both and covers deployment; everything below goes deeper.
+DUD has three transfer modes. A **dead drop** is addressed by an opaque ID
+shared out of band. A **peer** transfer is addressed by the local alias of a
+paired device. An **optical** transfer sends locally encrypted bytes from a
+screen to a camera PWA, without a payload server or pairing. The
+[README](../README.md) introduces all three and covers deployment; everything
+below goes deeper.
 
 ## Using DUD
 
@@ -11,6 +13,12 @@ introduces both and covers deployment; everything below goes deeper.
   and reading the status block
 - [`dead-drops-v1.md`](dead-drops-v1.md) — upload, download, keys, Git sync by
   ID, and the `/v1` HTTP API
+- [`optical.md`](optical.md) explains optical transfer commands, receiver
+  controls and native recovery
+- [`optical-dependencies.md`](optical-dependencies.md) describes browser/native
+  dependencies and notices
+- [`optical-distribution.md`](optical-distribution.md) explains client
+  capabilities, installation and receiver hosting trust
 - [`client.md`](client.md) — client environment, configuration layers, profiles,
   wrappers, JSON output, and the interactive menu
 - [`git-sync-v2.md`](git-sync-v2.md) — Git checkpoints between paired devices
@@ -28,6 +36,8 @@ introduces both and covers deployment; everything below goes deeper.
 
 ## Design
 
+- [`protocol-optical.md`](protocol-optical.md) defines the optical transfer byte
+  contract and executable vectors
 - [`protocol-v2.md`](protocol-v2.md) — the v2 wire format, identity derivation,
   pairing, descriptors, authorization, transport, endpoints, and test vectors
 - [`threat-model-v2.md`](threat-model-v2.md) — adversaries, guarantees, known
@@ -39,3 +49,8 @@ introduces both and covers deployment; everything below goes deeper.
 
 - [`development.md`](development.md) — repository layout, commands, coverage,
   local HTTPS, integration testing, and the documentation rules
+
+- [`optical-verification.md`](optical-verification.md): automated checks and the
+  limits of desktop, worker, phone and terminal measurements
+- [`../server/optical-receiver/README.md`](../server/optical-receiver/README.md):
+  receiver source, dependencies, builds and development tools

@@ -5,28 +5,29 @@
   "description": "Discreet upload / download with Cloudflare or self-hosted backends and a Dockerized client.",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && npm run build:client",
-    "build:server": "tsc -p tsconfig.json",
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "npm run build:optical:package && tsc -p tsconfig.json",
     "build:client": "cd client && GOCACHE=/tmp/dud-go-build-cache go build -trimpath -ldflags=\"-s -w -X main.version=${npm_package_version:-dev}\" -o ./bin/dud ./cmd/dud",
+    "build:client:optical": "./scripts/build-optical-client.sh",
     "dev:caddy": "caddy run --config ./Caddyfile --watch",
     "dev:caddy:trust": "caddy trust",
     "docker:build": "./scripts/docker-build.sh",
     "format": "oxfmt && npm run format:client && npm run format:vectors && npm run format:tools && npm run format:go",
     "format:check": "oxfmt --check && npm run format:client:check && npm run format:vectors:check && npm run format:tools:check && npm run format:go:check",
-    "format:client": "gofmt -w client/cmd/dud",
-    "format:client:check": "test -z \"$(gofmt -l client/cmd/dud)\"",
+    "format:client": "gofmt -w client",
+    "format:client:check": "test -z \"$(gofmt -l client)\"",
     "format:vectors": "gofmt -w tests/vectors/protocol-v2",
     "format:vectors:check": "test -z \"$(gofmt -l tests/vectors/protocol-v2)\"",
     "format:tools": "gofmt -w tools",
     "format:tools:check": "test -z \"$(gofmt -l tools)\"",
-    "format:go": "./scripts/go-tools.sh goimports && ./bin/goimports -w client/cmd/dud tests/vectors/protocol-v2 tools",
-    "format:go:check": "./scripts/go-tools.sh goimports && test -z \"$(./bin/goimports -l client/cmd/dud tests/vectors/protocol-v2 tools)\"",
+    "format:go": "./scripts/go-tools.sh goimports && ./bin/goimports -w client tests/vectors/protocol-v2 tools",
+    "format:go:check": "./scripts/go-tools.sh goimports && test -z \"$(./bin/goimports -l client tests/vectors/protocol-v2 tools)\"",
     "lint": "oxlint . && npm run lint:client && npm run lint:vectors && npm run lint:tools",
     "lint:client": "cd client && GOCACHE=/tmp/dud-go-build-cache go vet ./...",
     "lint:vectors": "cd tests/vectors/protocol-v2 && GOCACHE=/tmp/dud-go-build-cache go vet ./...",
     "lint:tools": "cd tools && GOCACHE=/tmp/dud-go-build-cache go vet ./...",
-    "serve:node": "npm run build && node dist/src/node-server.js",
-    "v2:admin": "npm run build:server && node dist/src/v2-admin.js",
+    "serve:node": "npm run build && node dist/server/src/node-server.js",
+    "v2:admin": "npm run build:server && node dist/server/src/v2-admin.js",
     "test:client": "cd client && GOCACHE=/tmp/dud-go-build-cache go test ./...",
     "test:client:race": "cd client && GOCACHE=/tmp/dud-go-build-cache go test -race ./...",
     "test:tools": "cd tools && GOCACHE=/tmp/dud-go-build-cache go test ./...",
@@ -39,6 +40,13 @@
     "check:pins": "node scripts/check-pins.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "check:vectors": "node scripts/check-vectors.mjs",
+    "build:optical": "npm run build:optical:receiver && npm run build:optical:sender",
+    "build:optical:package": "tsc -p server/optical-receiver/tsconfig.json && node server/optical-receiver/build.mjs --embed-module server/src/optical-pwa-assets.generated.ts",
+    "build:optical:receiver": "npm run build:optical:package",
+    "build:optical:sender": "cd client && GOCACHE=/tmp/dud-go-build-cache go build -o /tmp/dud-optical-sender ./optical-sender/cmd/optical-sender && GOCACHE=/tmp/dud-go-build-cache go build -tags nativewindow -o /tmp/dud-optical-sender-native ./optical-sender/cmd/optical-sender",
+    "check:optical:vectors": "npm run build:optical && node server/optical-receiver/check-vectors.mjs",
+    "test:optical": "npm run build:optical && npm run test:optical:corpus && npm run test:optical:sender && npm run test:optical:receiver",
+    "test:optical:fuzz": "npm run build:optical:receiver && cd client && GOCACHE=/tmp/dud-go-build-cache go test ./optical-sender -run=^$ -fuzz=FuzzParseFrame -fuzztime=10s",
     "tools:go": "./scripts/go-tools.sh",
     "analyze:ts": "node scripts/test-coverage.mjs server && fallow",
     "analyze:go": "./scripts/go-analyze.sh",
@@ -51,9 +59,13 @@
     "analyze:deadcode": "./scripts/go-analyze.sh deadcode",
     "analyze:vuln": "./scripts/go-analyze.sh govulncheck",
     "check:tidy": "./scripts/check-tidy.sh",
-    "check": "npm run format:check && npm run lint && npm run check:pins && npm run check:tidy && npm run check:docs && npm run check:vectors && npm run analyze:go:gate && npm run test:client && npm run test:client:race && npm run test:tools && npm test",
+    "check": "npm run format:check && npm run lint && npm run check:pins && npm run check:tidy && npm run check:docs && npm run check:vectors && npm run check:optical:vectors && npm run analyze:go:gate && npm run test:optical && npm run test:client && npm run test:client:race && npm run test:tools && npm test",
     "release:binaries": "./scripts/build-release-binaries.sh",
-    "test": "npm run build && node --import ./tests/clean-env.mjs --test tests/*.test.mjs"
+    "test": "npm run build && node --import ./tests/clean-env.mjs --test tests/*.test.mjs",
+    "test:optical:sender": "cd client && GOCACHE=/tmp/dud-go-build-cache go test ./optical-sender/...",
+    "test:optical:receiver": "node --test server/optical-receiver/test/*.test.mjs",
+    "release:binaries:desktop": "./scripts/build-release-binaries.sh \"$npm_package_version\" --desktop-host --out dist/release-desktop",
+    "test:optical:corpus": "node --test tests/optical-corpus.test.mjs"
   },
   "dependencies": {
     "@hpke/chacha20poly1305": "1.8.0",
@@ -71,6 +83,10 @@
     "wrangler": "^4.153.0"
   },
   "overrides": {
-    "sharp": "0.35.5"
+    "sharp": "0.35.5",
+    "test-exclude": {
+      "glob": "14.0.4",
+      "minimatch": "11.0.7"
+    }
   }
 }

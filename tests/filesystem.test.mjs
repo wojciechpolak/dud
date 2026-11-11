@@ -7,8 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { FilesystemBlobStore } from '../dist/src/filesystem.js';
-import { createDudService } from '../dist/src/service.js';
+import { FilesystemBlobStore } from '../dist/server/src/filesystem.js';
+import { createDudService } from '../dist/server/src/service.js';
 import { makeContext, MemoryBlobStore, textStream } from './helpers.mjs';
 
 const FILE_ID = '1'.repeat(32);

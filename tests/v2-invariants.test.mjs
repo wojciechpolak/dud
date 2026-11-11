@@ -8,9 +8,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { decodeCbor, encodeCbor } from '../dist/src/cbor.js';
-import { decodeV2InboxResponseFrame } from '../dist/src/v2-delivery-frame.js';
-import { sha256 } from '../dist/src/sha256.js';
+import { decodeCbor, encodeCbor } from '../dist/server/src/cbor.js';
+import { decodeV2InboxResponseFrame } from '../dist/server/src/v2-delivery-frame.js';
+import { sha256 } from '../dist/server/src/sha256.js';
 import {
   createDeliveryFixture,
   decodeBody,

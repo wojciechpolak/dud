@@ -4,6 +4,38 @@ package main
 
 import "fmt"
 
+func uploadPreflightScript(name string) string {
+	return fmt.Sprintf(`# Help and unavailable window renderers need no plaintext or interactive stdin.
+%s() {
+  dud_preflight_only=0
+  dud_optical=0
+  case "${1:-}" in
+    upload|send) ;;
+    optical) shift; [ "${1:-}" = send ] || return 0; dud_optical=1 ;;
+    *) return 0 ;;
+  esac
+  shift
+  dud_peer=0
+  case "${1:-}" in ''|-*) ;; *) dud_peer=1 ;; esac
+  dud_renderer=window
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --help|-h) dud_preflight_only=1; return 0 ;;
+      --) break ;;
+      --optical) dud_optical=1 ;;
+      --optical-renderer) shift; dud_renderer="${1:-}" ;;
+      --file|-m|--message|--name|--ttl|--recipient|-r|--recipient-file|-R|--url|--doh-url|--ech-mode|--id|--optical-profile|--optical-scale|--optical-quiet-zone) shift ;;
+    esac
+    [ "$#" -gt 0 ] && shift
+  done
+  if [ "$dud_peer" = 0 ] && [ "$dud_optical" = 1 ] && [ "$dud_renderer" != terminal ] && [ "$dud_renderer" != kitty ]; then
+    dud_preflight_only=1
+  fi
+  return 0
+}
+`, name)
+}
+
 func installScript(image string) string {
 	return fmt.Sprintf(`#!/bin/sh
 
@@ -169,6 +201,9 @@ dud_docker_run_args() {
   printf '%%s' "$args"
 }
 
+%s
+
+dud_upload_preflight "$@"
 dud_world="$(dud_world_dir_name)" || exit 1
 dud_root="${DUD_HOME:-$HOME/.dud}"
 dud_world_dir="$dud_root/$dud_world"
@@ -179,13 +214,24 @@ dud_run_args="$(dud_docker_run_args)" || exit 1
 dud_image="${DUD_IMAGE:-%s}"
 dud_image_arg="$(dud_shell_quote "$dud_image")"
 
-if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ]; } && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "$@"; then
+if [ "$dud_preflight_only" = 1 ]; then
+  dud_cli_args="$(dud_docker_cli_args "$@")"
+  eval "docker run --rm $dud_env_args $dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \"$PWD:/work\" $dud_image_arg $dud_cli_args" </dev/null
+  exit $?
+fi
+
+if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ] || { [ "$1" = optical ] && [ "${2:-}" = send ]; }; } && ! [ -t 0 ] && dud_stdout_is_tty && dud_host_has_tty && dud_upload_uses_stdin "$@"; then
   dud_stdin_file="$(mktemp /tmp/dud-wrapper-stdin-XXXXXX)"
   trap 'rm -f "$dud_stdin_file"' EXIT HUP INT TERM
   cat >"$dud_stdin_file"
   dud_command="$1"
   shift
-  set -- "$dud_command" --file /tmp/dud-stdin "$@"
+  if [ "$dud_command" = optical ]; then
+    shift
+    set -- optical send --file /tmp/dud-stdin "$@"
+  else
+    set -- "$dud_command" --file /tmp/dud-stdin "$@"
+  fi
   dud_cli_args="$(dud_docker_cli_args "$@")"
   dud_stdin_mount="$(dud_shell_quote -v) $(dud_shell_quote "$dud_stdin_file:/tmp/dud-stdin:ro")"
   dud_tty_input="$(dud_tty_input_path)"
@@ -233,7 +279,7 @@ if [ -t 0 ] && [ -t 1 ]; then
 fi
 
 eval "exec docker run --rm -i $dud_env_args $dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \"$PWD:/work\" $dud_image_arg $dud_cli_args"
-`, image)
+`, uploadPreflightScript("dud_upload_preflight"), image)
 }
 
 func shellInitScript(image string) string {
@@ -304,10 +350,19 @@ _dud_docker_cli_args() {
 _dud_complete_wordlist() {
   case "$1" in
     top)
-      printf '%%s\n' --tui --version version init doctor capabilities config migrate erase peer sync test upload download send receive git flush keygen install shell-init help -h --help
+      printf '%%s\n' --tui --version version init doctor capabilities config migrate erase peer sync test upload download send receive optical git flush keygen install shell-init help -h --help
       ;;
     config)
       printf '%%s\n' show validate
+      ;;
+    optical)
+      printf '%%s\n' send decrypt
+      ;;
+    optical-send)
+      printf '%%s\n' --file -m --passphrase --recipient -r --recipient-file -R --json --optical-profile --optical-renderer --optical-quiet-zone --optical-scale
+      ;;
+    optical-decrypt)
+      printf '%%s\n' --file --out --stdout --extract --out-dir --identity -i --json
       ;;
     erase)
       printf '%%s\n' pairings peer repo all
@@ -404,7 +459,7 @@ _dud_complete_parse() {
 
     if [ -z "$_dud_complete_command" ]; then
       case "$1" in
-        --tui|--version|version|init|doctor|capabilities|config|migrate|erase|peer|sync|test|upload|download|send|receive|git|flush|keygen|install|shell-init|help|-h|--help)
+        --tui|--version|version|init|doctor|capabilities|config|migrate|erase|peer|sync|test|upload|download|send|receive|optical|git|flush|keygen|install|shell-init|help|-h|--help)
           _dud_complete_command="$1"
           shift
           continue
@@ -415,6 +470,26 @@ _dud_complete_parse() {
     fi
 
     case "$_dud_complete_command" in
+      optical)
+        if [ -z "$_dud_complete_subcommand" ]; then
+          _dud_complete_subcommand="$1"
+        else
+          case "$1" in
+            --file|--out|--identity|-i|--recipient-file|-R)
+              _dud_complete_expect="$1"
+              _dud_complete_value_kind=file
+              ;;
+            --out-dir)
+              _dud_complete_expect="$1"
+              _dud_complete_value_kind=dir
+              ;;
+            -m|--recipient|-r|--optical-profile|--optical-renderer|--optical-quiet-zone|--optical-scale)
+              _dud_complete_expect="$1"
+              _dud_complete_value_kind=plain
+              ;;
+          esac
+        fi
+        ;;
       config)
         if [ -z "$_dud_complete_subcommand" ]; then
           _dud_complete_subcommand="$1"
@@ -555,6 +630,13 @@ _dud_complete_candidates() {
   fi
 
   case "$_dud_complete_command" in
+    optical)
+      if [ -z "$_dud_complete_subcommand" ]; then
+        _dud_complete_wordlist optical
+      else
+        _dud_complete_wordlist "optical-$_dud_complete_subcommand"
+      fi
+      ;;
     config)
       if [ -z "$_dud_complete_subcommand" ]; then
         _dud_complete_wordlist config
@@ -746,7 +828,10 @@ fi
 '
 fi
 
+%s
+
 dud() {
+  _dud_upload_preflight "$@"
   dud_env_args=""
   dud_world="$(_dud_world_dir_name)" || return 1
   dud_root="${DUD_HOME:-$HOME/.dud}"
@@ -840,7 +925,13 @@ dud() {
     dud_run_args="$dud_run_args $(_dud_shell_quote --network) $(_dud_shell_quote "$DUD_DOCKER_NETWORK")"
   fi
 
-  if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ]; } && ! [ -t 0 ] && _dud_stdout_is_tty && _dud_host_has_tty && _dud_upload_uses_stdin "$@"; then
+  if [ "$dud_preflight_only" = 1 ]; then
+    dud_cli_args="$(_dud_docker_cli_args "$@")"
+    eval "docker run --rm $dud_env_args $dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \"$PWD:/work\" $dud_image_arg $dud_cli_args" </dev/null
+    return $?
+  fi
+
+  if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ] || { [ "$1" = optical ] && [ "${2:-}" = send ]; }; } && ! [ -t 0 ] && _dud_stdout_is_tty && _dud_host_has_tty && _dud_upload_uses_stdin "$@"; then
     dud_stdin_file="$(mktemp /tmp/dud-wrapper-stdin-XXXXXX)"
     # Armed before the payload is written, so an interrupt while reading a slow
     # or large stdin cannot leave the caller's plaintext on the host.
@@ -848,7 +939,12 @@ dud() {
     cat >"$dud_stdin_file"
     dud_command="$1"
     shift
-    set -- "$dud_command" --file /tmp/dud-stdin "$@"
+    if [ "$dud_command" = optical ]; then
+      shift
+      set -- optical send --file /tmp/dud-stdin "$@"
+    else
+      set -- "$dud_command" --file /tmp/dud-stdin "$@"
+    fi
     dud_cli_args="$(_dud_docker_cli_args "$@")"
     dud_stdin_mount="$(_dud_shell_quote -v) $(_dud_shell_quote "$dud_stdin_file:/tmp/dud-stdin:ro")"
     dud_tty_input="$(_dud_tty_input_path)"
@@ -894,5 +990,5 @@ dud() {
 
   eval "docker run --rm -i $dud_env_args $dud_run_args --tmpfs /tmp:rw,noexec,nosuid,size=128m -v \"$PWD:/work\" $dud_image_arg $dud_cli_args"
 }
-`, image)
+`, uploadPreflightScript("_dud_upload_preflight"), image)
 }

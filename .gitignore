@@ -13,6 +13,7 @@ client/bin/
 dist/
 node_modules/
 tmp/
+server/optical-receiver/.work/
 wrangler.toml
 *.key
 *.recipient

@@ -12,25 +12,39 @@ import (
 )
 
 type downloadOptions struct {
-	id           string
-	out          string
-	outDir       string
-	outputStdout bool
-	baseURL      string
-	identity     string
-	extract      bool
-	dohURL       string
-	outputJSON   bool
+	id            string
+	out           string
+	outDir        string
+	outputStdout  bool
+	baseURL       string
+	identity      string
+	extract       bool
+	dohURL        string
+	outputJSON    bool
+	file          string
+	explicitFlags map[string]bool
 }
 
 func parseDownloadOptions(args []string, defaultBaseURL, defaultDOHURL string) (downloadOptions, error) {
 	opts := downloadOptions{
-		baseURL: defaultBaseURL,
-		dohURL:  defaultDOHURL,
+		baseURL:       defaultBaseURL,
+		dohURL:        defaultDOHURL,
+		explicitFlags: make(map[string]bool),
 	}
 
 	for len(args) > 0 {
+		repeated := opts.explicitFlags[args[0]]
+		opts.explicitFlags[args[0]] = true
 		switch args[0] {
+		case "--file":
+			if err := needValue(args, args[0]); err != nil {
+				return opts, err
+			}
+			if repeated {
+				return opts, fatalError("Repeated --file")
+			}
+			opts.file = args[1]
+			args = args[2:]
 		case "--id":
 			if err := needValue(args, args[0]); err != nil {
 				return opts, err
@@ -87,6 +101,9 @@ func parseDownloadOptions(args []string, defaultBaseURL, defaultDOHURL string) (
 }
 
 func validateDownloadOptions(opts downloadOptions) error {
+	if opts.explicitFlags["--file"] {
+		return fatalError("download does not accept local files; use dud optical decrypt")
+	}
 	if opts.id == "" {
 		return fatalError("download requires --id")
 	}

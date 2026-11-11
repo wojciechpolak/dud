@@ -1,6 +1,11 @@
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
-  "ignorePatterns": ["**/.work/**", "**/dist/**", "**/node_modules/**"],
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/node_modules/**",
+    "client/optical-sender/testdata/**/*.json",
+    "server/src/optical-pwa-assets.generated.ts"
+  ],
   "semi": true,
   "singleQuote": true,
   "proseWrap": "always",

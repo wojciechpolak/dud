@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "goVersion": "go1.27.4",
+  "targets": [
+    {
+      "os": "linux",
+      "arch": "amd64",
+      "headless": true,
+      "desktop": false
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "headless": true,
+      "desktop": false
+    },
+    {
+      "os": "darwin",
+      "arch": "amd64",
+      "headless": true,
+      "desktop": false
+    },
+    {
+      "os": "darwin",
+      "arch": "arm64",
+      "headless": true,
+      "desktop": true
+    },
+    {
+      "os": "windows",
+      "arch": "amd64",
+      "headless": true,
+      "desktop": false
+    },
+    {
+      "os": "windows",
+      "arch": "arm64",
+      "headless": true,
+      "desktop": false
+    }
+  ],
+  "desktopToolchain": {
+    "os": "darwin",
+    "arch": "arm64",
+    "xcode": "Xcode 26.5\nBuild version 17F42",
+    "sdkVersion": "26.5",
+    "compilerVersion": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
+  },
+  "defaultVariant": "headless"
+}

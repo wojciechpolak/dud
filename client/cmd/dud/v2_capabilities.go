@@ -424,6 +424,11 @@ func (a *app) fetchV2Capabilities(ctx context.Context, settings v2NetworkSetting
 }
 
 func (a *app) cmdCapabilities(args []string) error {
+	for _, argument := range args {
+		if argument == "--local" {
+			return a.cmdLocalCapabilities(args)
+		}
+	}
 	jsonOutput := false
 	overrides := v2NetworkOverrides{}
 	for len(args) != 0 {

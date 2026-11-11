@@ -22,17 +22,21 @@ import {
   decryptV2TokenSecret,
   deriveV2DailyCapabilityLookupId,
   encodeBase64Url,
-} from '../dist/src/v2-auth.js';
-import { decodeCbor, encodeCbor, requireCborMap } from '../dist/src/cbor.js';
-import { encryptV2AgeGrant } from '../dist/src/v2-age.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { MemoryV2Store } from '../dist/src/v2-memory.js';
+} from '../dist/server/src/v2-auth.js';
+import {
+  decodeCbor,
+  encodeCbor,
+  requireCborMap,
+} from '../dist/server/src/cbor.js';
+import { encryptV2AgeGrant } from '../dist/server/src/v2-age.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { MemoryV2Store } from '../dist/server/src/v2-memory.js';
 import {
   MemoryV2BodyStore,
   MemoryV2Repository,
-} from '../dist/src/v2-memory-repository.js';
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
-import { WorkerV2Store } from '../dist/src/v2-worker-store.js';
+} from '../dist/server/src/v2-memory-repository.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
+import { WorkerV2Store } from '../dist/server/src/v2-worker-store.js';
 import {
   V2_ADMIN_SECRET,
   V2_DEPLOYMENT_KEY,
@@ -603,7 +607,7 @@ test('a deployment holding the derived key authorizes clients holding the passph
   // verifying a proof costs it no key derivation. Clients are unchanged and know
   // nothing about it, which is exactly what has to be true.
   const { deriveV2EnrollmentKey, formatV2EnrollmentKey } =
-    await import('../dist/src/v2-auth.js');
+    await import('../dist/server/src/v2-auth.js');
   const { service } = await createV2TestService(new MemoryV2Store(), {
     enrollmentSecret: formatV2EnrollmentKey(
       await deriveV2EnrollmentKey(V2_ENROLLMENT_SECRET),

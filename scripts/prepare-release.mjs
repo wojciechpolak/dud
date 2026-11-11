@@ -19,7 +19,7 @@ const VERSION_TARGETS = [
     text: (version) => `  "version": "${version}"`,
   },
   {
-    file: 'src/config.ts',
+    file: 'server/src/config.ts',
     text: (version) => `  version: '${version}',`,
   },
   {

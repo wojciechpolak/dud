@@ -112,7 +112,7 @@ test('the description says what the name stands for', () => {
   // name `dud` for an unrelated tool, so the line has to answer "which dud".
   assert.match(
     renderFormula(RELEASE),
-    /^ {2}desc "Discreet upload \/ download over dead drops and paired peers"$/m,
+    /^ {2}desc "Discreet upload \/ download over dead drops, peers and optical"$/m,
   );
 });
 

@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { D1V2AuthorizationRepository } from '../dist/src/v2-d1-auth-repository.js';
+import { D1V2AuthorizationRepository } from '../dist/server/src/v2-d1-auth-repository.js';
 
 class MockD1 {
   batches = [];

@@ -52,6 +52,7 @@ function pinFixture(t, overrides = {}) {
       updatePolicy: 'reviewed like code',
     }),
     '.node-version': '24.15.0\n',
+    'scripts/release-targets.json': JSON.stringify({ goVersion: 'go1.24.1' }),
     'client/go.mod':
       'module example.test/client\n\ngo 1.24.0\n\ntoolchain go1.24.1\n',
     'tests/vectors/protocol-v2/go.mod':
@@ -194,6 +195,15 @@ test('the pin gate rejects missing or mismatched Go toolchains', (t) => {
         : /client\/go\.mod: has no toolchain directive/,
     );
   }
+});
+
+test('the pin gate rejects a release toolchain that differs from security scans', (t) => {
+  const root = pinFixture(t, {
+    'scripts/release-targets.json': JSON.stringify({ goVersion: 'go1.24.0' }),
+  });
+  const result = run(CHECK_PINS, root);
+  assert.equal(result.ok, false);
+  assert.match(result.output, /release Go toolchain go1\.24\.0 disagrees/);
 });
 
 test('the pin gate rejects a :latest reference', (t) => {

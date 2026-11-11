@@ -89,7 +89,7 @@ func TestPairingCommandsNeverEnterStagedStdinPath(t *testing.T) {
 		"install":    installScript("dud-client-test"),
 		"shell-init": shellInitScript("dud-client-test"),
 	} {
-		conditionStart := strings.Index(script, `if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ]; }`)
+		conditionStart := strings.Index(script, `if [ "$#" -gt 0 ] && { [ "$1" = "upload" ] || [ "$1" = "send" ] || { [ "$1" = optical ] && [ "${2:-}" = send ]; }; }`)
 		if conditionStart < 0 {
 			t.Fatalf("%s wrapper lost the explicit staged-stdin command allowlist", name)
 		}
@@ -98,9 +98,9 @@ func TestPairingCommandsNeverEnterStagedStdinPath(t *testing.T) {
 			t.Fatalf("%s wrapper staged-stdin condition is malformed", name)
 		}
 		condition := script[conditionStart : conditionStart+conditionEnd]
-		for _, forbidden := range []string{"peer", "init", "config", "doctor", "capabilities", "migrate", "erase"} {
+		for _, forbidden := range []string{"peer", "init", "config", "doctor", "capabilities", "migrate", "erase", "decrypt"} {
 			if strings.Contains(condition, forbidden) {
-				t.Fatalf("%s wrapper stages stdin for v2 command %q", name, forbidden)
+				t.Fatalf("%s wrapper stages stdin for non-sending command %q", name, forbidden)
 			}
 		}
 	}

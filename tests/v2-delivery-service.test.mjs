@@ -8,19 +8,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { deriveV2DailyCapabilityLookupId } from '../dist/src/v2-auth.js';
-import { decodeV2InboxResponseFrame } from '../dist/src/v2-delivery-frame.js';
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
+import { deriveV2DailyCapabilityLookupId } from '../dist/server/src/v2-auth.js';
+import { decodeV2InboxResponseFrame } from '../dist/server/src/v2-delivery-frame.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
 import {
   MemoryV2BodyStore,
   MemoryV2Repository,
-} from '../dist/src/v2-memory-repository.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { R2V2BodyStore } from '../dist/src/v2-r2.js';
+} from '../dist/server/src/v2-memory-repository.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { R2V2BodyStore } from '../dist/server/src/v2-r2.js';
 import {
   buildCapabilityReplacement,
   prepareReissueCapabilities,
-} from '../dist/src/v2-reissue-capabilities.js';
+} from '../dist/server/src/v2-reissue-capabilities.js';
 import { createMigratedLocalD1, LocalD1Database } from './d1-local.mjs';
 import {
   attachHandler,

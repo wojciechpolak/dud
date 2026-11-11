@@ -18,6 +18,7 @@ type tuiField struct {
 	key, label      string
 	input           textinput.Model
 	toggle, checked bool
+	choices         []string
 }
 
 type tuiForm struct {
@@ -32,6 +33,9 @@ type tuiForm struct {
 }
 
 func newTUIForm(action string, deadDrop bool) *tuiForm {
+	if strings.HasPrefix(action, "optical-") {
+		return newTUIOpticalForm(action)
+	}
 	if isTUISetupAction(action) {
 		return newTUISetupForm(action)
 	}
@@ -115,7 +119,7 @@ func (form *tuiForm) focusInput() tea.Cmd {
 	if form.hasMessage && form.focus == 0 {
 		return form.message.Focus()
 	}
-	if field := form.activeField(); field != nil && !field.toggle {
+	if field := form.activeField(); field != nil && !field.toggle && len(field.choices) == 0 {
 		return field.input.Focus()
 	}
 	return nil
@@ -174,6 +178,9 @@ func (form *tuiForm) addPath(path string) error {
 }
 
 func (form *tuiForm) arguments(target tuiItem, cfg config) ([]string, error) {
+	if strings.HasPrefix(form.action, "optical-") {
+		return form.opticalArguments()
+	}
 	if isTUISetupAction(form.action) {
 		return form.setupArguments()
 	}
@@ -282,6 +289,8 @@ func (form *tuiForm) View(width, height int) string {
 				mark = "[x] "
 			}
 			row(index+offset, mark+label)
+		} else if len(field.choices) > 0 {
+			row(index+offset, label+"\n‹ "+field.input.Value()+" ›")
 		} else {
 			input := field.input
 			input.SetWidth(max(1, width-2))

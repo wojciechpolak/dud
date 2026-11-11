@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="theme-color"
+      content="#eef4ff"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#111827"
+      media="(prefers-color-scheme: dark)"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>DUD optical transfer receiver</title>
+    <link rel="manifest" href="__DUD_OPTICAL_MANIFEST__" />
+    <link rel="icon" href="__DUD_OPTICAL_ICON__" type="image/svg+xml" />
+    <link rel="stylesheet" href="__DUD_OPTICAL_STYLE__" />
+  </head>
+  <body data-state="idle" data-build="__DUD_OPTICAL_BUILD__">
+    <main>
+      <header class="intro">
+        <h1 id="receiver-title">DUD: Receive an optical transfer</h1>
+        <p class="summary">
+          Scan the sender's QR display to receive encrypted bytes.
+        </p>
+      </header>
+
+      <section class="receiver" aria-labelledby="receiver-title">
+        <div class="instrument">
+          <div class="camera-field">
+            <video id="camera-view" playsinline muted hidden></video>
+            <div id="idle-field" class="idle-field">
+              <svg aria-hidden="true" viewBox="0 0 64 64">
+                <path
+                  d="M18 22h7l3-5h8l3 5h7a5 5 0 0 1 5 5v18a5 5 0 0 1-5 5H18a5 5 0 0 1-5-5V27a5 5 0 0 1 5-5Z"
+                />
+                <circle cx="32" cy="36" r="9" />
+              </svg>
+              <span>Camera is off</span>
+            </div>
+            <span class="corner top-left"></span>
+            <span class="corner top-right"></span>
+            <span class="corner bottom-left"></span>
+            <span class="corner bottom-right"></span>
+          </div>
+
+          <div class="readout" aria-live="polite">
+            <div>
+              <output id="status">Ready</output>
+              <output id="status-detail">Press Start camera to begin.</output>
+            </div>
+            <output id="progress-label" for="progress">0%</output>
+          </div>
+          <progress
+            id="progress"
+            max="100"
+            value="0"
+            aria-label="Transfer progress"
+          >
+            0%
+          </progress>
+          <div class="controls">
+            <div class="receipt-actions">
+              <button id="start" type="button">Start camera</button>
+              <button id="pause" class="secondary" type="button" disabled>
+                Pause
+              </button>
+              <button id="stop" class="secondary" type="button" disabled>
+                Stop / reset
+              </button>
+            </div>
+            <button id="save-capsule" type="button" disabled>
+              Save encrypted capsule
+            </button>
+          </div>
+        </div>
+
+        <details id="receiver-settings" class="panel">
+          <summary>Settings</summary>
+          <div class="settings-fields">
+            <label for="capture-profile">Receiver profile</label>
+            <select id="capture-profile">
+              <option value="tracked-60">60 FPS tracked four QR</option>
+              <option value="balanced">30 FPS full frame</option>
+            </select>
+            <label for="camera">Camera</label>
+            <select id="camera" disabled>
+              <option value="">Rear camera when available</option>
+            </select>
+          </div>
+        </details>
+
+        <details id="receiver-diagnostics" class="panel">
+          <summary>Diagnostics</summary>
+          <output id="statistics" class="statistics"
+            >No frames received.</output
+          >
+          <section
+            id="stripe-progress"
+            class="stripe-progress"
+            aria-labelledby="stripe-progress-title"
+            hidden
+          >
+            <h3 id="stripe-progress-title">Stripes</h3>
+            <div id="stripe-rows" class="stripe-rows" role="list"></div>
+          </section>
+          <section class="gap-diagnostics" aria-labelledby="gap-title">
+            <h3 id="gap-title">Progress gaps</h3>
+            <output id="progress-gaps" class="statistics"
+              >No progress gaps recorded.</output
+            >
+            <p>
+              The local report contains counters only. Save it after completing
+              or pausing receipt. Stop / reset clears the report.
+            </p>
+            <button
+              id="save-diagnostics"
+              class="secondary"
+              type="button"
+              disabled
+            >
+              Download diagnostics
+            </button>
+            <p>
+              Save a scan image while the camera is running to inspect an
+              unreadable QR display. The PNG contains the camera's visible
+              center square and is saved only when you press the button.
+            </p>
+            <button
+              id="save-scan-image"
+              class="secondary"
+              type="button"
+              disabled
+            >
+              Save scan image
+            </button>
+          </section>
+          <details id="recorded-replay" class="replay-tools">
+            <summary>Replay recorded QR frames</summary>
+            <p>
+              Choose PNG frames exported by the sender. Replay uses the same
+              worker and capsule decoder as the camera.
+            </p>
+            <label for="replay-files">Recorded PNG frames</label>
+            <input id="replay-files" type="file" accept="image/png" multiple />
+            <button id="replay" class="secondary" type="button" disabled>
+              Replay frames
+            </button>
+          </details>
+        </details>
+
+        <details id="receiver-help" class="panel">
+          <summary>Help</summary>
+          <ol>
+            <li>Open the optical sender on the trusted computer.</li>
+            <li>
+              Press Start camera and keep its QR display inside the guide.
+            </li>
+            <li>Keep both devices still until receipt completes.</li>
+            <li>
+              Press Save encrypted capsule and move the file to a trusted
+              computer.
+            </li>
+          </ol>
+          <p class="receipt-help">
+            Pause turns the camera off and keeps your progress. Resume camera
+            continues the same transfer. Stop / reset clears all received bytes,
+            including a completed capsule, so you can receive another transfer.
+            The 15-minute transfer limit includes pauses. Keep this page visible
+            to retain progress.
+          </p>
+          <p class="privacy-note">
+            Camera frames stay on this device. The receiver never asks for a
+            passphrase or opens the contents. A hosted build can still be
+            replaced by its host. Installation and updates require a trusted
+            HTTPS host; the displayed build identifier does not authenticate the
+            code running on this device.
+          </p>
+        </details>
+      </section>
+
+      <footer class="receiver-footer">
+        <p class="build-id">
+          DUD receiver build <code>__DUD_OPTICAL_BUILD__</code>
+          <a href="__DUD_OPTICAL_NOTICES__">Third-party notices</a>
+        </p>
+        <button id="receiver-update" class="secondary" type="button" disabled>
+          Check for receiver update
+        </button>
+        <output id="receiver-update-status" aria-live="polite"></output>
+      </footer>
+    </main>
+    <script type="module" src="__DUD_OPTICAL_APP__"></script>
+  </body>
+</html>

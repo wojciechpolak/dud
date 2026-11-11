@@ -11,7 +11,7 @@ to keep exchanging data with the same device, pair it instead and use
 Drop commands read no configuration file. They take their target from `--url`,
 `DUD_DROP_BASE_URL`, `DUD_BASE_URL`, or the compiled default, in that order.
 `DUD_PROFILE` does not apply to them. `DUD_BASE_URL` is the shared fallback when
-both modes use one origin.
+dead drop and peer transfers use one origin.
 
 ## 1. Confirm the secure transport path
 

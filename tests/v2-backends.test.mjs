@@ -7,18 +7,18 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { decodeCbor } from '../dist/src/cbor.js';
-import { DEFAULT_CONFIG } from '../dist/src/config.js';
-import { encodeBase64Url } from '../dist/src/v2-auth.js';
-import { FilesystemV2Store } from '../dist/src/v2-filesystem.js';
-import { MemoryV2Store } from '../dist/src/v2-memory.js';
+import { decodeCbor } from '../dist/server/src/cbor.js';
+import { DEFAULT_CONFIG } from '../dist/server/src/config.js';
+import { encodeBase64Url } from '../dist/server/src/v2-auth.js';
+import { FilesystemV2Store } from '../dist/server/src/v2-filesystem.js';
+import { MemoryV2Store } from '../dist/server/src/v2-memory.js';
 import {
   MemoryV2BodyStore,
   MemoryV2Repository,
-} from '../dist/src/v2-memory-repository.js';
-import { R2V2Store } from '../dist/src/v2-r2.js';
-import { createV2Service } from '../dist/src/v2-service.js';
-import { createWorker } from '../dist/src/index.js';
+} from '../dist/server/src/v2-memory-repository.js';
+import { R2V2Store } from '../dist/server/src/v2-r2.js';
+import { createV2Service } from '../dist/server/src/v2-service.js';
+import { createWorker } from '../dist/server/src/index.js';
 import { makeContext } from './helpers.mjs';
 import {
   MockR2Bucket,
@@ -284,7 +284,8 @@ test('granular V2 service does not expose legacy object or slot delivery routes'
 });
 
 test('a V2 service without a legacy store still answers every granular route', async () => {
-  const { WorkerV2Store } = await import('../dist/src/v2-worker-store.js');
+  const { WorkerV2Store } =
+    await import('../dist/server/src/v2-worker-store.js');
   const service = createV2Service({
     store: new WorkerV2Store(),
     repository: new MemoryV2Repository(),

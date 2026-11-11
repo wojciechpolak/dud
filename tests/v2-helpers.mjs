@@ -5,8 +5,8 @@ import {
   deriveV2EnrollmentKey,
   deriveV2EnrollmentProof,
   encodeBase64Url,
-} from '../dist/src/v2-auth.js';
-import { createDudService } from '../dist/src/service.js';
+} from '../dist/server/src/v2-auth.js';
+import { createDudService } from '../dist/server/src/service.js';
 import { MemoryBlobStore } from './helpers.mjs';
 
 export const V2_NOW_MS = 1_800_000_000_000;

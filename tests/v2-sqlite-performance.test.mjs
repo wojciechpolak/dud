@@ -8,8 +8,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
-import { applyV2SQLiteMigrations } from '../dist/src/v2-sqlite-schema.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
+import { applyV2SQLiteMigrations } from '../dist/server/src/v2-sqlite-schema.js';
 
 const bytes = (length, value) => new Uint8Array(length).fill(value);
 

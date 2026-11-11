@@ -80,6 +80,7 @@ type tuiConfirmMsg struct {
 }
 type tuiTerminalMsg struct {
 	command *exec.Cmd
+	run     func(io.Reader, io.Writer, io.Writer) error
 	answer  chan error
 	// Pending requests may be cancelled before age starts. A running age must
 	// exit before the worker removes the files it is encrypting or decrypting.
@@ -152,7 +153,13 @@ func startTUIOperationWithInput(parent *app, args []string, input tuiSetupInput)
 	}
 	go func() {
 		defer close(operation.done)
-		operation.events <- tuiDoneMsg{worker.run(args)}
+		var err error
+		if len(args) > 1 && args[0] == "optical" && (args[1] == "send" || args[1] == "decrypt") {
+			err = operation.runOptical(&worker, args)
+		} else {
+			err = worker.run(args)
+		}
+		operation.events <- tuiDoneMsg{err}
 	}()
 	return operation
 }
@@ -194,6 +201,10 @@ func (operation *tuiOperation) confirmCollection(entries []v2CollectionEntry) bo
 
 func (operation *tuiOperation) terminalCommand(command *exec.Cmd) error {
 	request := &tuiTerminalMsg{command: command, answer: make(chan error, 1)}
+	return operation.requestTerminal(request)
+}
+
+func (operation *tuiOperation) requestTerminal(request *tuiTerminalMsg) error {
 	select {
 	case operation.events <- request:
 	case <-operation.ctx.Done():
@@ -215,18 +226,37 @@ func (operation *tuiOperation) terminalCommand(command *exec.Cmd) error {
 type tuiTerminalCommand struct {
 	request *tuiTerminalMsg
 	output  io.Writer
+	input   io.Reader
+	stdout  io.Writer
+	stderr  io.Writer
 }
 
 func (command tuiTerminalCommand) Run() error {
 	if !command.request.state.CompareAndSwap(tuiTerminalPending, tuiTerminalRunning) {
 		return context.Canceled
 	}
+	if command.request.run != nil {
+		return command.request.run(command.input, command.stdout, command.stderr)
+	}
 	return command.request.command.Run()
 }
-func (command tuiTerminalCommand) SetStdin(reader io.Reader) { command.request.command.Stdin = reader }
-func (command tuiTerminalCommand) SetStdout(writer io.Writer) {
+func (command *tuiTerminalCommand) SetStdin(reader io.Reader) {
+	command.input = reader
+	if command.request.command != nil {
+		command.request.command.Stdin = reader
+	}
+}
+func (command *tuiTerminalCommand) SetStdout(writer io.Writer) {
+	command.stdout = writer
+	if command.request.command == nil {
+		return
+	}
 	command.request.command.Stdout = io.MultiWriter(writer, command.output)
 }
-func (command tuiTerminalCommand) SetStderr(writer io.Writer) {
+func (command *tuiTerminalCommand) SetStderr(writer io.Writer) {
+	command.stderr = writer
+	if command.request.command == nil {
+		return
+	}
 	command.request.command.Stderr = io.MultiWriter(writer, command.output)
 }

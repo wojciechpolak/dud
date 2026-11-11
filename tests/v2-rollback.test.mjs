@@ -8,12 +8,12 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import test from 'node:test';
 
-import { createDudService } from '../dist/src/service.js';
-import { FilesystemBlobStore } from '../dist/src/filesystem.js';
-import { FilesystemV2Store } from '../dist/src/v2-filesystem.js';
-import { FilesystemV2BodyStore } from '../dist/src/v2-filesystem-body-store.js';
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
-import { encodeBase64Url } from '../dist/src/v2-auth.js';
+import { createDudService } from '../dist/server/src/service.js';
+import { FilesystemBlobStore } from '../dist/server/src/filesystem.js';
+import { FilesystemV2Store } from '../dist/server/src/v2-filesystem.js';
+import { FilesystemV2BodyStore } from '../dist/server/src/v2-filesystem-body-store.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
+import { encodeBase64Url } from '../dist/server/src/v2-auth.js';
 import { makeContext, textStream } from './helpers.mjs';
 import {
   V2_ADMIN_SECRET,

@@ -52,4 +52,10 @@ jobs:
       - run:
           node scripts/check-security-waivers.mjs trivy
           "$RUNNER_TEMP/trivy.json"
+      - name: Install optical window build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev \
+            libxrandr-dev libxxf86vm-dev
       - run: npm run check

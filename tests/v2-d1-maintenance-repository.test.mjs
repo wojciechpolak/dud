@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { D1V2MaintenanceRepository } from '../dist/src/v2-d1-maintenance-repository.js';
+import { D1V2MaintenanceRepository } from '../dist/server/src/v2-d1-maintenance-repository.js';
 
 test('D1 maintenance lease uses one conditional prepared statement', async () => {
   let statement;

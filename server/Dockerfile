@@ -10,7 +10,8 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 
-COPY src ./src
+COPY server/src ./server/src
+COPY server/optical-receiver ./server/optical-receiver
 RUN npm run build:server
 
 FROM node:24-alpine@${NODE_DIGEST}
@@ -39,5 +40,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 USER dud
 
-ENTRYPOINT ["/sbin/tini", "--", "node", "dist/src/node-server.js"]
+ENTRYPOINT ["/sbin/tini", "--", "node", "dist/server/src/node-server.js"]
 CMD []

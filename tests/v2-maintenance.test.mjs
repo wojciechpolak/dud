@@ -9,16 +9,16 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { D1V2Repository } from '../dist/src/v2-d1-repository.js';
-import { D1V2PairingRepository } from '../dist/src/v2-d1-pairing-repository.js';
-import { FilesystemV2BodyStore } from '../dist/src/v2-filesystem-body-store.js';
+import { D1V2Repository } from '../dist/server/src/v2-d1-repository.js';
+import { D1V2PairingRepository } from '../dist/server/src/v2-d1-pairing-repository.js';
+import { FilesystemV2BodyStore } from '../dist/server/src/v2-filesystem-body-store.js';
 import {
   reconcileV2Storage,
   runV2MaintenancePass,
-} from '../dist/src/v2-maintenance.js';
-import { R2V2BodyStore } from '../dist/src/v2-r2.js';
-import { sha256 } from '../dist/src/sha256.js';
-import { SQLiteV2Repository } from '../dist/src/v2-sqlite-repository.js';
+} from '../dist/server/src/v2-maintenance.js';
+import { R2V2BodyStore } from '../dist/server/src/v2-r2.js';
+import { sha256 } from '../dist/server/src/sha256.js';
+import { SQLiteV2Repository } from '../dist/server/src/v2-sqlite-repository.js';
 import { readD1Migrations } from './d1-local.mjs';
 import { MockR2Bucket } from './v2-helpers.mjs';
 
@@ -558,7 +558,7 @@ test('reconciliation lives outside every request path', async () => {
   ];
   for (const name of requestModules) {
     const source = await readFile(
-      new URL(`../dist/src/${name}`, import.meta.url),
+      new URL(`../dist/server/src/${name}`, import.meta.url),
       'utf8',
     );
     assert.equal(
@@ -575,7 +575,7 @@ function runAdmin(args) {
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
-      ['dist/src/v2-admin.js', ...args],
+      ['dist/server/src/v2-admin.js', ...args],
       { env: { ...process.env } },
       (error, stdout, stderr) =>
         error

@@ -4,10 +4,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createDudService } from '../dist/src/service.js';
-import { decodeCbor } from '../dist/src/cbor.js';
-import { encodeBase64Url } from '../dist/src/v2-auth.js';
-import { MemoryV2Store } from '../dist/src/v2-memory.js';
+import { createDudService } from '../dist/server/src/service.js';
+import { decodeCbor } from '../dist/server/src/cbor.js';
+import { encodeBase64Url } from '../dist/server/src/v2-auth.js';
+import { MemoryV2Store } from '../dist/server/src/v2-memory.js';
 import { MemoryBlobStore, makeContext, textStream } from './helpers.mjs';
 import {
   V2_ADMIN_SECRET,
