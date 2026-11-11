@@ -34,6 +34,7 @@ exec docker run --rm \
   -e DUD_DOH_URL=https://doh.local.test/dns-query \
   -e DUD_ECH_MODE=off \
   -e DUD_CA_BUNDLE=/cert/root.crt \
+  -e DUD_GIT_TRUSTED_DIR=/work \
   -v "$DUD_DEMO_ROOT_CERT:/cert/root.crt:ro" \
   -v "$work_dir:/work" \
   "$DUD_DEMO_CLIENT_IMAGE" "$@"

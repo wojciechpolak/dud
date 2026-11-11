@@ -20,7 +20,7 @@ below goes deeper.
 - [`optical-distribution.md`](optical-distribution.md) explains client
   capabilities, installation and receiver hosting trust
 - [`client.md`](client.md) — client environment, configuration layers, profiles,
-  wrappers, JSON output, and the interactive menu
+  wrappers, JSON output, interactive CLI and full-screen TUI
 - [`git-sync-v2.md`](git-sync-v2.md) — Git checkpoints between paired devices
 
 ## Running a server
@@ -49,6 +49,8 @@ below goes deeper.
 
 - [`development.md`](development.md) — repository layout, commands, coverage,
   local HTTPS, integration testing, and the documentation rules
+- [`demos/README.md`](demos/README.md) — CLI and TUI recordings, coverage and
+  regeneration commands
 
 - [`optical-verification.md`](optical-verification.md): automated checks and the
   limits of desktop, worker, phone and terminal measurements

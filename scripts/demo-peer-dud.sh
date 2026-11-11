@@ -8,17 +8,17 @@ set -eu
 : "${DUD_DEMO_STATE:?record-peer-transfer-demo.sh did not define DUD_DEMO_STATE}"
 : "${DUD_DEMO_ROOT_CERT:?record-peer-transfer-demo.sh did not define DUD_DEMO_ROOT_CERT}"
 : "${DUD_DEMO_CLIENT_IMAGE:?record-peer-transfer-demo.sh did not define DUD_DEMO_CLIENT_IMAGE}"
-: "${DUD_DEMO_DESKTOP_WORK:?record-peer-transfer-demo.sh did not define DUD_DEMO_DESKTOP_WORK}"
-: "${DUD_DEMO_LAPTOP_WORK:?record-peer-transfer-demo.sh did not define DUD_DEMO_LAPTOP_WORK}"
+: "${DUD_DEMO_PEER_DESKTOP_WORK:?record-peer-transfer-demo.sh did not define DUD_DEMO_PEER_DESKTOP_WORK}"
+: "${DUD_DEMO_PEER_LAPTOP_WORK:?record-peer-transfer-demo.sh did not define DUD_DEMO_PEER_LAPTOP_WORK}"
 : "${DUD_DEMO_ENROLLMENT_SECRET:?record-peer-transfer-demo.sh did not define DUD_DEMO_ENROLLMENT_SECRET}"
 : "${DUD_PROFILE:?set DUD_PROFILE to desktop or laptop}"
 
 case "$DUD_PROFILE" in
   desktop|laptop)
     if [ "$DUD_PROFILE" = desktop ]; then
-      work_dir=$DUD_DEMO_DESKTOP_WORK
+      work_dir=$DUD_DEMO_PEER_DESKTOP_WORK
     else
-      work_dir=$DUD_DEMO_LAPTOP_WORK
+      work_dir=$DUD_DEMO_PEER_LAPTOP_WORK
     fi
     ;;
   *)
@@ -39,6 +39,7 @@ run_dud() {
     -e DUD_ECH_MODE=off \
     -e "DUD_PEER_SECRET=$DUD_DEMO_ENROLLMENT_SECRET" \
     -e DUD_CA_BUNDLE=/cert/root.crt \
+    -e DUD_GIT_TRUSTED_DIR=/work \
     -v "$DUD_DEMO_STATE:/state" \
     -v "$DUD_DEMO_ROOT_CERT:/cert/root.crt:ro" \
     -v "$work_dir:/work" \
@@ -86,6 +87,7 @@ spawn docker run --rm -it --network $env(DUD_DEMO_NETWORK) \
   -e DUD_ECH_MODE=off \
   -e DUD_PEER_SECRET=$env(DUD_DEMO_ENROLLMENT_SECRET) \
   -e DUD_CA_BUNDLE=/cert/root.crt \
+  -e DUD_GIT_TRUSTED_DIR=/work \
   -v $env(DUD_DEMO_STATE):/state \
   -v $env(DUD_DEMO_ROOT_CERT):/cert/root.crt:ro \
   -v $env(work_dir):/work \
@@ -111,6 +113,7 @@ exec docker run --rm \
   -e DUD_ECH_MODE=off \
   -e "DUD_PEER_SECRET=$DUD_DEMO_ENROLLMENT_SECRET" \
   -e DUD_CA_BUNDLE=/cert/root.crt \
+  -e DUD_GIT_TRUSTED_DIR=/work \
   -v "$DUD_DEMO_STATE:/state" \
   -v "$DUD_DEMO_ROOT_CERT:/cert/root.crt:ro" \
   -v "$work_dir:/work" \

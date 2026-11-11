@@ -38,6 +38,10 @@ WORK_ROOT="$FIXTURE_ROOT/work"
 DESKTOP_WORK="$WORK_ROOT/desktop"
 LAPTOP_WORK="$WORK_ROOT/laptop"
 SHARED_WORK="$WORK_ROOT/shared"
+DESKTOP_VOLUME="$RUN_ID-desktop-work"
+LAPTOP_VOLUME="$RUN_ID-laptop-work"
+PEER_DESKTOP_WORK="$DESKTOP_WORK"
+PEER_LAPTOP_WORK="$LAPTOP_WORK"
 OUTPUT=$(sed -n 's/^Output //p' "$REPO_ROOT/$TAPE" | head -n 1)
 case "$OUTPUT" in
   docs/assets/*.gif)
@@ -59,6 +63,7 @@ E2E_SUBNET=${DUD_DEMO_SUBNET:-11.253.0.0/24}
 cleanup() {
   docker rm -f "$INVITER" "$DOH" "$CADDY" "$SERVER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  docker volume rm "$DESKTOP_VOLUME" "$LAPTOP_VOLUME" >/dev/null 2>&1 || true
   rm -rf "$FIXTURE_ROOT"
 }
 trap cleanup EXIT HUP INT TERM
@@ -124,6 +129,19 @@ docker run --rm --entrypoint /bin/sh \
   'age-keygen -o /work/recipient.key && age-keygen -y /work/recipient.key > /work/recipient.txt'
 cp "$LAPTOP_WORK/recipient.txt" "$DESKTOP_WORK/recipient.txt"
 cp "$DESKTOP_WORK/briefing.txt" "$LAPTOP_WORK/recipient.txt" "$LAPTOP_WORK/recipient.key" "$SHARED_WORK/"
+
+# Git repositories use VM-local volumes so Docker Desktop's bind-mount
+# ownership mapping cannot change the owner seen by Git subprocesses.
+if [ "$TAPE" = docs/demos/peer-git-sync.tape ]; then
+  docker volume create "$DESKTOP_VOLUME" >/dev/null
+  docker volume create "$LAPTOP_VOLUME" >/dev/null
+  docker run --rm --user 0 --entrypoint /bin/sh \
+    -v "$WORK_ROOT:/source:ro" \
+    -v "$DESKTOP_VOLUME:/desktop" -v "$LAPTOP_VOLUME:/laptop" \
+    "$CLIENT_IMAGE" -c 'cp -a /source/desktop/. /desktop/ && cp -a /source/laptop/. /laptop/ && chown -R 1000:1000 /desktop /laptop'
+  PEER_DESKTOP_WORK="$DESKTOP_VOLUME"
+  PEER_LAPTOP_WORK="$LAPTOP_VOLUME"
+fi
 docker network create --subnet "$E2E_SUBNET" "$NETWORK" >/dev/null
 
 docker run -d --name "$SERVER" --network "$NETWORK" \
@@ -263,6 +281,8 @@ export DUD_DEMO_ROOT_CERT="$ROOT_CERT"
 export DUD_DEMO_CLIENT_IMAGE="$CLIENT_IMAGE"
 export DUD_DEMO_DESKTOP_WORK="$DESKTOP_WORK"
 export DUD_DEMO_LAPTOP_WORK="$LAPTOP_WORK"
+export DUD_DEMO_PEER_DESKTOP_WORK="$PEER_DESKTOP_WORK"
+export DUD_DEMO_PEER_LAPTOP_WORK="$PEER_LAPTOP_WORK"
 export DUD_DEMO_SHARED_WORK="$SHARED_WORK"
 export DUD_DEMO_DROP_SECRET="$DROP_SECRET"
 export DUD_DEMO_ENROLLMENT_SECRET="$ENROLLMENT_SECRET"

@@ -103,20 +103,20 @@ the installed binary stays reachable by its full path meanwhile. `type dud` says
 which of the two a shell will run.
 
 Running the binary directly requires `age`, `age-keygen`, and `git` on `PATH`.
-QR display also requires `qrencode`; `--no-qr` keeps pairing and dead drop
-uploads usable without it. Dead drop archive extraction requires `tar`.
-Homebrew's formula provides the four helpers it packages; an unpacked release
-asset does not. On Windows, install the helpers separately and use `--no-qr` if
-no native `qrencode.exe` is installed. The native binary also omits the
-generated wrappers' hardening (§6): the container boundary, the in-memory
-`/tmp`, and the pinned helper lookup. `DUD_AGE_BIN`, `DUD_AGE_KEYGEN_BIN`,
-`DUD_GIT_BIN`, and `DUD_QRENCODE_BIN` name each helper for a host that keeps
-them somewhere other than `PATH`. In exchange the paths are the host's own, so
-`/work` in every example below becomes an ordinary path and `~/.dud` is read in
-place. The native binaries accept identical commands, options, and environment
-variables on all three operating systems. The generated Docker shell wrappers in
-§6 target POSIX shells; use `dud.exe` directly from PowerShell or Command Prompt
-on Windows.
+HTTP upload and pairing QR codes also require `qrencode`; `--no-qr` keeps
+pairing and dead drop uploads usable without it. Optical QR encoding is built
+in. Dead drop archive extraction requires `tar`. Homebrew's formula provides the
+four helpers it packages; an unpacked release asset does not. On Windows,
+install the helpers separately and use `--no-qr` if no native `qrencode.exe` is
+installed. The native binary also omits the generated wrappers' hardening (§6):
+the container boundary, the in-memory `/tmp`, and the pinned helper lookup.
+`DUD_AGE_BIN`, `DUD_AGE_KEYGEN_BIN`, `DUD_GIT_BIN`, and `DUD_QRENCODE_BIN` name
+each helper for a host that keeps them somewhere other than `PATH`. In exchange
+the paths are the host's own, so `/work` in every example below becomes an
+ordinary path and `~/.dud` is read in place. The native binaries accept
+identical commands, options, and environment variables on all three operating
+systems. The generated Docker shell wrappers in §6 target POSIX shells; use
+`dud.exe` directly from PowerShell or Command Prompt on Windows.
 
 ## 1. Environment
 
@@ -557,13 +557,14 @@ or **optical**; receive chooses a peer or dead drop. The target list refreshes
 with `r` and when returning to that screen.
 
 For optical sending, choose **send → Optical → Send message / Send files**. The
-form defaults to **kitty** and **balanced**. Use Left/Right or Space to change
-the renderer or profile, Tab to move between fields, and Ctrl+S to start. An
-empty age-recipient field selects a passphrase prompt; otherwise the provided
-recipient encrypts the content. File selection supports Ctrl+O browsing and
-Ctrl+N adding another file or directory. The interface releases the terminal for
-the display probe, age prompt and QR presentation, then resumes after Q or Esc
-ends terminal display. Ctrl+C cancels and exits the interface.
+form defaults to **kitty** on Linux/macOS, **terminal** on other platforms, and
+the **balanced** profile. Use Left/Right or Space to change the renderer or
+profile, Tab to move between fields, and Ctrl+S to start. An empty age-recipient
+field selects a passphrase prompt; otherwise the provided recipient encrypts the
+content. File selection supports Ctrl+O browsing and Ctrl+N adding another file
+or directory. The interface releases the terminal for the display probe, age
+prompt and QR presentation, then resumes after Q or Esc ends terminal display.
+Ctrl+C cancels and exits the interface.
 
 To decrypt a capsule transferred from the phone, choose **tools → decrypt
 optical capsule**, select its saved file, destination and optional age identity.

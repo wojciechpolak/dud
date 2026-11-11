@@ -157,6 +157,20 @@ Operators enable only static receiver hosting with
 [complete workflow and errors](docs/optical.md), and
 [client packages and receiver hosting trust](docs/optical-distribution.md).
 
+The full-screen interface offers **send → Optical → Send message / Send files**
+and **tools → decrypt optical capsule**. It releases the terminal for native
+encryption prompts and QR display, then returns to the interface when display
+ends. Kitty displays pixel graphics in a compatible terminal; the ANSI
+`terminal` renderer requires a much larger character grid.
+
+The recording shows the TUI sending a 256 KiB file with native Kitty pixel
+graphics. Ending display leaves remote receipt unconfirmed.
+
+![A 6 FPS preview of the TUI sending a 256 KiB file through Kitty pixel graphics.](docs/assets/optical-kitty.gif)
+
+_GIF preview: 6 FPS to limit file size. The balanced sender profile targets 30
+FPS._
+
 ## Quick start
 
 A dead drop or peer setup is a client you install once and a server you deploy.
@@ -185,8 +199,9 @@ the exported `DUD_*` variables into the container.
 
 A host that would rather not run Docker can use the native binary a release
 publishes for Linux, macOS, and Windows on AMD64 and ARM64. It expects `age`,
-`age-keygen`, and `git` on `PATH`; QR display also needs `qrencode`. It keeps
-peer state in the user's `.dud` directory directly:
+`age-keygen`, and `git` on `PATH`; HTTP upload and pairing QR codes also need
+`qrencode`. Optical QR encoding is built in. It keeps peer state in the user's
+`.dud` directory directly:
 
 ```sh
 curl -fL -o dud https://github.com/wojciechpolak/dud/releases/latest/download/dud-linux-amd64
@@ -545,14 +560,20 @@ second deployment, need `DUD_PROFILE`. See
 [`docs/client.md`](docs/client.md#3-running-more-than-one-deployment).
 
 Running `dud` with no command in a terminal opens an interactive menu that
-covers dead drop and peer transfers. Use the optical CLI commands for
-screen-to-camera transfers.
+covers dead drop and peer transfers. Optical transfers are available through the
+CLI commands and the full-screen interface.
 
 Run `dud --tui` for a full-screen interface with the same main menu as the
 interactive CLI. Initialize a device, pair peers, transfer messages and files
-through peers or dead drops, and work with Git checkpoints and tools. The
+through peers or dead drops, display optical transfers, recover saved optical
+capsules, and work with Git checkpoints and tools. The
 [terminal interface guide](docs/client.md#full-screen-terminal-interface)
 describes navigation and cancellation.
+
+![The full-screen interface offers dead drop and optical forms, capsule recovery, peer management and Git actions.](docs/assets/tui-overview.gif)
+
+The [demo recording guide](docs/demos/README.md) lists the CLI and TUI tapes,
+their coverage and the commands to regenerate them.
 
 ### Resumable peer files
 
@@ -669,8 +690,12 @@ by `npm run check:pins`.
   receiving
 - [`docs/dead-drops-v1.md`](docs/dead-drops-v1.md): the drop commands and the
   `/v1` HTTP API
+- [`docs/optical.md`](docs/optical.md): optical sending, camera receipt and
+  native recovery
+- [`docs/optical-distribution.md`](docs/optical-distribution.md): client
+  packages, renderer capabilities and receiver hosting trust
 - [`docs/client.md`](docs/client.md): client environment, configuration layers,
-  profiles, and wrappers
+  profiles, wrappers, interactive CLI and full-screen TUI
 - [`docs/server-v2.md`](docs/server-v2.md): deployment, credentials, limits,
   administration, and logging
 - [`docs/migration-v1-v2.md`](docs/migration-v1-v2.md): moving a deployment from

@@ -75,7 +75,7 @@ Ctrl+B
 Right
 Type "dud peer accept desktop"
 Enter
-Wait+Screen /Peer "desktop" is active after mutual pairing-code authentication\./
+Wait+Screen /Paired with desktop\./
 Sleep 1s
 
 Hide
